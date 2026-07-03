@@ -482,8 +482,21 @@ fn parse_at_shorthand(rest: &str) -> Result<TableSpecifier, ParsingError> {
             crate::parser::TableRowSpecifier::Current,
         ));
     }
-    // Strip an optional surrounding `[ ... ]` to support `@[Col Name]`.
     let trimmed = rest.trim();
+    // `@[A]:[B]` (or `@A:B`) — a this-row column range.
+    let scan = scan_top_level(trimmed)?;
+    if let Some(colon_idx) = scan.top_level_colon {
+        let lhs_raw = trimmed[..colon_idx].trim();
+        let rhs_raw = trimmed[colon_idx + 1..].trim();
+        let lhs = strip_outer_brackets(lhs_raw).unwrap_or_else(|| lhs_raw.to_string());
+        let rhs = strip_outer_brackets(rhs_raw).unwrap_or_else(|| rhs_raw.to_string());
+        let range = build_column_range(lhs.trim(), rhs.trim())?;
+        return Ok(TableSpecifier::Combination(vec![
+            Box::new(TableSpecifier::SpecialItem(SpecialItem::ThisRow)),
+            Box::new(range),
+        ]));
+    }
+    // Strip an optional surrounding `[ ... ]` to support `@[Col Name]`.
     let column = if let Some(stripped) = strip_outer_brackets(trimmed) {
         stripped
     } else {

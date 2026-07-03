@@ -28,8 +28,7 @@ use crate::reference::{CellRef, Coord, RangeRef, SharedRangeRef, SharedRef, Shar
 use crate::traits::FunctionProvider;
 use formualizer_common::{ExcelError, ExcelErrorKind, LiteralValue};
 use formualizer_parse::parser::{
-    ASTNode, ASTNodeType, CollectPolicy, ExternalRefKind, ReferenceType, SpecialItem,
-    TableSpecifier,
+    ASTNode, ASTNodeType, CollectPolicy, ExternalRefKind, ReferenceType,
 };
 use rustc_hash::FxHashSet;
 use std::marker::PhantomData;
@@ -58,6 +57,7 @@ pub(crate) struct TableEntrySnapshot {
     pub(crate) name: String,
     pub(crate) range: RangeRef,
     pub(crate) header_row: bool,
+    pub(crate) totals_row: bool,
     pub(crate) headers: Vec<String>,
     pub(crate) vertex: VertexId,
 }
@@ -674,93 +674,56 @@ impl<'a> IngestPipeline<'a> {
         let ReferenceType::Table(tref) = reference else {
             return Ok(false);
         };
-        if !tref.name.is_empty() {
-            return Ok(false);
-        }
+        let spec = tref.specifier.as_ref();
+        let involves_this_row = crate::structured::involves_this_row(spec);
 
-        let col_name = match &tref.specifier {
-            Some(TableSpecifier::Combination(parts)) => {
-                let mut saw_this_row = false;
-                let mut col: Option<&str> = None;
-                for part in parts {
-                    match part.as_ref() {
-                        TableSpecifier::SpecialItem(SpecialItem::ThisRow) => saw_this_row = true,
-                        TableSpecifier::Column(c) => {
-                            if col.is_some() {
-                                return Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
-                                    "This-row structured reference with multiple columns is not supported".to_string(),
-                                ));
-                            }
-                            col = Some(c.as_str());
-                        }
-                        other => {
-                            return Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
-                                format!(
-                                    "Unsupported this-row structured reference component: {other}"
-                                ),
-                            ));
-                        }
-                    }
-                }
-                if !saw_this_row {
-                    return Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
-                        "Unnamed structured reference requires a this-row selector".to_string(),
-                    ));
-                }
-                col.ok_or_else(|| {
-                    ExcelError::new(ExcelErrorKind::NImpl).with_message(
-                        "This-row structured reference missing column selector".to_string(),
-                    )
-                })?
-            }
-            _ => {
+        let table = if tref.name.is_empty() {
+            // This-row shorthand ([@Col], [@], [[#This Row],[Col]]): the table
+            // is the one containing the evaluating cell.
+            if !involves_this_row {
                 return Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
                     "Unnamed structured reference form is not supported".to_string(),
                 ));
             }
+            let Some(table) = self.tables.find_containing_cell(cell) else {
+                return Err(ExcelError::new(ExcelErrorKind::Name).with_message(
+                    "This-row structured reference used outside a table".to_string(),
+                ));
+            };
+            if table.sheet_id() != cell.sheet_id {
+                return Err(ExcelError::new(ExcelErrorKind::Name).with_message(
+                    "This-row structured reference used outside a table".to_string(),
+                ));
+            }
+            table
+        } else {
+            // Named table: only this-row forms need the evaluating cell here;
+            // everything else resolves at evaluation time.
+            if !involves_this_row {
+                return Ok(false);
+            }
+            let Some(table) = self.tables.resolve(&tref.name) else {
+                // Dependency extraction reports the undefined table.
+                return Ok(false);
+            };
+            if table.sheet_id() != cell.sheet_id {
+                return Err(ExcelError::new(ExcelErrorKind::Value)
+                    .with_message("@ (This Row) used outside the table's rows".to_string()));
+            }
+            table
         };
 
-        let Some(table) = self.tables.find_containing_cell(cell) else {
-            return Err(ExcelError::new(ExcelErrorKind::Name)
-                .with_message("This-row structured reference used outside a table".to_string()));
-        };
-
-        let row0 = cell.coord.row();
-        let col0 = cell.coord.col();
-        let sr0 = table.range.start.coord.row();
-        let sc0 = table.range.start.coord.col();
-        let er0 = table.range.end.coord.row();
-        let ec0 = table.range.end.coord.col();
-
-        if table.sheet_id() != cell.sheet_id || row0 < sr0 || row0 > er0 || col0 < sc0 || col0 > ec0
-        {
-            return Err(ExcelError::new(ExcelErrorKind::Name)
-                .with_message("This-row structured reference used outside a table".to_string()));
-        }
-        if table.header_row && row0 == sr0 {
-            return Err(ExcelError::new(ExcelErrorKind::Ref).with_message(
-                "This-row structured references are not valid in the table header row".to_string(),
-            ));
-        }
-        let data_start = if table.header_row { sr0 + 1 } else { sr0 };
-        if row0 < data_start {
-            return Err(ExcelError::new(ExcelErrorKind::Ref).with_message(
-                "This-row structured references require a data/totals row context".to_string(),
-            ));
-        }
-
-        let Some(idx) = table.col_index(col_name) else {
-            return Err(ExcelError::new(ExcelErrorKind::Ref).with_message(format!(
-                "Unknown table column in this-row reference: {col_name}"
-            )));
-        };
-        *reference = ReferenceType::Cell {
+        let geom = crate::structured::TableGeometry {
             sheet: None,
-            row: row0 + 1,
-            col: sc0 + idx as u32 + 1,
-            row_abs: true,
-            col_abs: true,
+            start_row: table.range.start.coord.row() + 1,
+            start_col: table.range.start.coord.col() + 1,
+            end_row: table.range.end.coord.row() + 1,
+            end_col: table.range.end.coord.col() + 1,
+            header_row: table.header_row,
+            totals_row: table.totals_row,
+            columns: table.headers.clone(),
         };
+        *reference = crate::structured::plan_this_row_rewrite(&geom, spec, cell.coord.row() + 1)?;
         Ok(true)
     }
 }

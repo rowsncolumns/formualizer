@@ -22778,6 +22778,21 @@ where
         self.config.date_system
     }
     /// New: resolve a reference into a RangeView (Phase 2 API)
+    fn table_geometry(&self, name: &str) -> Option<crate::structured::TableGeometry> {
+        let t = self.graph.resolve_table_entry(name)?;
+        let sheet = self.graph.sheet_name(t.range.start.sheet_id);
+        Some(crate::structured::TableGeometry {
+            sheet: Some(sheet.to_string()),
+            start_row: t.range.start.coord.row() + 1,
+            start_col: t.range.start.coord.col() + 1,
+            end_row: t.range.end.coord.row() + 1,
+            end_col: t.range.end.coord.col() + 1,
+            header_row: t.header_row,
+            totals_row: t.totals_row,
+            columns: t.headers.clone(),
+        })
+    }
+
     fn resolve_range_view<'c>(
         &'c self,
         reference: &ReferenceType,
@@ -23189,19 +23204,36 @@ where
                                 select(er0, sc0, er0, ec0)
                             }
                         }
-                        Some(formualizer_parse::parser::TableSpecifier::SpecialItem(
-                            formualizer_parse::parser::SpecialItem::ThisRow,
-                        )) => {
-                            return Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
-                                "@ (This Row) requires table-aware context; not yet supported"
-                                    .to_string(),
-                            ));
-                        }
-                        Some(formualizer_parse::parser::TableSpecifier::Row(_))
-                        | Some(formualizer_parse::parser::TableSpecifier::Combination(_)) => {
-                            return Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
-                                "Complex structured references not yet supported".to_string(),
-                            ));
+                        Some(
+                            spec @ (formualizer_parse::parser::TableSpecifier::SpecialItem(
+                                formualizer_parse::parser::SpecialItem::ThisRow,
+                            )
+                            | formualizer_parse::parser::TableSpecifier::Row(_)
+                            | formualizer_parse::parser::TableSpecifier::Combination(_)),
+                        ) => {
+                            // Row selectors and combinations lower through the shared
+                            // structured-reference module. `#This Row` needs the
+                            // evaluating cell, which this context-free path does not
+                            // have — the interpreter intercepts those before reaching
+                            // here, and graph ingest rewrites them to concrete refs.
+                            let geom = crate::structured::TableGeometry {
+                                sheet: None,
+                                start_row: sr0 as u32 + 1,
+                                start_col: sc0 as u32 + 1,
+                                end_row: er0 as u32 + 1,
+                                end_col: ec0 as u32 + 1,
+                                header_row: has_headers,
+                                totals_row: has_totals,
+                                columns: table.headers.clone(),
+                            };
+                            let rect =
+                                crate::structured::lower_structured_rect(&geom, Some(spec), None)?;
+                            select(
+                                rect.start_row as usize - 1,
+                                rect.start_col as usize - 1,
+                                rect.end_row as usize - 1,
+                                rect.end_col as usize - 1,
+                            )
                         }
                     };
 

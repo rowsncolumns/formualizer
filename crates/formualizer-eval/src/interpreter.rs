@@ -210,11 +210,53 @@ impl<'a> Interpreter<'a> {
         self.local_env.lookup(name)
     }
 
+    /// Lower a structured table reference that needs row context or
+    /// combination handling into a concrete cell/range reference. Returns
+    /// `Ok(None)` when the reference is not such a form (or the context does
+    /// not track the table) — callers then resolve the original reference.
+    ///
+    /// Table geometry — and, for `#This Row`/`@`, the evaluating cell — is
+    /// only available here; the context's resolution path is cell-agnostic.
+    /// Graph ingest rewrites this-row forms in stored formulas before they
+    /// reach evaluation; this covers direct AST evaluation (conditional
+    /// formats, data validation, INDIRECT) and context-free combination forms.
+    fn lower_structured_table_ref(
+        &self,
+        reference: &ReferenceType,
+        current_sheet: &str,
+    ) -> Result<Option<ReferenceType>, ExcelError> {
+        let ReferenceType::Table(tref) = reference else {
+            return Ok(None);
+        };
+        if !crate::structured::needs_lowering(tref.specifier.as_ref()) {
+            return Ok(None);
+        }
+        let Some(geom) = self.context.table_geometry(&tref.name) else {
+            return Ok(None);
+        };
+        if crate::structured::involves_this_row(tref.specifier.as_ref())
+            && geom.sheet.as_deref() != Some(current_sheet)
+        {
+            return Err(ExcelError::new(ExcelErrorKind::Value)
+                .with_message("@ (This Row) used outside the table's rows".to_string()));
+        }
+        let current_row = self.current_cell.map(|c| c.coord.row() + 1);
+        let rect =
+            crate::structured::lower_structured_rect(&geom, tref.specifier.as_ref(), current_row)?;
+        Ok(Some(crate::structured::rect_to_reference(
+            &rect,
+            geom.sheet.clone(),
+        )))
+    }
+
     pub fn resolve_range_view<'c>(
         &'c self,
         reference: &ReferenceType,
         current_sheet: &str,
     ) -> Result<crate::engine::range_view::RangeView<'c>, ExcelError> {
+        if let Some(lowered) = self.lower_structured_table_ref(reference, current_sheet)? {
+            return self.context.resolve_range_view(&lowered, current_sheet);
+        }
         self.context.resolve_range_view(reference, current_sheet)
     }
 
@@ -858,9 +900,11 @@ impl<'a> Interpreter<'a> {
             ));
         }
 
+        let lowered = self.lower_structured_table_ref(reference, self.current_sheet)?;
+        let target = lowered.as_ref().unwrap_or(reference);
         let view = self
             .context
-            .resolve_range_view(reference, self.current_sheet)?
+            .resolve_range_view(target, self.current_sheet)?
             .with_cancel_token(self.context.cancellation_token());
         Ok(crate::traits::CalcValue::Range(view))
     }

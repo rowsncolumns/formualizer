@@ -1229,6 +1229,15 @@ pub trait EvaluationContext: Resolver + FunctionProvider + SourceResolver {
         Err(ExcelError::new(ExcelErrorKind::NImpl))
     }
 
+    /// Geometry of a defined workbook table, if this context tracks tables.
+    /// Enables the interpreter to lower structured references that need row
+    /// context or combination handling (`Table[[#This Row],[Col]]`,
+    /// `Table[@]`, `Table[[#Data],[Col]]`, row selectors) into concrete
+    /// ranges before resolution.
+    fn table_geometry(&self, _name: &str) -> Option<crate::structured::TableGeometry> {
+        None
+    }
+
     /// Resolve a single-cell reference as a scalar value.
     ///
     /// Default implementation preserves existing reference semantics by routing through

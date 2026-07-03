@@ -13,6 +13,7 @@ pub mod interpreter;
 pub mod locale;
 pub mod rng;
 pub mod stripes;
+pub mod structured;
 pub mod timezone;
 pub mod traits;
 
