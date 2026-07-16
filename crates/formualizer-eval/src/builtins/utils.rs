@@ -277,16 +277,20 @@ where
 /// element doesn't poison the rest of the array.
 ///
 /// Range arguments are materialized once up front (same policy as SUMPRODUCT)
-/// rather than fetched cell-by-cell, so large-sheet ranges stay O(n).
+/// rather than fetched cell-by-cell, so large-sheet ranges stay O(n). Elements
+/// are handed to the closure by reference — no per-element clones — so the
+/// closure runs ~400k times on a full-column range without allocator churn.
 pub fn lift_elementwise<'a, 'b, F>(
     args: &'a [crate::traits::ArgumentHandle<'a, 'b>],
     ctx: &dyn crate::traits::FunctionContext<'b>,
     mut f: F,
 ) -> Result<crate::traits::CalcValue<'b>, ExcelError>
 where
-    F: FnMut(&[LiteralValue]) -> LiteralValue,
+    F: FnMut(&[&LiteralValue]) -> LiteralValue,
 {
     use crate::broadcast::{broadcast_shape, project_index};
+
+    static EMPTY: LiteralValue = LiteralValue::Empty;
 
     enum Input {
         Scalar(LiteralValue),
@@ -301,14 +305,10 @@ where
             }
         }
 
-        fn get(&self, r: usize, c: usize) -> LiteralValue {
+        fn get(&self, r: usize, c: usize) -> &LiteralValue {
             match self {
-                Input::Grid(g) => g
-                    .get(r)
-                    .and_then(|row| row.get(c))
-                    .cloned()
-                    .unwrap_or(LiteralValue::Empty),
-                Input::Scalar(v) => v.clone(),
+                Input::Grid(g) => g.get(r).and_then(|row| row.get(c)).unwrap_or(&EMPTY),
+                Input::Scalar(v) => v,
             }
         }
     }
@@ -342,7 +342,7 @@ where
         }
     };
 
-    let mut elems: Vec<LiteralValue> = Vec::with_capacity(inputs.len());
+    let mut elems: Vec<&LiteralValue> = Vec::with_capacity(inputs.len());
     if target == (1, 1) {
         for input in &inputs {
             elems.push(input.get(0, 0));

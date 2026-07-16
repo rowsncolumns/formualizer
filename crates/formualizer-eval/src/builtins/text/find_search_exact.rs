@@ -5,21 +5,16 @@ use crate::traits::{ArgumentHandle, FunctionContext};
 use formualizer_common::{ExcelError, LiteralValue};
 use formualizer_macros::func_caps;
 
-fn text_of(v: &LiteralValue) -> Result<String, ExcelError> {
+fn text_of(v: &LiteralValue) -> Result<std::borrow::Cow<'_, str>, ExcelError> {
+    use std::borrow::Cow;
     Ok(match v {
-        LiteralValue::Text(s) => s.clone(),
-        LiteralValue::Empty => String::new(),
-        LiteralValue::Boolean(b) => {
-            if *b {
-                "TRUE".into()
-            } else {
-                "FALSE".into()
-            }
-        }
-        LiteralValue::Int(i) => i.to_string(),
-        LiteralValue::Number(f) => f.to_string(),
+        LiteralValue::Text(s) => Cow::Borrowed(s.as_str()),
+        LiteralValue::Empty => Cow::Borrowed(""),
+        LiteralValue::Boolean(b) => Cow::Borrowed(if *b { "TRUE" } else { "FALSE" }),
+        LiteralValue::Int(i) => Cow::Owned(i.to_string()),
+        LiteralValue::Number(f) => Cow::Owned(f.to_string()),
         LiteralValue::Error(e) => return Err(e.clone()),
-        other => other.to_string(),
+        other => Cow::Owned(other.to_string()),
     })
 }
 
@@ -126,7 +121,7 @@ impl Function for FindFn {
             )));
         }
         lift_elementwise(args, ctx, |elems| {
-            find_element(&elems[0], &elems[1], elems.get(2))
+            find_element(elems[0], elems[1], elems.get(2).copied())
         })
     }
 }
@@ -227,7 +222,7 @@ impl Function for SearchFn {
             )));
         }
         lift_elementwise(args, ctx, |elems| {
-            search_element(&elems[0], &elems[1], elems.get(2))
+            search_element(elems[0], elems[1], elems.get(2).copied())
         })
     }
 }
@@ -250,14 +245,17 @@ fn search_element(
         // SEARCH renvoie une position en CARACTERES et accepte les jokers * et ?.
         // On indexe par char (pas par octet) -> pas de panique "char boundary" sur
         // l'accentue, et ? compte bien pour UN caractere (sémantique Excel).
-        let hay_chars: Vec<char> = hay.chars().collect();
-        if start > hay_chars.len() {
-            return Ok(LiteralValue::Error(ExcelError::new_value()));
-        }
         let found = if needle.contains('*') || needle.contains('?') {
+            let hay_chars: Vec<char> = hay.chars().collect();
+            if start > hay_chars.len() {
+                return Ok(LiteralValue::Error(ExcelError::new_value()));
+            }
             let pat: Vec<char> = needle.chars().collect();
             char_wildcard_search(&pat, &hay_chars, start)
         } else {
+            if start > 0 && start > hay.chars().count() {
+                return Ok(LiteralValue::Error(ExcelError::new_value()));
+            }
             char_find(&hay, &needle, start)
         };
         Ok(match found {
@@ -269,26 +267,25 @@ fn search_element(
 }
 
 /// Recherche en espace CARACTERES (Excel) : position 0-based du 1er match de `needle`
-/// dans `hay` a partir du caractere `start`. Indexer par char (et non par octet) evite
-/// la panique "byte index is not a char boundary" sur les chaines accentuees.
+/// dans `hay` a partir du caractere `start`. Positions restent en CHARS (pas en octets)
+/// pour la parite Excel sur l'accentue, mais la recherche elle-meme passe par
+/// `str::find` (memchr) sans collecter de `Vec<char>` — le decompte de chars n'est
+/// paye que sur les prefixes concernes.
 fn char_find(hay: &str, needle: &str, start: usize) -> Option<usize> {
-    let hay_chars: Vec<char> = hay.chars().collect();
-    let needle_chars: Vec<char> = needle.chars().collect();
-    if needle_chars.is_empty() {
-        return Some(start.min(hay_chars.len()));
+    if needle.is_empty() {
+        return Some(start.min(hay.chars().count()));
     }
-    if needle_chars.len() > hay_chars.len() || start > hay_chars.len() {
-        return None;
-    }
-    let last = hay_chars.len() - needle_chars.len();
-    let mut i = start;
-    while i <= last {
-        if hay_chars[i..i + needle_chars.len()] == needle_chars[..] {
-            return Some(i);
+    let start_byte = if start == 0 {
+        0
+    } else {
+        match hay.char_indices().nth(start) {
+            Some((b, _)) => b,
+            None => return None,
         }
-        i += 1;
-    }
-    None
+    };
+    hay[start_byte..]
+        .find(needle)
+        .map(|b| start + hay[start_byte..start_byte + b].chars().count())
 }
 
 /// Recherche joker (* / ?) en espace CARACTERES. `?` = exactement un caractere.
@@ -380,7 +377,7 @@ impl Function for ExactFn {
             )));
         }
         lift_elementwise(args, ctx, |elems| {
-            match (text_of(&elems[0]), text_of(&elems[1])) {
+            match (text_of(elems[0]), text_of(elems[1])) {
                 (Ok(a), Ok(b)) => LiteralValue::Boolean(a == b),
                 (Err(e), _) | (_, Err(e)) => LiteralValue::Error(e),
             }
