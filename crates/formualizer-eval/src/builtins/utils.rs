@@ -267,6 +267,108 @@ where
     Ok(calc_from_literal(f(a, b)?, ctx.date_system()))
 }
 
+/// Lift a scalar function element-wise over range/array arguments with Excel
+/// broadcast semantics (the behavior Excel applies inside array context, e.g.
+/// `SUMPRODUCT(--ISNUMBER(SEARCH("x", A1:A10)))`).
+///
+/// Scalar arguments broadcast against range/array arguments. The per-element
+/// closure receives one `LiteralValue` per argument and returns the element
+/// result; element failures must be encoded as `LiteralValue::Error` so a bad
+/// element doesn't poison the rest of the array.
+///
+/// Range arguments are materialized once up front (same policy as SUMPRODUCT)
+/// rather than fetched cell-by-cell, so large-sheet ranges stay O(n).
+pub fn lift_elementwise<'a, 'b, F>(
+    args: &'a [crate::traits::ArgumentHandle<'a, 'b>],
+    ctx: &dyn crate::traits::FunctionContext<'b>,
+    mut f: F,
+) -> Result<crate::traits::CalcValue<'b>, ExcelError>
+where
+    F: FnMut(&[LiteralValue]) -> LiteralValue,
+{
+    use crate::broadcast::{broadcast_shape, project_index};
+
+    enum Input {
+        Scalar(LiteralValue),
+        Grid(Vec<Vec<LiteralValue>>),
+    }
+
+    impl Input {
+        fn shape(&self) -> (usize, usize) {
+            match self {
+                Input::Grid(g) => (g.len(), g.first().map(|r| r.len()).unwrap_or(0)),
+                Input::Scalar(_) => (1, 1),
+            }
+        }
+
+        fn get(&self, r: usize, c: usize) -> LiteralValue {
+            match self {
+                Input::Grid(g) => g
+                    .get(r)
+                    .and_then(|row| row.get(c))
+                    .cloned()
+                    .unwrap_or(LiteralValue::Empty),
+                Input::Scalar(v) => v.clone(),
+            }
+        }
+    }
+
+    let mut inputs: Vec<Input> = Vec::with_capacity(args.len());
+    let mut shapes: Vec<(usize, usize)> = Vec::with_capacity(args.len());
+    for ah in args {
+        let input = if let Ok(rv) = ah.range_view() {
+            let mut rows: Vec<Vec<LiteralValue>> = Vec::new();
+            rv.for_each_row(&mut |row| {
+                rows.push(row.to_vec());
+                Ok(())
+            })?;
+            Input::Grid(rows)
+        } else {
+            match ah.value()?.into_literal() {
+                LiteralValue::Array(arr) => Input::Grid(arr),
+                other => Input::Scalar(other),
+            }
+        };
+        shapes.push(input.shape());
+        inputs.push(input);
+    }
+
+    let target = match broadcast_shape(&shapes) {
+        Ok(t) => t,
+        Err(_) => {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new_value(),
+            )));
+        }
+    };
+
+    let mut elems: Vec<LiteralValue> = Vec::with_capacity(inputs.len());
+    if target == (1, 1) {
+        for input in &inputs {
+            elems.push(input.get(0, 0));
+        }
+        return Ok(crate::traits::CalcValue::Scalar(f(&elems)));
+    }
+
+    let mut out: Vec<Vec<LiteralValue>> = Vec::with_capacity(target.0);
+    for r in 0..target.0 {
+        let mut out_row: Vec<LiteralValue> = Vec::with_capacity(target.1);
+        for c in 0..target.1 {
+            elems.clear();
+            for (input, &shape) in inputs.iter().zip(shapes.iter()) {
+                let (rr, cc) = project_index((r, c), shape);
+                elems.push(input.get(rr, cc));
+            }
+            out_row.push(f(&elems));
+        }
+        out.push(out_row);
+    }
+    Ok(calc_from_literal(
+        LiteralValue::Array(out),
+        ctx.date_system(),
+    ))
+}
+
 /// Forward-looking: clamp numeric result to Excel-friendly finite values.
 /// Converts NaN to `#NUM!` and +/-Inf to large finite sentinels if desired.
 pub fn sanitize_numeric_result(n: f64) -> Result<f64, ExcelError> {

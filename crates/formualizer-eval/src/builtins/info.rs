@@ -96,26 +96,24 @@ impl Function for IsNumberFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.len() != 1 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
-        let v = args[0].value()?.into_literal();
-        let is_num = matches!(
-            v,
-            LiteralValue::Int(_)
-                | LiteralValue::Number(_)
-                | LiteralValue::Date(_)
-                | LiteralValue::DateTime(_)
-                | LiteralValue::Time(_)
-                | LiteralValue::Duration(_)
-        );
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-            is_num,
-        )))
+        super::utils::lift_elementwise(args, ctx, |elems| {
+            LiteralValue::Boolean(matches!(
+                elems[0],
+                LiteralValue::Int(_)
+                    | LiteralValue::Number(_)
+                    | LiteralValue::Date(_)
+                    | LiteralValue::DateTime(_)
+                    | LiteralValue::Time(_)
+                    | LiteralValue::Duration(_)
+            ))
+        })
     }
 }
 

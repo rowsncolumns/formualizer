@@ -1,27 +1,16 @@
-use super::super::utils::ARG_ANY_ONE;
+use super::super::utils::{ARG_ANY_ONE, lift_elementwise};
 use crate::args::ArgSchema;
 use crate::function::Function;
 use crate::traits::{ArgumentHandle, FunctionContext};
-use formualizer_common::{ExcelError, ExcelErrorKind, LiteralValue};
+use formualizer_common::{ExcelError, LiteralValue};
 use formualizer_macros::func_caps;
 
-fn scalar_like_value(arg: &ArgumentHandle<'_, '_>) -> Result<LiteralValue, ExcelError> {
-    Ok(match arg.value()? {
-        crate::traits::CalcValue::Scalar(v) => v,
-        crate::traits::CalcValue::Range(rv) => rv.get_cell(0, 0),
-        crate::traits::CalcValue::Callable(_) => LiteralValue::Error(
-            ExcelError::new(ExcelErrorKind::Calc).with_message("LAMBDA value must be invoked"),
-        ),
-    })
-}
-
-fn to_text<'a, 'b>(a: &ArgumentHandle<'a, 'b>) -> Result<String, ExcelError> {
-    let v = scalar_like_value(a)?;
+fn text_of(v: &LiteralValue) -> Result<String, ExcelError> {
     Ok(match v {
-        LiteralValue::Text(s) => s,
+        LiteralValue::Text(s) => s.clone(),
         LiteralValue::Empty => String::new(),
         LiteralValue::Boolean(b) => {
-            if b {
+            if *b {
                 "TRUE".into()
             } else {
                 "FALSE".into()
@@ -29,9 +18,41 @@ fn to_text<'a, 'b>(a: &ArgumentHandle<'a, 'b>) -> Result<String, ExcelError> {
         }
         LiteralValue::Int(i) => i.to_string(),
         LiteralValue::Number(f) => f.to_string(),
-        LiteralValue::Error(e) => return Err(e),
+        LiteralValue::Error(e) => return Err(e.clone()),
         other => other.to_string(),
     })
+}
+
+fn int_of(v: &LiteralValue) -> Result<i64, ExcelError> {
+    Ok(match v {
+        LiteralValue::Int(i) => *i,
+        LiteralValue::Number(f) => *f as i64,
+        LiteralValue::Text(t) => t.parse::<i64>().unwrap_or(0),
+        LiteralValue::Boolean(b) => {
+            if *b {
+                1
+            } else {
+                0
+            }
+        }
+        LiteralValue::Empty => 0,
+        LiteralValue::Error(e) => return Err(e.clone()),
+        other => other.to_string().parse::<i64>().unwrap_or(0),
+    })
+}
+
+fn start_of(start_num: Option<&LiteralValue>) -> Result<Option<usize>, ExcelError> {
+    match start_num {
+        Some(v) => {
+            let n = int_of(v)?;
+            if n < 1 {
+                Ok(None)
+            } else {
+                Ok(Some((n - 1) as usize))
+            }
+        }
+        None => Ok(Some(0)),
+    }
 }
 
 // FIND(find_text, within_text, [start_num]) - case sensitive
@@ -97,40 +118,42 @@ impl Function for FindFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.len() < 2 || args.len() > 3 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
-        let needle = to_text(&args[0])?;
-        let hay = to_text(&args[1])?;
-        let start = if args.len() == 3 {
-            let n = number_like(&args[2])?;
-            if n < 1 {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                    ExcelError::new_value(),
-                )));
-            }
-            (n - 1) as usize
-        } else {
-            0
+        lift_elementwise(args, ctx, |elems| {
+            find_element(&elems[0], &elems[1], elems.get(2))
+        })
+    }
+}
+
+/// Scalar FIND core, applied per element under array lifting.
+fn find_element(
+    needle: &LiteralValue,
+    hay: &LiteralValue,
+    start_num: Option<&LiteralValue>,
+) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let needle = text_of(needle)?;
+        let hay = text_of(hay)?;
+        let Some(start) = start_of(start_num)? else {
+            return Ok(LiteralValue::Error(ExcelError::new_value()));
         };
         if needle.is_empty() {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(1)));
+            return Ok(LiteralValue::Int(1));
         }
         // FIND renvoie une position en CARACTERES (pas en octets) : indexer par char
         // evite la panique "char boundary" sur l'accentue et donne la position Excel.
-        match char_find(&hay, &needle, start) {
-            Some(idx) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(
-                (idx + 1) as i64,
-            ))),
-            None => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_value(),
-            ))),
-        }
-    }
+        Ok(match char_find(&hay, &needle, start) {
+            Some(idx) => LiteralValue::Int((idx + 1) as i64),
+            None => LiteralValue::Error(ExcelError::new_value()),
+        })
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 // SEARCH(find_text, within_text, [start_num]) - case insensitive + simple wildcard * ?
@@ -196,38 +219,40 @@ impl Function for SearchFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.len() < 2 || args.len() > 3 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
-        let needle = to_text(&args[0])?.to_ascii_lowercase();
-        let hay_raw = to_text(&args[1])?;
-        let hay = hay_raw.to_ascii_lowercase();
-        let start = if args.len() == 3 {
-            let n = number_like(&args[2])?;
-            if n < 1 {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                    ExcelError::new_value(),
-                )));
-            }
-            (n - 1) as usize
-        } else {
-            0
+        lift_elementwise(args, ctx, |elems| {
+            search_element(&elems[0], &elems[1], elems.get(2))
+        })
+    }
+}
+
+/// Scalar SEARCH core, applied per element under array lifting.
+fn search_element(
+    needle: &LiteralValue,
+    hay: &LiteralValue,
+    start_num: Option<&LiteralValue>,
+) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let needle = text_of(needle)?.to_ascii_lowercase();
+        let hay = text_of(hay)?.to_ascii_lowercase();
+        let Some(start) = start_of(start_num)? else {
+            return Ok(LiteralValue::Error(ExcelError::new_value()));
         };
         if needle.is_empty() {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(1)));
+            return Ok(LiteralValue::Int(1));
         }
         // SEARCH renvoie une position en CARACTERES et accepte les jokers * et ?.
         // On indexe par char (pas par octet) -> pas de panique "char boundary" sur
         // l'accentue, et ? compte bien pour UN caractere (sémantique Excel).
         let hay_chars: Vec<char> = hay.chars().collect();
         if start > hay_chars.len() {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_value(),
-            )));
+            return Ok(LiteralValue::Error(ExcelError::new_value()));
         }
         let found = if needle.contains('*') || needle.contains('?') {
             let pat: Vec<char> = needle.chars().collect();
@@ -235,15 +260,12 @@ impl Function for SearchFn {
         } else {
             char_find(&hay, &needle, start)
         };
-        match found {
-            Some(idx) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(
-                (idx + 1) as i64,
-            ))),
-            None => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::from_error_string("#VALUE!"),
-            ))),
-        }
-    }
+        Ok(match found {
+            Some(idx) => LiteralValue::Int((idx + 1) as i64),
+            None => LiteralValue::Error(ExcelError::from_error_string("#VALUE!")),
+        })
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 /// Recherche en espace CARACTERES (Excel) : position 0-based du 1er match de `needle`
@@ -350,33 +372,20 @@ impl Function for ExactFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let a = to_text(&args[0])?;
-        let b = to_text(&args[1])?;
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-            a == b,
-        )))
-    }
-}
-
-fn number_like<'a, 'b>(a: &ArgumentHandle<'a, 'b>) -> Result<i64, ExcelError> {
-    let v = scalar_like_value(a)?;
-    Ok(match v {
-        LiteralValue::Int(i) => i,
-        LiteralValue::Number(f) => f as i64,
-        LiteralValue::Text(t) => t.parse::<i64>().unwrap_or(0),
-        LiteralValue::Boolean(b) => {
-            if b {
-                1
-            } else {
-                0
-            }
+        if args.len() != 2 {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new_value(),
+            )));
         }
-        LiteralValue::Empty => 0,
-        LiteralValue::Error(e) => return Err(e),
-        other => other.to_string().parse::<i64>().unwrap_or(0),
-    })
+        lift_elementwise(args, ctx, |elems| {
+            match (text_of(&elems[0]), text_of(&elems[1])) {
+                (Ok(a), Ok(b)) => LiteralValue::Boolean(a == b),
+                (Err(e), _) | (_, Err(e)) => LiteralValue::Error(e),
+            }
+        })
+    }
 }
 
 pub fn register_builtins() {

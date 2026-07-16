@@ -171,3 +171,4 @@ mod scc_iterate;
 mod scc_runtime_cycles;
 mod scc_runtime_property;
 mod short_circuit_dispatch;
+mod zz_sumproduct_search_repro;
