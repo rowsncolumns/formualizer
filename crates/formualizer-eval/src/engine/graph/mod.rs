@@ -2709,6 +2709,55 @@ impl DependencyGraph {
         self.deferred_dirty_depth > 0
     }
 
+    /// Read-only transitive-dependents closure of the given cells: every vertex a value change
+    /// at any of these coordinates would reach — the same traversal as [`Self::mark_dirty_many`]
+    /// (direct edges, named-range subscribers, range/interval subscriptions) with no dirty-state
+    /// mutation. Returns the cell-addressable members of the closure (value/formula vertices);
+    /// named-range vertices are traversed through but not reported. The roots themselves are not
+    /// included unless reachable as another root's dependent. Cells with no vertex (never
+    /// referenced, never materialized) have no dependents and contribute nothing.
+    pub fn dependents_closure(&self, cells: &[CellRef]) -> Vec<CellRef> {
+        let mut to_visit: Vec<VertexId> = Vec::new();
+        for cell in cells {
+            let Some(&vertex_id) = self.cell_to_vertex.get(cell) else {
+                continue;
+            };
+            if let Some(dependents) = self.dependents_slice(vertex_id) {
+                to_visit.extend(dependents.iter().copied());
+            } else {
+                to_visit.extend(self.get_dependents(vertex_id));
+            }
+            if let Some(name_set) = self.cell_to_name_dependents.get(&vertex_id) {
+                to_visit.extend(name_set.iter().copied());
+            }
+            to_visit.extend(self.collect_range_dependents_for_vertex(vertex_id));
+        }
+        let mut visited: FxHashSet<VertexId> = FxHashSet::default();
+        let mut out = Vec::new();
+        while let Some(id) = to_visit.pop() {
+            if !visited.insert(id) || !self.vertex_exists(id) {
+                continue;
+            }
+            if matches!(
+                self.store.kind(id),
+                VertexKind::Cell | VertexKind::FormulaScalar | VertexKind::FormulaArray
+            ) {
+                let coord = self.store.coord(id);
+                out.push(CellRef::new(
+                    self.store.sheet_id(id),
+                    Coord::from_excel(coord.row() + 1, coord.col() + 1, true, true),
+                ));
+            }
+            if let Some(dependents) = self.dependents_slice(id) {
+                to_visit.extend(dependents.iter().copied());
+            } else {
+                to_visit.extend(self.get_dependents(id));
+            }
+            to_visit.extend(self.collect_range_dependents_for_vertex(id));
+        }
+        out
+    }
+
     /// Get all vertices that need evaluation
     pub fn get_evaluation_vertices(&self) -> Vec<VertexId> {
         let mut combined = FxHashSet::default();

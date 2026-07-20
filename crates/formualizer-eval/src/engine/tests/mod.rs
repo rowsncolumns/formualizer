@@ -6,6 +6,7 @@ mod changelog_replay;
 mod clock_snapshot;
 mod common;
 mod cross_sheet_named_range_first_cell;
+mod dependents_closure;
 mod cycle_detection;
 mod deferred_dirty;
 mod demand_driven;

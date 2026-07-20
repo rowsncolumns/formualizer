@@ -16753,6 +16753,36 @@ where
         }
     }
 
+    /// Read-only transitive dependents of the given 1-based cells, as
+    /// `(sheet_name, row, col)`: every cell whose computed value derives —
+    /// directly or transitively, including through range and named-range
+    /// references — from any of the inputs. No dirty-state mutation. Hosts
+    /// use this to know which cells an asynchronous input's in-flight state
+    /// shadows. Unknown sheets and unmaterialized cells contribute nothing.
+    pub fn cell_dependents_closure(&self, cells: &[(String, u32, u32)]) -> Vec<(String, u32, u32)> {
+        let refs: Vec<CellRef> = cells
+            .iter()
+            .filter_map(|(sheet, row, col)| {
+                let sheet_id = self.graph.sheet_id(sheet)?;
+                Some(CellRef::new(
+                    sheet_id,
+                    Coord::from_excel(*row, *col, true, true),
+                ))
+            })
+            .collect();
+        self.graph
+            .dependents_closure(&refs)
+            .into_iter()
+            .map(|cell| {
+                (
+                    self.graph.sheet_name(cell.sheet_id).to_string(),
+                    cell.coord.row() + 1,
+                    cell.coord.col() + 1,
+                )
+            })
+            .collect()
+    }
+
     /// Begin batch operations - defer CSR rebuilds for better performance
     pub fn begin_batch(&mut self) {
         self.graph.begin_batch();
