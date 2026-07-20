@@ -310,6 +310,14 @@ pub struct DependencyGraph {
     spill_cell_to_anchor: std::collections::HashMap<CellRef, VertexId, CoordBuildHasher>,
     spill_cells_by_sheet: FxHashMap<SheetId, std::collections::BTreeMap<(u32, u32), VertexId>>,
 
+    /// When true (set by evaluation passes), spill commits/clears record the
+    /// formula vertices they dirty into `respill_redirtied` so the evaluation
+    /// loop can re-schedule them after its end-of-pass `clear_dirty_flags`
+    /// (which would otherwise erase those marks and strand readers of spilled
+    /// cells on stale values).
+    respill_capture_active: bool,
+    respill_redirtied: FxHashSet<VertexId>,
+
     /// Request-scoped admission budgets used by graph-owned mutation paths.
     admission_budget_override: Option<crate::engine::EvaluationBudgets>,
 
@@ -1235,6 +1243,8 @@ impl DependencyGraph {
             spill_anchor_to_cells: FxHashMap::default(),
             spill_cell_to_anchor: std::collections::HashMap::with_hasher(CoordBuildHasher),
             spill_cells_by_sheet: FxHashMap::default(),
+            respill_capture_active: false,
+            respill_redirtied: FxHashSet::default(),
             admission_budget_override: None,
             first_load_assume_new: false,
             ensure_touched_sheets: FxHashSet::default(),
@@ -3549,8 +3559,19 @@ impl DependencyGraph {
             if op.sheet == anchor_sheet_name && op.row == anchor_row && op.col == anchor_col {
                 self.update_vertex_value(anchor, op.new_value.clone());
             } else {
-                let _ =
+                let summary =
                     self.set_cell_value(&op.sheet, op.row + 1, op.col + 1, op.new_value.clone());
+                // Readers of spilled cells reach the spill only through the
+                // child cell's vertex (no graph edge ties them to the anchor),
+                // so the dirty marks from this write are the ONLY thing that
+                // re-schedules them. Capture the affected formulas for the
+                // evaluation loop, which clears in-pass dirty flags wholesale.
+                if self.respill_capture_active
+                    && old_values[applied].1.value != op.new_value
+                    && let Ok(summary) = summary
+                {
+                    self.capture_respill_redirtied(&summary.affected_vertices);
+                }
             }
         }
 
@@ -3581,6 +3602,45 @@ impl DependencyGraph {
         }
         self.spill_anchor_to_cells.insert(anchor, target_cells);
         Ok(())
+    }
+
+    /// Begin capturing the formula vertices that spill commits/clears mark
+    /// dirty. Evaluation passes use this to re-schedule readers of spilled
+    /// cells whose dirty marks the end-of-pass `clear_dirty_flags` erases.
+    pub(crate) fn begin_respill_capture(&mut self) {
+        self.respill_capture_active = true;
+        self.respill_redirtied.clear();
+    }
+
+    /// Stop capturing spill-driven redirty marks (see `begin_respill_capture`).
+    pub(crate) fn end_respill_capture(&mut self) {
+        self.respill_capture_active = false;
+        self.respill_redirtied.clear();
+    }
+
+    /// Drain the formula vertices dirtied by spill commits/clears since the
+    /// last drain. Sorted for deterministic scheduling.
+    pub(crate) fn take_respill_redirtied(&mut self) -> Vec<VertexId> {
+        if self.respill_redirtied.is_empty() {
+            return Vec::new();
+        }
+        let mut out: Vec<VertexId> = self.respill_redirtied.drain().collect();
+        out.sort_unstable();
+        out
+    }
+
+    fn capture_respill_redirtied(&mut self, affected: &[VertexId]) {
+        for &vid in affected {
+            if matches!(
+                self.store.kind(vid),
+                VertexKind::FormulaScalar
+                    | VertexKind::FormulaArray
+                    | VertexKind::NamedScalar
+                    | VertexKind::NamedArray
+            ) {
+                self.respill_redirtied.insert(vid);
+            }
+        }
     }
 
     pub(crate) fn spill_cells_for_anchor(&self, anchor: VertexId) -> Option<&[CellRef]> {
@@ -3688,7 +3748,10 @@ impl DependencyGraph {
 
         // Single dirty propagation for all changed spill children.
         if !changed_vertices.is_empty() {
-            self.mark_dirty_many_value_cells(&changed_vertices);
+            let affected = self.mark_dirty_many_value_cells(&changed_vertices);
+            if self.respill_capture_active {
+                self.capture_respill_redirtied(&affected);
+            }
         }
 
         cells

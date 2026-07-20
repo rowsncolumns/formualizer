@@ -632,6 +632,14 @@ where
 // is faster while preserving the same visibility semantics.
 const COMPUTED_WRITE_COALESCING_MIN_LAYER_WIDTH: usize = 8;
 
+// A spill commit dirties the readers of its child cells (their only link to the
+// spill is the child cell's vertex — no graph edge ties them to the anchor), so
+// evaluation loops must run extra passes until those spill-driven redirty marks
+// stop appearing. Value-diff gating in the commit makes stable spills converge
+// in one extra pass; this cap bounds pathological anchor↔anchor projection
+// cycles, whose remaining dirty marks simply carry over to the next recalc.
+const MAX_RESPILL_PASSES: usize = 64;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ComputedWrite {
     Cell {
@@ -17834,6 +17842,8 @@ where
         let mut cycle_errors = 0usize;
         let mut replans = 0usize;
         const MAX_REPLAN: usize = 5;
+        let mut respill_passes = 0usize;
+        self.graph.begin_respill_capture();
         loop {
             let (precedents_to_eval, old_vdeps) = self.build_demand_subgraph(&root_vertices);
             if precedents_to_eval.is_empty() {
@@ -17875,12 +17885,24 @@ where
             }
             let changed = self.changed_virtual_dep_vertices(&precedents_to_eval, &old_vdeps);
             self.resource_checkpoint(0)?;
+            let respill_redirtied = self.graph.take_respill_redirtied();
             self.graph.clear_dirty_flags(&precedents_to_eval);
             for vertex in &changed {
                 self.graph.set_dirty(*vertex, true);
             }
+            let respill_continue =
+                !respill_redirtied.is_empty() && respill_passes < MAX_RESPILL_PASSES;
+            if respill_continue {
+                respill_passes += 1;
+                for vertex in &respill_redirtied {
+                    self.graph.set_dirty(*vertex, true);
+                }
+            }
             if changed.is_empty() {
-                break;
+                if !respill_continue {
+                    break;
+                }
+                continue;
             }
             if replans >= MAX_REPLAN {
                 return Err(self.replan_exhausted_error(
@@ -20114,6 +20136,8 @@ where
         let mut cycle_errors = 0;
         let mut replan_iterations = 0;
         const MAX_REPLAN: usize = 5;
+        let mut respill_passes = 0usize;
+        self.graph.begin_respill_capture();
         let mut telemetry = self
             .config
             .enable_virtual_dep_telemetry
@@ -20146,16 +20170,28 @@ where
             }
 
             self.resource_checkpoint(0)?;
+            let respill_redirtied = self.graph.take_respill_redirtied();
             self.graph.clear_dirty_flags(&to_evaluate);
             for v in &changed_vertices {
                 self.graph.set_dirty(*v, true);
             }
+            let respill_continue =
+                !respill_redirtied.is_empty() && respill_passes < MAX_RESPILL_PASSES;
+            if respill_continue {
+                respill_passes += 1;
+                for v in &respill_redirtied {
+                    self.graph.set_dirty(*v, true);
+                }
+            }
 
             if changed_vertices.is_empty() {
-                if let Some(t) = telemetry.as_mut() {
-                    t.bailout_reason = Some("converged");
+                if !respill_continue {
+                    if let Some(t) = telemetry.as_mut() {
+                        t.bailout_reason = Some("converged");
+                    }
+                    break;
                 }
-                break;
+                continue;
             }
             if replan_iterations >= MAX_REPLAN {
                 if let Some(mut t) = telemetry.take() {
@@ -20237,6 +20273,8 @@ where
 
         let mut replan_iterations = 0;
         const MAX_REPLAN: usize = 5;
+        let mut respill_passes = 0usize;
+        self.graph.begin_respill_capture();
         let mut telemetry = self
             .config
             .enable_virtual_dep_telemetry
@@ -20289,16 +20327,28 @@ where
                 t.changed_vdeps_total += changed_vertices.len();
             }
             self.resource_checkpoint(0)?;
+            let respill_redirtied = self.graph.take_respill_redirtied();
             self.graph.clear_dirty_flags(&to_evaluate);
             for v in &changed_vertices {
                 self.graph.set_dirty(*v, true);
             }
+            let respill_continue =
+                !respill_redirtied.is_empty() && respill_passes < MAX_RESPILL_PASSES;
+            if respill_continue {
+                respill_passes += 1;
+                for v in &respill_redirtied {
+                    self.graph.set_dirty(*v, true);
+                }
+            }
 
             if changed_vertices.is_empty() {
-                if let Some(t) = telemetry.as_mut() {
-                    t.bailout_reason = Some("converged");
+                if !respill_continue {
+                    if let Some(t) = telemetry.as_mut() {
+                        t.bailout_reason = Some("converged");
+                    }
+                    break;
                 }
-                break;
+                continue;
             }
             if replan_iterations >= MAX_REPLAN {
                 if let Some(mut t) = telemetry.take() {
@@ -20998,6 +21048,8 @@ where
 
         let mut replan_iterations = 0;
         const MAX_REPLAN: usize = 5;
+        let mut respill_passes = 0usize;
+        self.graph.begin_respill_capture();
         let mut telemetry = self
             .config
             .enable_virtual_dep_telemetry
@@ -21086,16 +21138,28 @@ where
                 t.changed_vdeps_total += changed_vertices.len();
             }
             self.resource_checkpoint(0)?;
+            let respill_redirtied = self.graph.take_respill_redirtied();
             self.graph.clear_dirty_flags(&to_evaluate);
             for v in &changed_vertices {
                 self.graph.set_dirty(*v, true);
             }
+            let respill_continue =
+                !respill_redirtied.is_empty() && respill_passes < MAX_RESPILL_PASSES;
+            if respill_continue {
+                respill_passes += 1;
+                for v in &respill_redirtied {
+                    self.graph.set_dirty(*v, true);
+                }
+            }
 
             if changed_vertices.is_empty() {
-                if let Some(t) = telemetry.as_mut() {
-                    t.bailout_reason = Some("converged");
+                if !respill_continue {
+                    if let Some(t) = telemetry.as_mut() {
+                        t.bailout_reason = Some("converged");
+                    }
+                    break;
                 }
-                break;
+                continue;
             }
             if replan_iterations >= MAX_REPLAN {
                 if let Some(mut t) = telemetry.take() {
@@ -25494,6 +25558,8 @@ where
 
         let mut replan_iterations = 0;
         const MAX_REPLAN: usize = 5;
+        let mut respill_passes = 0usize;
+        self.graph.begin_respill_capture();
         let mut telemetry = self
             .config
             .enable_virtual_dep_telemetry
@@ -25550,16 +25616,28 @@ where
                     t.changed_vdeps_total += changed_vertices.len();
                 }
                 self.resource_checkpoint(0)?;
+                let respill_redirtied = self.graph.take_respill_redirtied();
                 self.graph.clear_dirty_flags(&to_evaluate);
                 for v in &changed_vertices {
                     self.graph.set_dirty(*v, true);
                 }
+                let respill_continue =
+                    !respill_redirtied.is_empty() && respill_passes < MAX_RESPILL_PASSES;
+                if respill_continue {
+                    respill_passes += 1;
+                    for v in &respill_redirtied {
+                        self.graph.set_dirty(*v, true);
+                    }
+                }
 
                 if changed_vertices.is_empty() {
-                    if let Some(t) = telemetry.as_mut() {
-                        t.bailout_reason = Some("converged");
+                    if !respill_continue {
+                        if let Some(t) = telemetry.as_mut() {
+                            t.bailout_reason = Some("converged");
+                        }
+                        break;
                     }
-                    break;
+                    continue;
                 }
                 if replan_iterations >= MAX_REPLAN {
                     if let Some(mut t) = telemetry.take() {
