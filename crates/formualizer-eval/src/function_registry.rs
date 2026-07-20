@@ -215,12 +215,11 @@ fn register(function: Arc<dyn Function>, trusted_builtin: bool) -> Result<(), Re
     let mut state = REGISTRY
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if trusted_builtin
-        && state
-            .registrations
-            .get(&key)
-            .is_some_and(|entry| entry.trusted_builtin)
-    {
+    // Trusted builtin registration only fills vacant slots. An existing entry —
+    // trusted or not — always wins, so an explicit `register_function` override of
+    // a builtin name survives later `load_builtins()` calls (Engine construction,
+    // formula planning, template canonicalization all re-run builtin loading).
+    if trusted_builtin && state.registrations.contains_key(&key) {
         return Ok(());
     }
     let previous = state
@@ -1504,6 +1503,34 @@ mod tests {
             aliases: &[],
         }));
         assert_eq!(get(ns, "_xlfn.filter").unwrap().name(), "_XLFN.FILTER");
+    }
+
+    #[test]
+    fn builtin_reload_does_not_clobber_explicit_registration() {
+        let ns = "__REG_RELOAD_OVERRIDE__";
+        register_builtin(Arc::new(TestFn {
+            ns,
+            name: "TARGET",
+            aliases: &[],
+        }));
+        assert!(resolve(ns, "TARGET").unwrap().semantics.trusted_builtin);
+
+        register_function(Arc::new(TestFn {
+            ns,
+            name: "TARGET",
+            aliases: &[],
+        }));
+        assert!(!resolve(ns, "TARGET").unwrap().semantics.trusted_builtin);
+
+        // A later builtin (re)load — Engine construction, formula planning, and
+        // template canonicalization all call `load_builtins()` — must not clobber
+        // the explicit registration.
+        register_builtin(Arc::new(TestFn {
+            ns,
+            name: "TARGET",
+            aliases: &[],
+        }));
+        assert!(!resolve(ns, "TARGET").unwrap().semantics.trusted_builtin);
     }
 
     #[test]
