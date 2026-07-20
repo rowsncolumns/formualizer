@@ -78,3 +78,26 @@ fn closure_is_read_only_and_multi_source() {
     assert!(closure_of(&engine, &[("Nope", 1, 1)]).is_empty());
     assert!(closure_of(&engine, &[("Sheet1", 100, 100)]).is_empty());
 }
+
+#[test]
+fn spill_region_of_reports_committed_projections() {
+    let mut engine = Engine::new(TestWorkbook::default(), EvalConfig::default());
+    engine
+        .set_cell_formula("Sheet1", 1, 2, parse("=SEQUENCE(3)").unwrap())
+        .unwrap(); // B1 spills B1:B3
+    engine.evaluate_all().unwrap();
+    let mut region = engine.cell_spill_region("Sheet1", 1, 2);
+    region.sort();
+    assert_eq!(
+        region,
+        vec![
+            ("Sheet1".to_string(), 1, 2),
+            ("Sheet1".to_string(), 2, 2),
+            ("Sheet1".to_string(), 3, 2),
+        ],
+        "anchor reports its full committed spill footprint"
+    );
+    assert!(engine.cell_spill_region("Sheet1", 2, 2).is_empty(), "a projection anchors nothing");
+    assert!(engine.cell_spill_region("Sheet1", 9, 9).is_empty(), "non-anchor cell is empty");
+    assert!(engine.cell_spill_region("Nope", 1, 1).is_empty(), "unknown sheet is empty");
+}

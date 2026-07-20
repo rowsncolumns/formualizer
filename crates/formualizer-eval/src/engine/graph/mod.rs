@@ -3605,6 +3605,20 @@ impl DependencyGraph {
     }
 
     /// Clear an existing spill region for an anchor (set cells to Empty and forget ownership)
+    /// Read-only spill region of the given cell, if it anchors a committed dynamic-array
+    /// spill: every cell the spill occupies (anchor included), in commit order. Empty when the
+    /// cell anchors nothing. No dirty-state mutation — hosts use this to reason about a spill's
+    /// footprint (e.g. shadowing every projection of an anchor whose inputs are in flight).
+    pub fn spill_region_of(&self, cell: CellRef) -> Vec<CellRef> {
+        let Some(&vertex_id) = self.cell_to_vertex.get(&cell) else {
+            return Vec::new();
+        };
+        self.spill_anchor_to_cells
+            .get(&vertex_id)
+            .map(|cells| cells.to_vec())
+            .unwrap_or_default()
+    }
+
     pub fn clear_spill_region(&mut self, anchor: VertexId) {
         let _ = self.clear_spill_region_bulk(anchor);
     }

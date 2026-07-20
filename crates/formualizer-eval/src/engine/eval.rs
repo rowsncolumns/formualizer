@@ -16783,6 +16783,26 @@ where
             .collect()
     }
 
+    /// Read-only spill region of a 1-based anchor cell, as `(sheet_name, row, col)` — the cells
+    /// its committed dynamic-array spill occupies (anchor included). Empty when the cell anchors
+    /// no spill or the sheet is unknown. Companion to [`Self::cell_dependents_closure`].
+    pub fn cell_spill_region(&self, sheet: &str, row: u32, col: u32) -> Vec<(String, u32, u32)> {
+        let Some(sheet_id) = self.graph.sheet_id(sheet) else {
+            return Vec::new();
+        };
+        self.graph
+            .spill_region_of(CellRef::new(sheet_id, Coord::from_excel(row, col, true, true)))
+            .into_iter()
+            .map(|cell| {
+                (
+                    self.graph.sheet_name(cell.sheet_id).to_string(),
+                    cell.coord.row() + 1,
+                    cell.coord.col() + 1,
+                )
+            })
+            .collect()
+    }
+
     /// Begin batch operations - defer CSR rebuilds for better performance
     pub fn begin_batch(&mut self) {
         self.graph.begin_batch();
