@@ -1,5 +1,6 @@
 use super::super::utils::{
     ARG_NUM_LENIENT_ONE, ARG_NUM_LENIENT_TWO, ARG_RANGE_NUM_LENIENT_ONE, coerce_num,
+    lift_elementwise,
 };
 use crate::args::ArgSchema;
 use crate::function::Function;
@@ -68,15 +69,17 @@ impl Function for AbsFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let v = args[0].value()?.into_literal();
-        match v {
-            LiteralValue::Error(e) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
-            other => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-                coerce_num(&other)?.abs(),
-            ))),
-        }
+        // Element-wise over range/array args (ABS(range) inside SUMPRODUCT/array context must map
+        // per cell, not collapse the range to a scalar and return #VALUE!).
+        lift_elementwise(args, ctx, |elems| match elems[0] {
+            LiteralValue::Error(e) => LiteralValue::Error(e.clone()),
+            other => match coerce_num(other) {
+                Ok(n) => LiteralValue::Number(n.abs()),
+                Err(e) => LiteralValue::Error(e),
+            },
+        })
     }
 }
 
