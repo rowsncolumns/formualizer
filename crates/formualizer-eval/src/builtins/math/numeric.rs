@@ -9,6 +9,14 @@ use crate::traits::{ArgumentHandle, FunctionContext};
 use formualizer_common::{ExcelError, LiteralValue};
 use formualizer_macros::func_caps;
 
+/// Coerce one lifted element to f64; error elements pass through as errors.
+fn elem_num(v: &LiteralValue) -> Result<f64, ExcelError> {
+    match v {
+        LiteralValue::Error(e) => Err(e.clone()),
+        other => coerce_num(other),
+    }
+}
+
 #[derive(Debug)]
 pub struct AbsFn;
 /// Returns the absolute value of a number.
@@ -138,24 +146,18 @@ impl Function for SignFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let v = args[0].value()?.into_literal();
-        match v {
-            LiteralValue::Error(e) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
-            other => {
-                let n = coerce_num(&other)?;
-                Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-                    if n > 0.0 {
-                        1.0
-                    } else if n < 0.0 {
-                        -1.0
-                    } else {
-                        0.0
-                    },
-                )))
-            }
-        }
+        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+            Ok(n) => LiteralValue::Number(if n > 0.0 {
+                1.0
+            } else if n < 0.0 {
+                -1.0
+            } else {
+                0.0
+            }),
+            Err(e) => LiteralValue::Error(e),
+        })
     }
 }
 
@@ -216,15 +218,12 @@ impl Function for IntFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let v = args[0].value()?.into_literal();
-        match v {
-            LiteralValue::Error(e) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
-            other => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-                coerce_num(&other)?.floor(),
-            ))),
-        }
+        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+            Ok(n) => LiteralValue::Number(n.floor()),
+            Err(e) => LiteralValue::Error(e),
+        })
     }
 }
 
@@ -286,28 +285,26 @@ impl Function for TruncFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.is_empty() || args.len() > 2 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
-        let mut n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        let digits: i32 = if args.len() == 2 {
-            match args[1].value()?.into_literal() {
-                LiteralValue::Error(e) => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                }
-                other => coerce_num(&other)? as i32,
-            }
-        } else {
-            0
+        lift_elementwise(args, ctx, |elems| {
+            trunc_element(elems[0], elems.get(1).copied())
+        })
+    }
+}
+
+/// Scalar TRUNC core, applied per element under array lifting.
+fn trunc_element(n: &LiteralValue, digits: Option<&LiteralValue>) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let mut n = elem_num(n)?;
+        let digits: i32 = match digits {
+            Some(d) => elem_num(d)? as i32,
+            None => 0,
         };
         if digits >= 0 {
             let f = 10f64.powi(digits);
@@ -316,8 +313,9 @@ impl Function for TruncFn {
             let f = 10f64.powi(-digits);
             n = (n / f).trunc() * f;
         }
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(n)))
-    }
+        Ok(LiteralValue::Number(n))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 #[derive(Debug)]
@@ -375,28 +373,26 @@ impl Function for RoundFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        let digits = match args[1].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)? as i32,
-        };
+        lift_elementwise(args, ctx, |elems| round_element(elems[0], elems[1]))
+    }
+}
+
+/// Scalar ROUND core, applied per element under array lifting.
+fn round_element(n: &LiteralValue, digits: &LiteralValue) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let n = elem_num(n)?;
+        let digits = elem_num(digits)? as i32;
         let f = 10f64.powi(digits.abs());
         let out = if digits >= 0 {
             (n * f).round() / f
         } else {
             (n / f).round() * f
         };
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(out)))
-    }
+        Ok(LiteralValue::Number(out))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 #[derive(Debug)]
@@ -454,28 +450,26 @@ impl Function for RoundDownFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        let digits = match args[1].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)? as i32,
-        };
+        lift_elementwise(args, ctx, |elems| rounddown_element(elems[0], elems[1]))
+    }
+}
+
+/// Scalar ROUNDDOWN core, applied per element under array lifting.
+fn rounddown_element(n: &LiteralValue, digits: &LiteralValue) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let n = elem_num(n)?;
+        let digits = elem_num(digits)? as i32;
         let f = 10f64.powi(digits.abs());
         let out = if digits >= 0 {
             (n * f).trunc() / f
         } else {
             (n / f).trunc() * f
         };
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(out)))
-    }
+        Ok(LiteralValue::Number(out))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 #[derive(Debug)]
@@ -533,20 +527,17 @@ impl Function for RoundUpFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        let digits = match args[1].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)? as i32,
-        };
+        lift_elementwise(args, ctx, |elems| roundup_element(elems[0], elems[1]))
+    }
+}
+
+/// Scalar ROUNDUP core, applied per element under array lifting.
+fn roundup_element(n: &LiteralValue, digits: &LiteralValue) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let n = elem_num(n)?;
+        let digits = elem_num(digits)? as i32;
         let f = 10f64.powi(digits.abs());
         let mut scaled = if digits >= 0 { n * f } else { n / f };
         if scaled > 0.0 {
@@ -555,8 +546,9 @@ impl Function for RoundUpFn {
             scaled = scaled.floor();
         }
         let out = if digits >= 0 { scaled / f } else { scaled * f };
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(out)))
-    }
+        Ok(LiteralValue::Number(out))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 #[derive(Debug)]
@@ -614,23 +606,20 @@ impl Function for ModFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let x = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        let y = match args[1].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
+        lift_elementwise(args, ctx, |elems| mod_element(elems[0], elems[1]))
+    }
+}
+
+/// Scalar MOD core, applied per element under array lifting.
+fn mod_element(x: &LiteralValue, y: &LiteralValue) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let x = elem_num(x)?;
+        let y = elem_num(y)?;
         if y == 0.0 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::from_error_string("#DIV/0!"),
+            return Ok(LiteralValue::Error(ExcelError::from_error_string(
+                "#DIV/0!",
             )));
         }
         let m = x % y;
@@ -644,8 +633,9 @@ impl Function for ModFn {
         if r == -0.0 {
             r = 0.0;
         }
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(r)))
-    }
+        Ok(LiteralValue::Number(r))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 /* ───────────────────── Additional Math / Rounding ───────────────────── */
@@ -710,42 +700,39 @@ impl Function for CeilingFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.is_empty() || args.len() > 2 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        let mut sig = if args.len() == 2 {
-            match args[1].value()?.into_literal() {
-                LiteralValue::Error(e) => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                }
-                other => coerce_num(&other)?,
-            }
-        } else {
-            1.0
+        lift_elementwise(args, ctx, |elems| {
+            ceiling_element(elems[0], elems.get(1).copied())
+        })
+    }
+}
+
+/// Scalar CEILING core, applied per element under array lifting.
+fn ceiling_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let n = elem_num(n)?;
+        let mut sig = match sig {
+            Some(s) => elem_num(s)?,
+            None => 1.0,
         };
         if sig == 0.0 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::from_error_string("#DIV/0!"),
+            return Ok(LiteralValue::Error(ExcelError::from_error_string(
+                "#DIV/0!",
             )));
         }
         if sig < 0.0 {
             sig = sig.abs(); /* Excel nuances: #NUM! when sign mismatch; simplified TODO */
         }
         let k = (n / sig).ceil();
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            k * sig,
-        )))
-    }
+        Ok(LiteralValue::Number(k * sig))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 #[derive(Debug)]
@@ -806,41 +793,37 @@ impl Function for CeilingMathFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.is_empty() || args.len() > 3 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+        lift_elementwise(args, ctx, |elems| {
+            ceiling_math_element(elems[0], elems.get(1).copied(), elems.get(2).copied())
+        })
+    }
+}
+
+/// Scalar CEILING.MATH core, applied per element under array lifting.
+fn ceiling_math_element(
+    n: &LiteralValue,
+    sig: Option<&LiteralValue>,
+    mode: Option<&LiteralValue>,
+) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let n = elem_num(n)?;
+        let sig = match sig {
+            Some(s) => {
+                let v = elem_num(s)?;
+                if v == 0.0 { 1.0 } else { v.abs() }
             }
-            other => coerce_num(&other)?,
+            None => 1.0,
         };
-        let sig = if args.len() >= 2 {
-            match args[1].value()?.into_literal() {
-                LiteralValue::Error(e) => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                }
-                other => {
-                    let v = coerce_num(&other)?;
-                    if v == 0.0 { 1.0 } else { v.abs() }
-                }
-            }
-        } else {
-            1.0
-        };
-        let mode_nonzero = if args.len() == 3 {
-            match args[2].value()?.into_literal() {
-                LiteralValue::Error(e) => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                }
-                other => coerce_num(&other)? != 0.0,
-            }
-        } else {
-            false
+        let mode_nonzero = match mode {
+            Some(m) => elem_num(m)? != 0.0,
+            None => false,
         };
         let result = if n >= 0.0 {
             (n / sig).ceil() * sig
@@ -849,10 +832,9 @@ impl Function for CeilingMathFn {
         } else {
             (n / sig).ceil() * sig /* toward +inf (less negative) */
         };
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            result,
-        )))
-    }
+        Ok(LiteralValue::Number(result))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 #[derive(Debug)]
@@ -915,42 +897,39 @@ impl Function for FloorFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.is_empty() || args.len() > 2 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        let mut sig = if args.len() == 2 {
-            match args[1].value()?.into_literal() {
-                LiteralValue::Error(e) => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                }
-                other => coerce_num(&other)?,
-            }
-        } else {
-            1.0
+        lift_elementwise(args, ctx, |elems| {
+            floor_element(elems[0], elems.get(1).copied())
+        })
+    }
+}
+
+/// Scalar FLOOR core, applied per element under array lifting.
+fn floor_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let n = elem_num(n)?;
+        let mut sig = match sig {
+            Some(s) => elem_num(s)?,
+            None => 1.0,
         };
         if sig == 0.0 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::from_error_string("#DIV/0!"),
+            return Ok(LiteralValue::Error(ExcelError::from_error_string(
+                "#DIV/0!",
             )));
         }
         if sig < 0.0 {
             sig = sig.abs();
         }
         let k = (n / sig).floor();
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            k * sig,
-        )))
-    }
+        Ok(LiteralValue::Number(k * sig))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 #[derive(Debug)]
@@ -1011,41 +990,37 @@ impl Function for FloorMathFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.is_empty() || args.len() > 3 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+        lift_elementwise(args, ctx, |elems| {
+            floor_math_element(elems[0], elems.get(1).copied(), elems.get(2).copied())
+        })
+    }
+}
+
+/// Scalar FLOOR.MATH core, applied per element under array lifting.
+fn floor_math_element(
+    n: &LiteralValue,
+    sig: Option<&LiteralValue>,
+    mode: Option<&LiteralValue>,
+) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let n = elem_num(n)?;
+        let sig = match sig {
+            Some(s) => {
+                let v = elem_num(s)?;
+                if v == 0.0 { 1.0 } else { v.abs() }
             }
-            other => coerce_num(&other)?,
+            None => 1.0,
         };
-        let sig = if args.len() >= 2 {
-            match args[1].value()?.into_literal() {
-                LiteralValue::Error(e) => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                }
-                other => {
-                    let v = coerce_num(&other)?;
-                    if v == 0.0 { 1.0 } else { v.abs() }
-                }
-            }
-        } else {
-            1.0
-        };
-        let mode_nonzero = if args.len() == 3 {
-            match args[2].value()?.into_literal() {
-                LiteralValue::Error(e) => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                }
-                other => coerce_num(&other)? != 0.0,
-            }
-        } else {
-            false
+        let mode_nonzero = match mode {
+            Some(m) => elem_num(m)? != 0.0,
+            None => false,
         };
         let result = if n >= 0.0 {
             (n / sig).floor() * sig
@@ -1054,10 +1029,9 @@ impl Function for FloorMathFn {
         } else {
             (n / sig).floor() * sig
         };
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            result,
-        )))
-    }
+        Ok(LiteralValue::Number(result))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 #[derive(Debug)]
@@ -1116,22 +1090,13 @@ impl Function for SqrtFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        if n < 0.0 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_num(),
-            )));
-        }
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            n.sqrt(),
-        )))
+        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+            Ok(n) if n < 0.0 => LiteralValue::Error(ExcelError::new_num()),
+            Ok(n) => LiteralValue::Number(n.sqrt()),
+            Err(e) => LiteralValue::Error(e),
+        })
     }
 }
 
@@ -1190,29 +1155,23 @@ impl Function for PowerFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let base = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        let expv = match args[1].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        if base < 0.0 && (expv.fract().abs() > 1e-12) {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_num(),
-            )));
-        }
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            base.powf(expv),
-        )))
+        lift_elementwise(args, ctx, |elems| power_element(elems[0], elems[1]))
     }
+}
+
+/// Scalar POWER core, applied per element under array lifting.
+fn power_element(base: &LiteralValue, expv: &LiteralValue) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let base = elem_num(base)?;
+        let expv = elem_num(expv)?;
+        if base < 0.0 && (expv.fract().abs() > 1e-12) {
+            return Ok(LiteralValue::Error(ExcelError::new_num()));
+        }
+        Ok(LiteralValue::Number(base.powf(expv)))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 #[derive(Debug)]
@@ -1272,17 +1231,12 @@ impl Function for ExpFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            n.exp(),
-        )))
+        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+            Ok(n) => LiteralValue::Number(n.exp()),
+            Err(e) => LiteralValue::Error(e),
+        })
     }
 }
 
@@ -1341,22 +1295,13 @@ impl Function for LnFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        if n <= 0.0 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_num(),
-            )));
-        }
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            n.ln(),
-        )))
+        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+            Ok(n) if n <= 0.0 => LiteralValue::Error(ExcelError::new_num()),
+            Ok(n) => LiteralValue::Number(n.ln()),
+            Err(e) => LiteralValue::Error(e),
+        })
     }
 }
 
@@ -1419,38 +1364,33 @@ impl Function for LogFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.is_empty() || args.len() > 2 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        let base = if args.len() == 2 {
-            match args[1].value()?.into_literal() {
-                LiteralValue::Error(e) => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                }
-                other => coerce_num(&other)?,
-            }
-        } else {
-            10.0
+        lift_elementwise(args, ctx, |elems| {
+            log_element(elems[0], elems.get(1).copied())
+        })
+    }
+}
+
+/// Scalar LOG core, applied per element under array lifting.
+fn log_element(n: &LiteralValue, base: Option<&LiteralValue>) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let n = elem_num(n)?;
+        let base = match base {
+            Some(b) => elem_num(b)?,
+            None => 10.0,
         };
         if n <= 0.0 || base <= 0.0 || (base - 1.0).abs() < 1e-12 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_num(),
-            )));
+            return Ok(LiteralValue::Error(ExcelError::new_num()));
         }
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            n.log(base),
-        )))
-    }
+        Ok(LiteralValue::Number(n.log(base)))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 #[derive(Debug)]
@@ -1508,22 +1448,13 @@ impl Function for Log10Fn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        if n <= 0.0 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_num(),
-            )));
-        }
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            n.log10(),
-        )))
+        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+            Ok(n) if n <= 0.0 => LiteralValue::Error(ExcelError::new_num()),
+            Ok(n) => LiteralValue::Number(n.log10()),
+            Err(e) => LiteralValue::Error(e),
+        })
     }
 }
 
@@ -1593,29 +1524,23 @@ impl Function for QuotientFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        let d = match args[1].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        if d == 0.0 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_div(),
-            )));
-        }
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            (n / d).trunc(),
-        )))
+        lift_elementwise(args, ctx, |elems| quotient_element(elems[0], elems[1]))
     }
+}
+
+/// Scalar QUOTIENT core, applied per element under array lifting.
+fn quotient_element(n: &LiteralValue, d: &LiteralValue) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let n = elem_num(n)?;
+        let d = elem_num(d)?;
+        if d == 0.0 {
+            return Ok(LiteralValue::Error(ExcelError::new_div()));
+        }
+        Ok(LiteralValue::Number((n / d).trunc()))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 #[derive(Debug)]
@@ -1673,26 +1598,23 @@ impl Function for EvenFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let number = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+            Ok(number) => {
+                if number == 0.0 {
+                    LiteralValue::Number(0.0)
+                } else {
+                    let sign = number.signum();
+                    let mut v = number.abs().ceil() as i64;
+                    if v % 2 != 0 {
+                        v += 1;
+                    }
+                    LiteralValue::Number(sign * v as f64)
+                }
             }
-            other => coerce_num(&other)?,
-        };
-        if number == 0.0 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)));
-        }
-
-        let sign = number.signum();
-        let mut v = number.abs().ceil() as i64;
-        if v % 2 != 0 {
-            v += 1;
-        }
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            sign * v as f64,
-        )))
+            Err(e) => LiteralValue::Error(e),
+        })
     }
 }
 
@@ -1751,23 +1673,19 @@ impl Function for OddFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let number = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+            Ok(number) => {
+                let sign = if number < 0.0 { -1.0 } else { 1.0 };
+                let mut v = number.abs().ceil() as i64;
+                if v % 2 == 0 {
+                    v += 1;
+                }
+                LiteralValue::Number(sign * v as f64)
             }
-            other => coerce_num(&other)?,
-        };
-
-        let sign = if number < 0.0 { -1.0 } else { 1.0 };
-        let mut v = number.abs().ceil() as i64;
-        if v % 2 == 0 {
-            v += 1;
-        }
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            sign * v as f64,
-        )))
+            Err(e) => LiteralValue::Error(e),
+        })
     }
 }
 
@@ -1826,22 +1744,13 @@ impl Function for SqrtPiFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        if n < 0.0 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_num(),
-            )));
-        }
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            (n * std::f64::consts::PI).sqrt(),
-        )))
+        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+            Ok(n) if n < 0.0 => LiteralValue::Error(ExcelError::new_num()),
+            Ok(n) => LiteralValue::Number((n * std::f64::consts::PI).sqrt()),
+            Err(e) => LiteralValue::Error(e),
+        })
     }
 }
 
@@ -2251,36 +2160,31 @@ impl Function for MroundFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let number = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        let multiple = match args[1].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
+        lift_elementwise(args, ctx, |elems| mround_element(elems[0], elems[1]))
+    }
+}
+
+/// Scalar MROUND core, applied per element under array lifting.
+fn mround_element(number: &LiteralValue, multiple: &LiteralValue) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let number = elem_num(number)?;
+        let multiple = elem_num(multiple)?;
 
         if multiple == 0.0 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)));
+            return Ok(LiteralValue::Number(0.0));
         }
         if number != 0.0 && number.signum() != multiple.signum() {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_num(),
-            )));
+            return Ok(LiteralValue::Error(ExcelError::new_num()));
         }
 
         let m = multiple.abs();
         let scaled = number.abs() / m;
         let rounded = (scaled + 0.5 + 1e-12).floor();
-        let out = rounded * m * number.signum();
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(out)))
-    }
+        Ok(LiteralValue::Number(rounded * m * number.signum()))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 fn roman_classic(mut n: u32) -> String {
@@ -2392,67 +2296,59 @@ impl Function for RomanFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.len() > 2 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
+        lift_elementwise(args, ctx, |elems| {
+            roman_element(elems[0], elems.get(1).copied())
+        })
+    }
+}
 
-        let number = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?.trunc() as i64,
-        };
+/// Scalar ROMAN core, applied per element under array lifting.
+fn roman_element(number: &LiteralValue, form: Option<&LiteralValue>) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let number = elem_num(number)?.trunc() as i64;
 
         if !(0..=3999).contains(&number) {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_value(),
-            )));
+            return Ok(LiteralValue::Error(ExcelError::new_value()));
         }
         if number == 0 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(
-                "".to_string(),
-            )));
+            return Ok(LiteralValue::Text("".to_string()));
         }
 
-        let form = if args.len() >= 2 {
-            match args[1].value()?.into_literal() {
+        let form = match form {
+            Some(v) => match v {
                 LiteralValue::Boolean(b) => {
-                    if b {
+                    if *b {
                         0
                     } else {
                         4
                     }
                 }
                 LiteralValue::Number(n) => n.trunc() as i64,
-                LiteralValue::Int(i) => i,
+                LiteralValue::Int(i) => *i,
                 LiteralValue::Empty => 0,
-                LiteralValue::Error(e) => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                }
+                LiteralValue::Error(e) => return Err(e.clone()),
                 _ => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                        ExcelError::new_value(),
-                    )));
+                    return Ok(LiteralValue::Error(ExcelError::new_value()));
                 }
-            }
-        } else {
-            0
+            },
+            None => 0,
         };
 
         if !(0..=4).contains(&form) {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_value(),
-            )));
+            return Ok(LiteralValue::Error(ExcelError::new_value()));
         }
 
         let classic = roman_classic(number as u32);
-        let text = roman_apply_form(classic, form);
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(text)))
-    }
+        Ok(LiteralValue::Text(roman_apply_form(classic, form)))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 fn roman_digit_value(ch: char) -> Option<i64> {
@@ -2525,29 +2421,30 @@ impl Function for ArabicFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let raw = match args[0].value()?.into_literal() {
-            LiteralValue::Text(s) => s,
+        lift_elementwise(args, ctx, |elems| arabic_element(elems[0]))
+    }
+}
+
+/// Scalar ARABIC core, applied per element under array lifting.
+fn arabic_element(v: &LiteralValue) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let raw = match v {
+            LiteralValue::Text(s) => s.clone(),
             LiteralValue::Empty => String::new(),
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
+            LiteralValue::Error(e) => return Err(e.clone()),
             _ => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                    ExcelError::new_value(),
-                )));
+                return Ok(LiteralValue::Error(ExcelError::new_value()));
             }
         };
 
         let mut text = raw.trim().to_uppercase();
         if text.len() > 255 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_value(),
-            )));
+            return Ok(LiteralValue::Error(ExcelError::new_value()));
         }
         if text.is_empty() {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)));
+            return Ok(LiteralValue::Number(0.0));
         }
 
         let sign = if text.starts_with('-') {
@@ -2558,9 +2455,7 @@ impl Function for ArabicFn {
         };
 
         if text.is_empty() {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_value(),
-            )));
+            return Ok(LiteralValue::Error(ExcelError::new_value()));
         }
 
         let mut total = 0i64;
@@ -2569,9 +2464,7 @@ impl Function for ArabicFn {
             let v = match roman_digit_value(ch) {
                 Some(v) => v,
                 None => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                        ExcelError::new_value(),
-                    )));
+                    return Ok(LiteralValue::Error(ExcelError::new_value()));
                 }
             };
             if v < prev {
@@ -2582,10 +2475,9 @@ impl Function for ArabicFn {
             }
         }
 
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            sign * total as f64,
-        )))
-    }
+        Ok(LiteralValue::Number(sign * total as f64))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 /* ─────────────────── BASE / DECIMAL / CEILING.PRECISE / FLOOR.PRECISE / ISO.CEILING ─────────────────── */
@@ -2649,39 +2541,34 @@ impl Function for BaseFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.len() < 2 || args.len() > 3 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
-        let number = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?.trunc() as i64,
-        };
-        let radix = match args[1].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?.trunc() as i64,
-        };
-        let min_len = if args.len() == 3 {
-            match args[2].value()?.into_literal() {
-                LiteralValue::Error(e) => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                }
-                other => coerce_num(&other)?.trunc() as usize,
-            }
-        } else {
-            0
+        lift_elementwise(args, ctx, |elems| {
+            base_element(elems[0], elems[1], elems.get(2).copied())
+        })
+    }
+}
+
+/// Scalar BASE core, applied per element under array lifting.
+fn base_element(
+    number: &LiteralValue,
+    radix: &LiteralValue,
+    min_len: Option<&LiteralValue>,
+) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let number = elem_num(number)?.trunc() as i64;
+        let radix = elem_num(radix)?.trunc() as i64;
+        let min_len = match min_len {
+            Some(v) => elem_num(v)?.trunc() as usize,
+            None => 0,
         };
         if !(2..=36).contains(&radix) || number < 0 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_num(),
-            )));
+            return Ok(LiteralValue::Error(ExcelError::new_num()));
         }
         let mut digits = Vec::new();
         let mut n = number as u64;
@@ -2702,9 +2589,9 @@ impl Function for BaseFn {
         while digits.len() < min_len {
             digits.insert(0, '0');
         }
-        let text: String = digits.into_iter().collect();
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(text)))
-    }
+        Ok(LiteralValue::Text(digits.into_iter().collect()))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 #[derive(Debug)]
@@ -2758,47 +2645,39 @@ impl Function for DecimalFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.len() != 2 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
-        let text = match args[0].value()?.into_literal() {
-            LiteralValue::Text(s) => s,
+        lift_elementwise(args, ctx, |elems| decimal_element(elems[0], elems[1]))
+    }
+}
+
+/// Scalar DECIMAL core, applied per element under array lifting.
+fn decimal_element(text: &LiteralValue, radix: &LiteralValue) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let text = match text {
+            LiteralValue::Text(s) => s.clone(),
             LiteralValue::Number(n) => format!("{}", n.trunc() as i64),
             LiteralValue::Int(i) => i.to_string(),
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
+            LiteralValue::Error(e) => return Err(e.clone()),
             _ => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                    ExcelError::new_value(),
-                )));
+                return Ok(LiteralValue::Error(ExcelError::new_value()));
             }
         };
-        let radix = match args[1].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?.trunc() as u32,
-        };
+        let radix = elem_num(radix)?.trunc() as u32;
         if !(2..=36).contains(&radix) {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_num(),
-            )));
+            return Ok(LiteralValue::Error(ExcelError::new_num()));
         }
-        let trimmed = text.trim();
-        match i64::from_str_radix(trimmed, radix) {
-            Ok(v) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-                v as f64,
-            ))),
-            Err(_) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_num(),
-            ))),
-        }
-    }
+        Ok(match i64::from_str_radix(text.trim(), radix) {
+            Ok(v) => LiteralValue::Number(v as f64),
+            Err(_) => LiteralValue::Error(ExcelError::new_num()),
+        })
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 #[derive(Debug)]
@@ -2853,40 +2732,36 @@ impl Function for CeilingPreciseFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.is_empty() || args.len() > 2 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        let sig = if args.len() == 2 {
-            match args[1].value()?.into_literal() {
-                LiteralValue::Error(e) => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                }
-                other => {
-                    let v = coerce_num(&other)?;
-                    if v == 0.0 {
-                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)));
-                    }
-                    v.abs()
-                }
-            }
-        } else {
-            1.0
-        };
-        let result = (n / sig).ceil() * sig;
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            result,
-        )))
+        lift_elementwise(args, ctx, |elems| {
+            ceiling_precise_element(elems[0], elems.get(1).copied())
+        })
     }
+}
+
+/// Scalar CEILING.PRECISE / ISO.CEILING core, applied per element under array lifting.
+fn ceiling_precise_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let n = elem_num(n)?;
+        let sig = match sig {
+            Some(s) => {
+                let v = elem_num(s)?;
+                if v == 0.0 {
+                    return Ok(LiteralValue::Number(0.0));
+                }
+                v.abs()
+            }
+            None => 1.0,
+        };
+        Ok(LiteralValue::Number((n / sig).ceil() * sig))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 #[derive(Debug)]
@@ -2940,40 +2815,36 @@ impl Function for FloorPreciseFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.is_empty() || args.len() > 2 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        let sig = if args.len() == 2 {
-            match args[1].value()?.into_literal() {
-                LiteralValue::Error(e) => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                }
-                other => {
-                    let v = coerce_num(&other)?;
-                    if v == 0.0 {
-                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)));
-                    }
-                    v.abs()
-                }
-            }
-        } else {
-            1.0
-        };
-        let result = (n / sig).floor() * sig;
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            result,
-        )))
+        lift_elementwise(args, ctx, |elems| {
+            floor_precise_element(elems[0], elems.get(1).copied())
+        })
     }
+}
+
+/// Scalar FLOOR.PRECISE core, applied per element under array lifting.
+fn floor_precise_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> LiteralValue {
+    let compute = || -> Result<LiteralValue, ExcelError> {
+        let n = elem_num(n)?;
+        let sig = match sig {
+            Some(s) => {
+                let v = elem_num(s)?;
+                if v == 0.0 {
+                    return Ok(LiteralValue::Number(0.0));
+                }
+                v.abs()
+            }
+            None => 1.0,
+        };
+        Ok(LiteralValue::Number((n / sig).floor() * sig))
+    };
+    compute().unwrap_or_else(LiteralValue::Error)
 }
 
 #[derive(Debug)]
@@ -3027,39 +2898,16 @@ impl Function for IsoCeilingFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.is_empty() || args.len() > 2 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
-        let n = match args[0].value()?.into_literal() {
-            LiteralValue::Error(e) => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-            }
-            other => coerce_num(&other)?,
-        };
-        let sig = if args.len() == 2 {
-            match args[1].value()?.into_literal() {
-                LiteralValue::Error(e) => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                }
-                other => {
-                    let v = coerce_num(&other)?;
-                    if v == 0.0 {
-                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)));
-                    }
-                    v.abs()
-                }
-            }
-        } else {
-            1.0
-        };
-        let result = (n / sig).ceil() * sig;
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            result,
-        )))
+        lift_elementwise(args, ctx, |elems| {
+            ceiling_precise_element(elems[0], elems.get(1).copied())
+        })
     }
 }
 
