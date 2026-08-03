@@ -2,6 +2,7 @@ use crate::SheetId;
 use crate::engine::graph::DependencyGraph;
 use crate::engine::graph::editor::reference_adjuster::{
     MoveReferenceAdjuster, ReferenceAdjuster, RelativeReferenceAdjuster, ShiftOperation,
+    StructuralShiftScope,
 };
 use crate::engine::named_range::{NameScope, NamedDefinition};
 use crate::engine::{ChangeEvent, ChangeLogger, VertexId, VertexKind};
@@ -919,13 +920,20 @@ impl<'g> VertexEditor<'g> {
             count,
         };
         let adjuster = ReferenceAdjuster::new();
+        let op_sheet_name = self.graph.sheet_reg().name(sheet_id).to_string();
 
-        // Get all formulas and adjust them
+        // Get all formulas and adjust them. Only references that resolve to
+        // the shifted sheet move: sheet-qualified refs by name, unqualified
+        // refs via the formula's own sheet.
         let formula_vertices: Vec<VertexId> = self.graph.vertices_with_formulas().collect();
 
         for id in formula_vertices {
+            let scope = StructuralShiftScope {
+                formula_sheet_id: self.graph.get_sheet_id(id),
+                op_sheet_name: &op_sheet_name,
+            };
             if let Some(ast) = self.get_formula_ast(id)
-                && let Some(adjusted) = adjuster.adjust_ast_if_changed(&ast, &op)
+                && let Some(adjusted) = adjuster.adjust_ast_if_changed_scoped(&ast, &op, &scope)
             {
                 if self.has_logger() {
                     self.log_change(ChangeEvent::FormulaAdjusted {
@@ -1044,12 +1052,17 @@ impl<'g> VertexEditor<'g> {
             count,
         };
         let adjuster = ReferenceAdjuster::new();
+        let op_sheet_name = self.graph.sheet_reg().name(sheet_id).to_string();
 
         let formula_vertices: Vec<VertexId> = self.graph.vertices_with_formulas().collect();
 
         for id in formula_vertices {
+            let scope = StructuralShiftScope {
+                formula_sheet_id: self.graph.get_sheet_id(id),
+                op_sheet_name: &op_sheet_name,
+            };
             if let Some(ast) = self.get_formula_ast(id)
-                && let Some(adjusted) = adjuster.adjust_ast_if_changed(&ast, &op)
+                && let Some(adjusted) = adjuster.adjust_ast_if_changed_scoped(&ast, &op, &scope)
             {
                 if self.has_logger() {
                     self.log_change(ChangeEvent::FormulaAdjusted {
@@ -1155,13 +1168,20 @@ impl<'g> VertexEditor<'g> {
             count,
         };
         let adjuster = ReferenceAdjuster::new();
+        let op_sheet_name = self.graph.sheet_reg().name(sheet_id).to_string();
 
-        // Get all formulas and adjust them
+        // Get all formulas and adjust them. Only references that resolve to
+        // the shifted sheet move: sheet-qualified refs by name, unqualified
+        // refs via the formula's own sheet.
         let formula_vertices: Vec<VertexId> = self.graph.vertices_with_formulas().collect();
 
         for id in formula_vertices {
+            let scope = StructuralShiftScope {
+                formula_sheet_id: self.graph.get_sheet_id(id),
+                op_sheet_name: &op_sheet_name,
+            };
             if let Some(ast) = self.get_formula_ast(id)
-                && let Some(adjusted) = adjuster.adjust_ast_if_changed(&ast, &op)
+                && let Some(adjusted) = adjuster.adjust_ast_if_changed_scoped(&ast, &op, &scope)
             {
                 if self.has_logger() {
                     self.log_change(ChangeEvent::FormulaAdjusted {
@@ -1280,12 +1300,17 @@ impl<'g> VertexEditor<'g> {
             count,
         };
         let adjuster = ReferenceAdjuster::new();
+        let op_sheet_name = self.graph.sheet_reg().name(sheet_id).to_string();
 
         let formula_vertices: Vec<VertexId> = self.graph.vertices_with_formulas().collect();
 
         for id in formula_vertices {
+            let scope = StructuralShiftScope {
+                formula_sheet_id: self.graph.get_sheet_id(id),
+                op_sheet_name: &op_sheet_name,
+            };
             if let Some(ast) = self.get_formula_ast(id)
-                && let Some(adjusted) = adjuster.adjust_ast_if_changed(&ast, &op)
+                && let Some(adjusted) = adjuster.adjust_ast_if_changed_scoped(&ast, &op, &scope)
             {
                 if self.has_logger() {
                     self.log_change(ChangeEvent::FormulaAdjusted {
