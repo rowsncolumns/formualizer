@@ -258,3 +258,88 @@ fn test_multiple_row_operations() {
         Some(&a1_id)
     );
 }
+
+/// A structural shift on one sheet must only rewrite references that resolve
+/// to that sheet. Regression test for the production bug where a spacer-row
+/// insert on one sheet rewrote every other sheet's local formulas (+1 row)
+/// without moving their cells, turning a Gantt row self-referential (#CIRC!).
+#[test]
+fn structural_shift_only_rewrites_refs_targeting_the_shifted_sheet() {
+    use formualizer_parse::pretty::canonical_formula;
+
+    let mut graph = super::common::graph_truth_graph();
+
+    graph.set_cell_value("Sheet1", 3, 1, lit_num(10.0)).unwrap();
+    graph.set_cell_value("Sheet2", 3, 1, lit_num(20.0)).unwrap();
+
+    // Sheet2-local (unqualified, mixed-abs) refs — must NOT adjust when
+    // Sheet1 shifts.
+    let s2_local = graph
+        .set_cell_formula(
+            "Sheet2",
+            4,
+            2,
+            parse("=IF(AND(J$3>=$D4,J$3<=$E4),1,\"\")").unwrap(),
+        )
+        .unwrap()
+        .affected_vertices[0];
+    // Sheet2 formula referencing Sheet1 — MUST adjust.
+    let s2_xref = graph
+        .set_cell_formula("Sheet2", 5, 2, parse("=Sheet1!A3").unwrap())
+        .unwrap()
+        .affected_vertices[0];
+    // Sheet1 formula referencing Sheet2 — must NOT adjust (it moves, but its
+    // cross-sheet reference target did not shift).
+    let s1_xref = graph
+        .set_cell_formula("Sheet1", 4, 2, parse("=Sheet2!A3").unwrap())
+        .unwrap()
+        .affected_vertices[0];
+    // Sheet1-local ref — MUST adjust.
+    let s1_local = graph
+        .set_cell_formula("Sheet1", 5, 2, parse("=A3+1").unwrap())
+        .unwrap()
+        .affected_vertices[0];
+
+    let canon = |graph: &DependencyGraph, id| canonical_formula(&graph.get_formula(id).unwrap());
+    let expect = |text: &str| canonical_formula(&parse(text).unwrap());
+
+    let s1 = graph.sheet_id("Sheet1").unwrap();
+    let mut editor = VertexEditor::new(&mut graph);
+    // Insert one row before public row 2 of Sheet1 (editor rows are 0-based).
+    editor.insert_rows(s1, 1, 1).unwrap();
+    drop(editor);
+
+    assert_eq!(
+        canon(&graph, s2_local),
+        expect("=IF(AND(J$3>=$D4,J$3<=$E4),1,\"\")"),
+        "unqualified refs on an unshifted sheet must not move"
+    );
+    assert_eq!(
+        canon(&graph, s2_xref),
+        expect("=Sheet1!A4"),
+        "qualified refs into the shifted sheet must move"
+    );
+    assert_eq!(
+        canon(&graph, s1_xref),
+        expect("=Sheet2!A3"),
+        "qualified refs out of the shifted sheet must not move"
+    );
+    assert_eq!(
+        canon(&graph, s1_local),
+        expect("=A4+1"),
+        "unqualified refs on the shifted sheet must move"
+    );
+
+    // Deleting the spacer restores every formula.
+    let mut editor = VertexEditor::new(&mut graph);
+    editor.delete_rows(s1, 1, 1).unwrap();
+    drop(editor);
+
+    assert_eq!(
+        canon(&graph, s2_local),
+        expect("=IF(AND(J$3>=$D4,J$3<=$E4),1,\"\")")
+    );
+    assert_eq!(canon(&graph, s2_xref), expect("=Sheet1!A3"));
+    assert_eq!(canon(&graph, s1_xref), expect("=Sheet2!A3"));
+    assert_eq!(canon(&graph, s1_local), expect("=A3+1"));
+}

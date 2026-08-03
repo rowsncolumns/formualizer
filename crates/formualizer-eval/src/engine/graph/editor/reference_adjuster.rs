@@ -32,6 +32,33 @@ impl AbsShiftPolicy {
 /// Centralized reference adjustment logic for structural changes
 pub struct ReferenceAdjuster;
 
+/// Scopes a structural shift to references that actually point at the shifted
+/// sheet.
+///
+/// A row/column insert or delete on one sheet must only rewrite references
+/// that resolve to that sheet: a sheet-qualified reference is compared by
+/// name against the shifted sheet, and an unqualified reference resolves to
+/// the sheet the formula lives on. Without this scope the adjuster shifts
+/// every reference in the workbook, corrupting formulas on unrelated sheets.
+#[derive(Debug, Clone, Copy)]
+pub struct StructuralShiftScope<'a> {
+    /// Sheet the formula being adjusted lives on (resolves unqualified refs).
+    pub formula_sheet_id: crate::SheetId,
+    /// Registered name of the sheet the structural operation targets.
+    pub op_sheet_name: &'a str,
+}
+
+impl StructuralShiftScope<'_> {
+    /// Whether a reference with the given sheet qualifier targets the shifted
+    /// sheet. Name comparison is exact, matching `SheetRegistry` resolution.
+    fn reference_targets_op_sheet(&self, sheet: Option<&str>, op: &ShiftOperation) -> bool {
+        match sheet {
+            Some(name) => name == self.op_sheet_name,
+            None => self.formula_sheet_id == op.sheet_id(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ShiftOperation {
     InsertRows {
@@ -56,6 +83,18 @@ pub enum ShiftOperation {
     },
 }
 
+impl ShiftOperation {
+    /// The sheet the structural operation targets.
+    pub fn sheet_id(&self) -> u16 {
+        match self {
+            ShiftOperation::InsertRows { sheet_id, .. }
+            | ShiftOperation::DeleteRows { sheet_id, .. }
+            | ShiftOperation::InsertColumns { sheet_id, .. }
+            | ShiftOperation::DeleteColumns { sheet_id, .. } => *sheet_id,
+        }
+    }
+}
+
 impl ReferenceAdjuster {
     pub fn new() -> Self {
         Self
@@ -69,18 +108,33 @@ impl ReferenceAdjuster {
 
     /// Adjust an AST for a shift operation under an explicit absolute-ref
     /// policy, preserving source tokens.
+    ///
+    /// Unscoped: every reference is treated as pointing at the shifted sheet.
+    /// Formula adjustment must use the `_scoped` variants so references that
+    /// resolve to other sheets are left alone; this entry remains for
+    /// named-definition adjustment, whose refs are pre-filtered by sheet.
     pub fn adjust_ast_with_policy(
         &self,
         ast: &ASTNode,
         op: &ShiftOperation,
         policy: AbsShiftPolicy,
     ) -> ASTNode {
+        self.adjust_ast_with_policy_scoped(ast, op, policy, None)
+    }
+
+    fn adjust_ast_with_policy_scoped(
+        &self,
+        ast: &ASTNode,
+        op: &ShiftOperation,
+        policy: AbsShiftPolicy,
+        scope: Option<&StructuralShiftScope>,
+    ) -> ASTNode {
         match &ast.node_type {
             ASTNodeType::Reference {
                 original,
                 reference,
             } => {
-                let adjusted = self.adjust_reference(reference, op, policy);
+                let adjusted = self.adjust_reference(reference, op, policy, scope);
                 ASTNode {
                     node_type: ASTNodeType::Reference {
                         original: original.clone(),
@@ -97,8 +151,8 @@ impl ReferenceAdjuster {
             } => ASTNode {
                 node_type: ASTNodeType::BinaryOp {
                     op: bin_op.clone(),
-                    left: Box::new(self.adjust_ast_with_policy(left, op, policy)),
-                    right: Box::new(self.adjust_ast_with_policy(right, op, policy)),
+                    left: Box::new(self.adjust_ast_with_policy_scoped(left, op, policy, scope)),
+                    right: Box::new(self.adjust_ast_with_policy_scoped(right, op, policy, scope)),
                 },
                 source_token: ast.source_token.clone(),
                 contains_volatile: ast.contains_volatile,
@@ -106,7 +160,7 @@ impl ReferenceAdjuster {
             ASTNodeType::UnaryOp { op: un_op, expr } => ASTNode {
                 node_type: ASTNodeType::UnaryOp {
                     op: un_op.clone(),
-                    expr: Box::new(self.adjust_ast_with_policy(expr, op, policy)),
+                    expr: Box::new(self.adjust_ast_with_policy_scoped(expr, op, policy, scope)),
                 },
                 source_token: ast.source_token.clone(),
                 contains_volatile: ast.contains_volatile,
@@ -116,7 +170,7 @@ impl ReferenceAdjuster {
                     name: name.clone(),
                     args: args
                         .iter()
-                        .map(|arg| self.adjust_ast_with_policy(arg, op, policy))
+                        .map(|arg| self.adjust_ast_with_policy_scoped(arg, op, policy, scope))
                         .collect(),
                 },
                 source_token: ast.source_token.clone(),
@@ -130,7 +184,19 @@ impl ReferenceAdjuster {
     /// if at least one reference actually changed. Avoids cloning when no work
     /// is needed.
     pub fn adjust_ast_if_changed(&self, ast: &ASTNode, op: &ShiftOperation) -> Option<ASTNode> {
-        self.adjust_ast_if_changed_with_policy(ast, op, AbsShiftPolicy::Track)
+        self.adjust_ast_if_changed_impl(ast, op, AbsShiftPolicy::Track, None)
+    }
+
+    /// [`Self::adjust_ast_if_changed`], adjusting only references that
+    /// resolve to the shifted sheet (sheet-qualified refs by name,
+    /// unqualified refs via the formula's own sheet).
+    pub fn adjust_ast_if_changed_scoped(
+        &self,
+        ast: &ASTNode,
+        op: &ShiftOperation,
+        scope: &StructuralShiftScope,
+    ) -> Option<ASTNode> {
+        self.adjust_ast_if_changed_impl(ast, op, AbsShiftPolicy::Track, Some(scope))
     }
 
     /// [`Self::adjust_ast_if_changed`] under an explicit absolute-ref policy.
@@ -140,12 +206,22 @@ impl ReferenceAdjuster {
         op: &ShiftOperation,
         policy: AbsShiftPolicy,
     ) -> Option<ASTNode> {
+        self.adjust_ast_if_changed_impl(ast, op, policy, None)
+    }
+
+    fn adjust_ast_if_changed_impl(
+        &self,
+        ast: &ASTNode,
+        op: &ShiftOperation,
+        policy: AbsShiftPolicy,
+        scope: Option<&StructuralShiftScope>,
+    ) -> Option<ASTNode> {
         match &ast.node_type {
             ASTNodeType::Reference {
                 original,
                 reference,
             } => {
-                let adjusted = self.adjust_reference(reference, op, policy);
+                let adjusted = self.adjust_reference(reference, op, policy, scope);
                 if adjusted == *reference {
                     return None;
                 }
@@ -163,8 +239,8 @@ impl ReferenceAdjuster {
                 left,
                 right,
             } => {
-                let adjusted_left = self.adjust_ast_if_changed_with_policy(left, op, policy);
-                let adjusted_right = self.adjust_ast_if_changed_with_policy(right, op, policy);
+                let adjusted_left = self.adjust_ast_if_changed_impl(left, op, policy, scope);
+                let adjusted_right = self.adjust_ast_if_changed_impl(right, op, policy, scope);
                 if adjusted_left.is_none() && adjusted_right.is_none() {
                     return None;
                 }
@@ -179,7 +255,7 @@ impl ReferenceAdjuster {
                 })
             }
             ASTNodeType::UnaryOp { op: un_op, expr } => {
-                let adjusted_expr = self.adjust_ast_if_changed_with_policy(expr, op, policy)?;
+                let adjusted_expr = self.adjust_ast_if_changed_impl(expr, op, policy, scope)?;
                 Some(ASTNode {
                     node_type: ASTNodeType::UnaryOp {
                         op: un_op.clone(),
@@ -195,7 +271,7 @@ impl ReferenceAdjuster {
                     .iter()
                     .map(|arg| {
                         if let Some(adjusted) =
-                            self.adjust_ast_if_changed_with_policy(arg, op, policy)
+                            self.adjust_ast_if_changed_impl(arg, op, policy, scope)
                         {
                             changed = true;
                             adjusted
@@ -334,8 +410,21 @@ impl ReferenceAdjuster {
         reference: &formualizer_parse::parser::ReferenceType,
         op: &ShiftOperation,
         policy: AbsShiftPolicy,
+        scope: Option<&StructuralShiftScope>,
     ) -> formualizer_parse::parser::ReferenceType {
         use formualizer_parse::parser::ReferenceType;
+
+        if let Some(scope) = scope {
+            let ref_sheet = match reference {
+                ReferenceType::Cell { sheet, .. } | ReferenceType::Range { sheet, .. } => {
+                    sheet.as_deref()
+                }
+                _ => None,
+            };
+            if !scope.reference_targets_op_sheet(ref_sheet, op) {
+                return reference.clone();
+            }
+        }
 
         let shared = reference.to_sheet_ref_lossy();
 
