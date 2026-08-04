@@ -527,6 +527,17 @@ pub struct OffsetFn;
 /// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberStrict,max=None,repeating=None,default=false}; arg3{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberStrict,max=None,repeating=None,default=false}; arg4{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberStrict,max=None,repeating=None,default=false}; arg5{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberStrict,max=None,repeating=None,default=false}
 /// Caps: PURE, VOLATILE, RETURNS_REFERENCE, DYNAMIC_DEPENDENCY
 /// [formualizer-docgen:schema:end]
+/// A SKIPPED argument slot (`OFFSET(ref,,,,2)` — Excel keeps the commas): the parser represents
+/// it as a bare empty-text literal. Detected at the AST level because the schema's number
+/// coercion would otherwise reject it before the function can apply Excel's defaults (rows/cols
+/// → 0, height/width → the base reference's dimensions).
+fn is_skipped_arg(arg: &ArgumentHandle) -> bool {
+    matches!(
+        &arg.ast().node_type,
+        formualizer_parse::parser::ASTNodeType::Literal(LiteralValue::Text(t)) if t.is_empty()
+    )
+}
+
 impl Function for OffsetFn {
     fn caps(&self) -> FnCaps {
         // OFFSET is volatile in Excel semantics and has runtime-dynamic dependencies.
@@ -556,20 +567,27 @@ impl Function for OffsetFn {
             Ok(r) => r,
             Err(e) => return Some(Err(e)),
         };
-        let dr = match args[1].value() {
-            Ok(cv) => match cv.into_literal() {
-                LiteralValue::Number(n) => n as i64,
-                LiteralValue::Int(i) => i,
-                _ => return Some(Err(ExcelError::new(ExcelErrorKind::Value))),
-            },
+        // A SKIPPED argument (`OFFSET(ref,,,,2)` — Excel keeps the commas) evaluates to Empty:
+        // rows/cols default to 0, height/width fall through to the base reference's dimensions.
+        let scalar_or = |arg: &ArgumentHandle, default: i64| -> Result<i64, ExcelError> {
+            if is_skipped_arg(arg) {
+                return Ok(default);
+            }
+            match arg.value() {
+                Ok(cv) => match cv.into_literal() {
+                    LiteralValue::Number(n) => Ok(n as i64),
+                    LiteralValue::Int(i) => Ok(i),
+                    _ => Err(ExcelError::new(ExcelErrorKind::Value)),
+                },
+                Err(e) => Err(e),
+            }
+        };
+        let dr = match scalar_or(&args[1], 0) {
+            Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };
-        let dc = match args[2].value() {
-            Ok(cv) => match cv.into_literal() {
-                LiteralValue::Number(n) => n as i64,
-                LiteralValue::Int(i) => i,
-                _ => return Some(Err(ExcelError::new(ExcelErrorKind::Value))),
-            },
+        let dc = match scalar_or(&args[2], 0) {
+            Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };
 
@@ -583,24 +601,16 @@ impl Function for OffsetFn {
         let nsr = (sr as i64) + dr;
         let nsc = (sc as i64) + dc;
         let height = if args.len() >= 4 {
-            match args[3].value() {
-                Ok(cv) => match cv.into_literal() {
-                    LiteralValue::Number(n) => n as i64,
-                    LiteralValue::Int(i) => i,
-                    _ => return Some(Err(ExcelError::new(ExcelErrorKind::Value))),
-                },
+            match scalar_or(&args[3], (er as i64) - (sr as i64) + 1) {
+                Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             }
         } else {
             (er as i64) - (sr as i64) + 1
         };
         let width = if args.len() >= 5 {
-            match args[4].value() {
-                Ok(cv) => match cv.into_literal() {
-                    LiteralValue::Number(n) => n as i64,
-                    LiteralValue::Int(i) => i,
-                    _ => return Some(Err(ExcelError::new(ExcelErrorKind::Value))),
-                },
+            match scalar_or(&args[4], (ec as i64) - (sc as i64) + 1) {
+                Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             }
         } else {
