@@ -223,6 +223,15 @@ impl Function for IndexFn {
             Ok(r) => r,
             Err(_) => return None,
         };
+        // A NAMED base resolves through its definition when it is a plain cell/range name;
+        // literal/formula names fall back to eval()'s values path.
+        let base = match base {
+            ReferenceType::NamedRange(n) => match ctx.named_range_reference_definition(&n) {
+                Some(r) => r,
+                None => return None,
+            },
+            other => other,
+        };
         let position = match args[1].value() {
             Ok(cv) => match cv.into_literal() {
                 LiteralValue::Number(n) => n as i64,
@@ -566,6 +575,14 @@ impl Function for OffsetFn {
         let base = match args[0].as_reference_or_eval() {
             Ok(r) => r,
             Err(e) => return Some(Err(e)),
+        };
+        // A NAMED base resolves through its definition (plain cell/range names only).
+        let base = match base {
+            ReferenceType::NamedRange(n) => match ctx.named_range_reference_definition(&n) {
+                Some(r) => r,
+                None => return Some(Err(ExcelError::new(ExcelErrorKind::Ref))),
+            },
+            other => other,
         };
         // A SKIPPED argument (`OFFSET(ref,,,,2)` — Excel keeps the commas) evaluates to Empty:
         // rows/cols default to 0, height/width fall through to the base reference's dimensions.

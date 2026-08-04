@@ -188,6 +188,13 @@ impl<'a, R: EvaluationContext> NamedRangeResolver for DynamicRefCollector<'a, R>
     ) -> Result<Vec<Vec<LiteralValue>>, ExcelError> {
         self.engine.resolve_named_range_reference(name)
     }
+
+    fn named_range_reference_definition(
+        &self,
+        name: &str,
+    ) -> Option<formualizer_parse::parser::ReferenceType> {
+        self.engine.named_range_reference_definition(name)
+    }
 }
 
 impl<'a, R: EvaluationContext> TableResolver for DynamicRefCollector<'a, R> {

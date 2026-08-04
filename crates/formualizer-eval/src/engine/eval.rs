@@ -22488,6 +22488,38 @@ where
     ) -> Result<Vec<Vec<LiteralValue>>, ExcelError> {
         self.resolver.resolve_named_range_reference(name)
     }
+
+    fn named_range_reference_definition(
+        &self,
+        name: &str,
+    ) -> Option<formualizer_parse::parser::ReferenceType> {
+        use crate::engine::named_range::NamedDefinition;
+        use formualizer_parse::parser::ReferenceType;
+        let entry = self
+            .graph
+            .resolve_name_entry(name, self.graph.default_sheet_id())?;
+        match &entry.definition {
+            NamedDefinition::Cell(c) => Some(ReferenceType::Cell {
+                sheet: Some(self.graph.sheet_name(c.sheet_id).to_string()),
+                row: c.coord.row() + 1,
+                col: c.coord.col() + 1,
+                row_abs: true,
+                col_abs: true,
+            }),
+            NamedDefinition::Range(r) => Some(ReferenceType::Range {
+                sheet: Some(self.graph.sheet_name(r.start.sheet_id).to_string()),
+                start_row: Some(r.start.coord.row() + 1),
+                start_col: Some(r.start.coord.col() + 1),
+                end_row: Some(r.end.coord.row() + 1),
+                end_col: Some(r.end.coord.col() + 1),
+                start_row_abs: true,
+                start_col_abs: true,
+                end_row_abs: true,
+                end_col_abs: true,
+            }),
+            _ => None,
+        }
+    }
 }
 
 impl<R> crate::traits::TableResolver for Engine<R>

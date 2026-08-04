@@ -985,6 +985,14 @@ pub trait NamedRangeResolver: Send + Sync {
         &self,
         name: &str,
     ) -> Result<Vec<Vec<LiteralValue>>, ExcelError>;
+
+    /// The name's CONCRETE reference when it is defined as a plain cell/range — `None` for
+    /// literal/formula-defined names, or for resolvers that don't track definitions. Lets
+    /// by-reference functions (INDEX, OFFSET) resolve a NAMED base argument to real bounds
+    /// instead of erroring `#REF!`; callers fall back to the values path on `None`.
+    fn named_range_reference_definition(&self, _name: &str) -> Option<ReferenceType> {
+        None
+    }
 }
 pub trait TableResolver: Send + Sync {
     fn resolve_table_reference(
@@ -1455,6 +1463,13 @@ pub enum VolatileLevel {
 /// Minimal context exposed to functions (no engine/graph APIs)
 pub trait FunctionContext<'ctx> {
     fn locale(&self) -> crate::locale::Locale;
+
+    /// The name's CONCRETE reference when it is defined as a plain cell/range — see
+    /// [`NamedRangeResolver::named_range_reference_definition`]. Default `None` (fall back to
+    /// the values path).
+    fn named_range_reference_definition(&self, _name: &str) -> Option<ReferenceType> {
+        None
+    }
     fn timezone(&self) -> &crate::timezone::TimeZoneSpec;
     fn clock(&self) -> &dyn crate::timezone::ClockProvider;
     fn thread_pool(&self) -> Option<&std::sync::Arc<rayon::ThreadPool>>;
@@ -1585,6 +1600,10 @@ impl<'a> DefaultFunctionContext<'a> {
 impl<'a> FunctionContext<'a> for DefaultFunctionContext<'a> {
     fn locale(&self) -> crate::locale::Locale {
         self.base.locale()
+    }
+
+    fn named_range_reference_definition(&self, name: &str) -> Option<ReferenceType> {
+        self.base.named_range_reference_definition(name)
     }
 
     fn current_sheet(&self) -> &str {
