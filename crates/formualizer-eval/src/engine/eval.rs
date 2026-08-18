@@ -5143,6 +5143,15 @@ where
         self.has_edited = true;
     }
 
+    /// Name-resolving convenience over [`Self::mark_data_edited_on_sheet`] for callers that hold
+    /// only the sheet name (bulk loaders); an unknown name falls back to the global bump.
+    pub fn mark_sheet_data_edited(&mut self, sheet: &str) {
+        match self.graph.sheet_id(sheet) {
+            Some(sid) => self.mark_data_edited_on_sheet(sid),
+            None => self.mark_data_edited(),
+        }
+    }
+
     /// The snapshot term for one sheet: the global snapshot plus the sheet's own offset. Cache
     /// keys derived from a SPECIFIC sheet's data (lookup indexes, used-bounds) key on this, so a
     /// sheet-attributed edit elsewhere doesn't invalidate them.
