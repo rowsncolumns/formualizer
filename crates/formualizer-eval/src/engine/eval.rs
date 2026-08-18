@@ -909,6 +909,11 @@ pub struct Engine<R> {
     thread_pool: Option<Arc<rayon::ThreadPool>>,
     pub recalc_epoch: u64,
     snapshot_id: std::sync::atomic::AtomicU64,
+    /// Per-sheet additive snapshot terms: edits attributable to ONE sheet bump only that sheet's
+    /// term, so snapshot-keyed caches over OTHER sheets (lookup indexes, used-bounds) survive.
+    /// `sheet_data_snapshot_id(sheet) = snapshot_id + offset[sheet]` — a global bump still
+    /// invalidates every sheet.
+    sheet_snapshot_offsets: rustc_hash::FxHashMap<SheetId, u64>,
     topology_epoch: u64,
     cached_static_schedule: Option<CachedScheduleEntry>,
     cached_mixed_topology: Option<CachedMixedTopology>,
@@ -2501,6 +2506,7 @@ where
             thread_pool,
             recalc_epoch: 0,
             snapshot_id: std::sync::atomic::AtomicU64::new(1),
+            sheet_snapshot_offsets: rustc_hash::FxHashMap::default(),
             topology_epoch: 0,
             cached_static_schedule: None,
             cached_mixed_topology: None,
@@ -2636,6 +2642,7 @@ where
             thread_pool: Some(thread_pool),
             recalc_epoch: 0,
             snapshot_id: std::sync::atomic::AtomicU64::new(1),
+            sheet_snapshot_offsets: rustc_hash::FxHashMap::default(),
             topology_epoch: 0,
             cached_static_schedule: None,
             cached_mixed_topology: None,
@@ -3466,7 +3473,7 @@ where
             end_row: u32::try_from(view.end_row()).ok()?,
             end_col: u32::try_from(view.end_col()).ok()?,
             axis,
-            snapshot_id: self.data_snapshot_id(),
+            snapshot_id: self.sheet_data_snapshot_id(sheet_id),
         };
         if let Some(index) = self.lookup_index_cache.get(&key) {
             return Some(index);
@@ -5110,6 +5117,38 @@ where
         self.snapshot_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.has_edited = true;
+    }
+
+    /// Sheet-scoped counterpart of [`Self::mark_data_edited`]: a value edit attributable to ONE
+    /// sheet bumps only that sheet's snapshot term, so other sheets' snapshot-keyed caches
+    /// (lookup indexes, used-bounds) survive. Unattributable edits must keep using the global
+    /// bump, which invalidates every sheet.
+    pub fn mark_data_edited_on_sheet(&mut self, sheet_id: SheetId) {
+        *self.sheet_snapshot_offsets.entry(sheet_id).or_insert(0) += 1;
+        self.has_edited = true;
+    }
+
+    /// Sheet-scoped counterpart of [`Self::mark_topology_edited`]: same schedule/topology
+    /// invalidation, but the snapshot bump is confined to the edited sheet.
+    pub fn mark_topology_edited_on_sheet(&mut self, sheet_id: SheetId) {
+        *self.sheet_snapshot_offsets.entry(sheet_id).or_insert(0) += 1;
+        self.topology_epoch = self.topology_epoch.wrapping_add(1);
+        self.graph.bump_topology_revision();
+        self.clear_cached_static_schedule();
+        self.cached_mixed_topology = None;
+        if let Some(ledger) = self.active_resource_ledger.as_mut() {
+            let released = ledger.account_mixed_cache(0);
+            debug_assert!(released.is_ok());
+        }
+        self.has_edited = true;
+    }
+
+    /// The snapshot term for one sheet: the global snapshot plus the sheet's own offset. Cache
+    /// keys derived from a SPECIFIC sheet's data (lookup indexes, used-bounds) key on this, so a
+    /// sheet-attributed edit elsewhere doesn't invalidate them.
+    pub fn sheet_data_snapshot_id(&self, sheet_id: SheetId) -> u64 {
+        self.data_snapshot_id()
+            .wrapping_add(self.sheet_snapshot_offsets.get(&sheet_id).copied().unwrap_or(0))
     }
 
     /// Mark a topology-changing edit: bump snapshot + topology epoch and invalidate cached schedules.
@@ -14525,8 +14564,11 @@ where
             return None;
         }
         let ec0 = ec0.min(col_hi);
-        // Pass-scoped cache with snapshot guard
-        let snap = self.data_snapshot_id();
+        // Pass-scoped cache with snapshot guard (sheet-scoped: edits to other sheets keep it)
+        let snap = self
+            .graph
+            .sheet_id(sheet)
+            .map_or_else(|| self.data_snapshot_id(), |sid| self.sheet_data_snapshot_id(sid));
         let mut min_r0: Option<usize> = None;
         for ci in sc0..=ec0 {
             let sheet_id = self.graph.sheet_id(sheet)?;
@@ -16307,10 +16349,9 @@ where
         }
         // Mirror into Arrow overlay when enabled
         self.mirror_value_to_overlay(sheet, row, col, &value);
-        // Advance snapshot to reflect external mutation
-        self.snapshot_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.has_edited = true;
+        // Advance the EDITED SHEET's snapshot term to reflect the external mutation — other
+        // sheets' snapshot-keyed caches stay valid.
+        self.mark_data_edited_on_sheet(sheet_id);
         Ok(())
     }
 
@@ -16632,9 +16673,10 @@ where
         for (row, col) in edited_cells {
             self.record_formula_plane_changed_cell(sheet, row, col);
         }
-        // Single topology bump after batch
+        // Single topology bump after batch — snapshot term confined to the ingested sheet, so an
+        // incremental formula append doesn't invalidate other sheets' lookup indexes.
         if n > 0 {
-            self.mark_topology_edited();
+            self.mark_topology_edited_on_sheet(sheet_id);
         }
         Ok(n)
     }
@@ -21918,15 +21960,15 @@ where
 
 #[derive(Default)]
 struct RowBoundsCache {
-    snapshot: u64,
-    // key: (sheet_id, col_idx)
-    map: rustc_hash::FxHashMap<(u32, usize), (Option<u32>, Option<u32>)>,
+    // key: (sheet_id, col_idx) → (snapshot the bounds were computed at, bounds). The snapshot is
+    // per-ENTRY: snapshots are sheet-scoped, so one pass legitimately mixes several snapshot
+    // values — a whole-cache guard would clear on every sheet change.
+    map: rustc_hash::FxHashMap<(u32, usize), (u64, (Option<u32>, Option<u32>))>,
 }
 
 impl RowBoundsCache {
-    fn new(snapshot: u64) -> Self {
+    fn new(_snapshot: u64) -> Self {
         Self {
-            snapshot,
             map: Default::default(),
         }
     }
@@ -21936,10 +21978,9 @@ impl RowBoundsCache {
         col_idx: usize,
         snapshot: u64,
     ) -> Option<(Option<u32>, Option<u32>)> {
-        if self.snapshot != snapshot {
-            return None;
-        }
-        self.map.get(&(sheet_id as u32, col_idx)).copied()
+        self.map
+            .get(&(sheet_id as u32, col_idx))
+            .and_then(|&(snap, bounds)| (snap == snapshot).then_some(bounds))
     }
     fn put_row_bounds(
         &mut self,
@@ -21948,18 +21989,15 @@ impl RowBoundsCache {
         snapshot: u64,
         bounds: (Option<u32>, Option<u32>),
     ) {
-        if self.snapshot != snapshot {
-            self.snapshot = snapshot;
-            self.map.clear();
-        }
-        self.map.insert((sheet_id as u32, col_idx), bounds);
+        self.map.insert((sheet_id as u32, col_idx), (snapshot, bounds));
     }
 }
 
 struct UsedAxisBoundsCache {
-    snapshot: u64,
-    row_bounds_by_col_span: rustc_hash::FxHashMap<(SheetId, u32, u32), Option<(u32, u32)>>,
-    col_bounds_by_row_span: rustc_hash::FxHashMap<(SheetId, u32, u32), Option<(u32, u32)>>,
+    // Values carry the snapshot they were computed at. Per-ENTRY snapshots: sheet-scoped
+    // snapshots legitimately mix in one pass — a whole-cache guard would clear per sheet change.
+    row_bounds_by_col_span: rustc_hash::FxHashMap<(SheetId, u32, u32), (u64, Option<(u32, u32)>)>,
+    col_bounds_by_row_span: rustc_hash::FxHashMap<(SheetId, u32, u32), (u64, Option<(u32, u32)>)>,
     #[cfg(test)]
     row_hits: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -21971,9 +22009,8 @@ struct UsedAxisBoundsCache {
 }
 
 impl UsedAxisBoundsCache {
-    fn new(snapshot: u64) -> Self {
+    fn new(_snapshot: u64) -> Self {
         Self {
-            snapshot,
             row_bounds_by_col_span: Default::default(),
             col_bounds_by_row_span: Default::default(),
             #[cfg(test)]
@@ -21987,14 +22024,6 @@ impl UsedAxisBoundsCache {
         }
     }
 
-    fn reset_for_snapshot(&mut self, snapshot: u64) {
-        if self.snapshot != snapshot {
-            self.snapshot = snapshot;
-            self.row_bounds_by_col_span.clear();
-            self.col_bounds_by_row_span.clear();
-        }
-    }
-
     fn get_row_bounds(
         &self,
         sheet_id: SheetId,
@@ -22002,13 +22031,10 @@ impl UsedAxisBoundsCache {
         end_col: u32,
         snapshot: u64,
     ) -> Option<Option<(u32, u32)>> {
-        if self.snapshot != snapshot {
-            return None;
-        }
         let cached = self
             .row_bounds_by_col_span
             .get(&(sheet_id, start_col, end_col))
-            .copied();
+            .and_then(|&(snap, bounds)| (snap == snapshot).then_some(bounds));
         #[cfg(test)]
         if cached.is_some() {
             self.row_hits.fetch_add(1, Ordering::Relaxed);
@@ -22024,9 +22050,8 @@ impl UsedAxisBoundsCache {
         snapshot: u64,
         bounds: Option<(u32, u32)>,
     ) {
-        self.reset_for_snapshot(snapshot);
         self.row_bounds_by_col_span
-            .insert((sheet_id, start_col, end_col), bounds);
+            .insert((sheet_id, start_col, end_col), (snapshot, bounds));
         #[cfg(test)]
         self.row_misses.fetch_add(1, Ordering::Relaxed);
     }
@@ -22038,13 +22063,10 @@ impl UsedAxisBoundsCache {
         end_row: u32,
         snapshot: u64,
     ) -> Option<Option<(u32, u32)>> {
-        if self.snapshot != snapshot {
-            return None;
-        }
         let cached = self
             .col_bounds_by_row_span
             .get(&(sheet_id, start_row, end_row))
-            .copied();
+            .and_then(|&(snap, bounds)| (snap == snapshot).then_some(bounds));
         #[cfg(test)]
         if cached.is_some() {
             self.col_hits.fetch_add(1, Ordering::Relaxed);
@@ -22060,9 +22082,8 @@ impl UsedAxisBoundsCache {
         snapshot: u64,
         bounds: Option<(u32, u32)>,
     ) {
-        self.reset_for_snapshot(snapshot);
         self.col_bounds_by_row_span
-            .insert((sheet_id, start_row, end_row), bounds);
+            .insert((sheet_id, start_row, end_row), (snapshot, bounds));
         #[cfg(test)]
         self.col_misses.fetch_add(1, Ordering::Relaxed);
     }
@@ -22826,7 +22847,7 @@ where
     ) -> Option<(u32, u32)> {
         // Union Arrow-backed used-region with formula rows that have not been materialized yet.
         let sheet_id = self.graph.sheet_id(sheet)?;
-        let snap = self.data_snapshot_id();
+        let snap = self.sheet_data_snapshot_id(sheet_id);
         if let Some(cached) = self.used_axis_bounds_cache.read().ok().and_then(|guard| {
             guard
                 .as_ref()
@@ -22862,7 +22883,7 @@ where
     fn used_cols_for_rows(&self, sheet: &str, start_row: u32, end_row: u32) -> Option<(u32, u32)> {
         // Union Arrow-backed used-region with formula columns that have not been materialized yet.
         let sheet_id = self.graph.sheet_id(sheet)?;
-        let snap = self.data_snapshot_id();
+        let snap = self.sheet_data_snapshot_id(sheet_id);
         if let Some(cached) = self.used_axis_bounds_cache.read().ok().and_then(|guard| {
             guard
                 .as_ref()
