@@ -322,3 +322,19 @@ fn default_spill_cap_is_the_sheet() {
         get(&engine, 1, 4)
     );
 }
+
+/// A full-width row (A:XFD) spills — and in bounded time: the Arrow store used to re-clone every
+/// column per appended column while a wide spill committed left to right.
+#[test]
+fn full_width_row_spills_in_bounded_time() {
+    let mut engine = Engine::new(TestWorkbook::default(), EvalConfig::default());
+    let started = std::time::Instant::now();
+    set(&mut engine, 1, 1, "=SEQUENCE(1,16384)");
+    let elapsed = started.elapsed();
+    assert_eq!(
+        get(&engine, 1, 16384),
+        Some(LiteralValue::Number(16384.0)),
+        "XFD1 is projected"
+    );
+    assert!(elapsed.as_secs() < 60, "full-width spill took {elapsed:?}");
+}

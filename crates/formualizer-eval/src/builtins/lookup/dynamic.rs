@@ -4178,10 +4178,11 @@ mod tests {
     }
 
     #[test]
-    fn randarray_oversized_returns_num_error_quickly() {
+    fn randarray_oversized_returns_spill_error_quickly() {
         let wb = TestWorkbook::new().with_function(Arc::new(RandArrayFn));
         let ctx = wb.interpreter();
         let f = ctx.context.get_function("", "RANDARRAY").unwrap();
+        // Wider than a sheet → #SPILL! (Excel), without allocating.
         let rows = lit(LiteralValue::Number(1e6));
         let cols = lit(LiteralValue::Number(1e6));
         let args = vec![
@@ -4196,14 +4197,31 @@ mod tests {
         let elapsed = started.elapsed();
         match v {
             LiteralValue::Error(e) => {
-                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Num)
+                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Spill)
             }
-            other => panic!("expected #NUM! got {other:?}"),
+            other => panic!("expected #SPILL! got {other:?}"),
         }
         assert!(
             elapsed.as_millis() < 250,
             "oversized RANDARRAY must short-circuit, took {elapsed:?}"
         );
+        // Fits the sheet's dimensions but exceeds the allocation guard → #NUM!.
+        let rows = lit(LiteralValue::Int(8192));
+        let cols = lit(LiteralValue::Int(8192));
+        let args = vec![
+            ArgumentHandle::new(&rows, &ctx),
+            ArgumentHandle::new(&cols, &ctx),
+        ];
+        match f
+            .dispatch(&args, &ctx.function_context(None))
+            .unwrap()
+            .into_literal()
+        {
+            LiteralValue::Error(e) => {
+                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Num)
+            }
+            other => panic!("expected #NUM! got {other:?}"),
+        }
     }
 
     #[test]
