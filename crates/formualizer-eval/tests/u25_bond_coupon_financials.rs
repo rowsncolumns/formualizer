@@ -114,6 +114,36 @@ fn actual_actual_year_fraction_follows_excel_yearfrac() {
         1000.0 * 0.1 * 182.0 / 365.0,
         1e-9,
     );
+    // Maturity ON a real Feb 29: the span never reaches 1-Mar-2024, so the straddle test alone
+    // misses it — Excel still divides by 366 (ACCRINTM 99.7267759563, DISC 0.0300821918).
+    assert_close(
+        "=ACCRINTM(DATE(2023,3,1), DATE(2024,2,29), 0.1, 1000, 1)",
+        1000.0 * 0.1 * 365.0 / 366.0,
+        1e-9,
+    );
+    assert_close(
+        "=DISC(DATE(2023,3,1), DATE(2024,2,29), 97, 100, 1)",
+        0.03 / (365.0 / 366.0),
+        1e-12,
+    );
+    // YEARFRAC itself evaluates the same algorithm (order-independent, never negative): the
+    // Feb 29 end rule in either argument order, and the average-year rule beyond one year.
+    assert_close(
+        "=YEARFRAC(DATE(2024,2,29), DATE(2023,3,1), 1)",
+        365.0 / 366.0,
+        1e-12,
+    );
+    assert_close(
+        "=YEARFRAC(DATE(2020,2,1), DATE(2022,1,1), 1)",
+        700.0 / (1096.0 / 3.0),
+        1e-12,
+    );
+    assert_close(
+        "=YEARFRAC(DATE(2022,1,1), DATE(2020,2,1), 1)",
+        700.0 / (1096.0 / 3.0),
+        1e-12,
+    );
+    assert_close("=YEARFRAC(DATE(2007,2,28), DATE(2008,2,29), 0)", 1.0, 1e-12);
     // A span longer than a year uses the average length of the years touched (2008 is leap).
     assert_close(
         "=ACCRINTM(DATE(2008,1,1), DATE(2010,1,1), 0.1, 1000, 1)",
@@ -159,6 +189,34 @@ fn disc_counts_days_per_basis() {
     assert_num_error("=DISC(DATE(2007,1,25), DATE(2007,6,15), 0, 100, 1)");
     assert_num_error("=DISC(DATE(2007,6,15), DATE(2007,1,25), 97.975, 100, 1)");
     assert_num_error("=DISC(DATE(2007,1,25), DATE(2007,6,15), 97.975, 100, 5)");
+}
+
+/// A skipped `[basis]` slot (`FN(a, b,)`) is the default, like an omitted one. The parser emits
+/// the same empty-text literal for an explicit `""`, so that is ALSO the default here — Excel
+/// and the JS engine return `#VALUE!` for `""`. Recorded cross-engine divergence (spreadsheet#546
+/// U25 review); pinned so a parser change that starts distinguishing the two shows up.
+#[test]
+fn blank_optional_basis_slot_is_the_default() {
+    assert_close(
+        "=COUPDAYS(DATE(2007,1,25), DATE(2008,11,15), 2,)",
+        180.0,
+        1e-12,
+    );
+    assert_close(
+        "=DISC(DATE(2023,2,28), DATE(2023,8,31), 97, 100,)",
+        0.03 / (180.0 / 360.0),
+        1e-12,
+    );
+    assert_close(
+        "=YEARFRAC(DATE(2023,2,28), DATE(2023,8,31),)",
+        180.0 / 360.0,
+        1e-12,
+    );
+    assert_close(
+        "=COUPDAYS(DATE(2007,1,25), DATE(2008,11,15), 2, \"\")",
+        180.0,
+        1e-12,
+    );
 }
 
 #[test]

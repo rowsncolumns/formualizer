@@ -35,9 +35,10 @@ fn days_in_year(year: i32) -> f64 {
 ///
 /// A span of one year or less — same calendar year, or consecutive years with the end
 /// month/day not past the start month/day — is measured against 366 days when it lies inside a
-/// single leap year or straddles a Feb 29, else 365. A longer span is measured against the
-/// average length of the calendar years it touches. The securities functions (`PRICEDISC`,
-/// `INTRATE`, `ACCRINTM`, …) are defined in terms of the same rule, so it lives here for both.
+/// single leap year, straddles a Feb 29 or ends on one, else 365. A longer span is measured
+/// against the average length of the calendar years it touches. The securities functions
+/// (`PRICEDISC`, `INTRATE`, `ACCRINTM`, …) are defined in terms of the same rule, so it lives
+/// here for both.
 pub fn actual_actual_year_length(s: NaiveDate, e: NaiveDate) -> f64 {
     let at_most_one_year = s.year() == e.year()
         || (e.year() == s.year() + 1
@@ -50,7 +51,11 @@ pub fn actual_actual_year_length(s: NaiveDate, e: NaiveDate) -> f64 {
     let mar1 = |y: i32| NaiveDate::from_ymd_opt(y, 3, 1).expect("mar 1");
     let straddles_feb29 = (leap(s.year()) && s < mar1(s.year()) && e >= mar1(s.year()))
         || (leap(e.year()) && s < mar1(e.year()) && e >= mar1(e.year()));
-    if (s.year() == e.year() && leap(s.year())) || straddles_feb29 {
+    // A span ENDING on a real Feb 29 never reaches that year's Mar 1, so the straddle test
+    // misses it; Excel still divides by 366 (`YEARFRAC(DATE(2023,3,1), DATE(2024,2,29), 1)` =
+    // 365/366).
+    let ends_on_feb29 = e.month() == 2 && e.day() == 29 && leap(e.year());
+    if (s.year() == e.year() && leap(s.year())) || straddles_feb29 || ends_on_feb29 {
         366.0
     } else {
         365.0
@@ -384,7 +389,10 @@ impl Function for YearFracFn {
                         0
                     }
                 }
+                // Blank, or a skipped slot (`YEARFRAC(a, b,)` — the parser emits an empty text
+                // literal), is the default basis, as in the securities functions' `opt_num`.
                 LiteralValue::Empty => 0,
+                LiteralValue::Text(t) if t.is_empty() => 0,
                 LiteralValue::Error(e) => {
                     return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
                 }
