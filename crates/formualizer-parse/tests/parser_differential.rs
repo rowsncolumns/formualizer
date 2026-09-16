@@ -218,7 +218,7 @@ fn leading_empty_argument_followed_by_argument_parses() {
             assert_eq!(args.len(), 4);
             assert!(matches!(
                 &args[0].node_type,
-                ASTNodeType::Literal(LiteralValue::Text(s)) if s.is_empty()
+                ASTNodeType::Literal(LiteralValue::Empty)
             ));
         }
         other => panic!("expected Function, got {other:?}"),
@@ -231,10 +231,10 @@ fn comma_only_empty_arguments_preserve_arity() {
     match ast.node_type {
         ASTNodeType::Function { args, .. } => {
             assert_eq!(args.len(), 2);
-            assert!(args.iter().all(|arg| matches!(
-                &arg.node_type,
-                ASTNodeType::Literal(LiteralValue::Text(s)) if s.is_empty()
-            )));
+            assert!(
+                args.iter()
+                    .all(|arg| matches!(&arg.node_type, ASTNodeType::Literal(LiteralValue::Empty)))
+            );
         }
         other => panic!("expected Function, got {other:?}"),
     }

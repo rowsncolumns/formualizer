@@ -154,6 +154,25 @@ fn pretty_child(
     }
 }
 
+/// A numeric literal the way Excel's formula bar spells it: 15 significant digits, trailing zeros
+/// dropped, and scientific notation only once the integer part outgrows 15 digits (`=1E+20`, but
+/// `=0.000001` stays decimal — the formula bar never shortens a small constant to `1E-06`).
+fn excel_formula_number(n: f64) -> String {
+    let general = formualizer_common::number_to_excel_text(n);
+    let Some((mantissa, exp)) = general.split_once("E-") else {
+        return general;
+    };
+    let Ok(exp) = exp.parse::<usize>() else {
+        return general;
+    };
+    let (sign, mantissa) = match mantissa.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", mantissa),
+    };
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    format!("{sign}0.{}{digits}", "0".repeat(exp - 1))
+}
+
 fn pretty_print_node(ast: &ASTNode, spacing: Spacing) -> String {
     match &ast.node_type {
         ASTNodeType::Literal(value) => match value {
@@ -165,10 +184,9 @@ fn pretty_print_node(ast: &ASTNode, spacing: Spacing) -> String {
             // An omitted argument (`SUM(A1,)`, `IF(c,,1)`) prints as nothing: Excel distinguishes
             // it from a typed `""` (`SUM(A1,"")` is #VALUE!, `IF(c,"",1)` returns text).
             crate::LiteralValue::Empty => String::new(),
-            // Excel spells its literals upper-case and in General number form (`1E+20`, not
-            // `100000000000000000000`; 15 significant digits).
+            // Excel spells its literals upper-case and its numbers with 15 significant digits.
             crate::LiteralValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
-            crate::LiteralValue::Number(n) => formualizer_common::number_to_excel_text(*n),
+            crate::LiteralValue::Number(n) => excel_formula_number(*n),
             _ => format!("{value}"),
         },
         ASTNodeType::Reference { reference, .. } => reference.normalise(),
@@ -361,6 +379,10 @@ mod tests {
         assert_eq!(excel_formula(&ast), "=1E+20");
         let ast = parse("=1.50*2+0.000001").unwrap();
         assert_eq!(excel_formula(&ast), "=1.5*2+0.000001");
+        let ast = parse("=-0.0000000125+1E-9").unwrap();
+        assert_eq!(excel_formula(&ast), "=-0.0000000125+0.000000001");
+        let ast = parse("=1/3+0.333333333333333333").unwrap();
+        assert_eq!(excel_formula(&ast), "=1/3+0.333333333333333");
         // An omitted argument stays omitted — `SUM(x,)` and `SUM(x,"")` mean different things.
         let ast = parse("=SUM(A2:A3,)").unwrap();
         assert_eq!(excel_formula(&ast), "=SUM(A2:A3,)");
