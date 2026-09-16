@@ -2842,6 +2842,12 @@ fn clean_float(val: f64) -> f64 {
     }
 }
 
+/// A non-integer complex component the way Excel spells it: 15 significant digits
+/// (`IMEXP("1+i")` → `1.46869393991589+2.28735528717884i`), never the 17-digit `f64` print.
+fn excel_part(v: f64) -> String {
+    formualizer_common::number_to_excel_text(v)
+}
+
 /// Format a complex number as a string
 fn format_complex(real: f64, imag: f64, suffix: char) -> String {
     // Clean up floating point noise
@@ -2861,7 +2867,7 @@ fn format_complex(real: f64, imag: f64, suffix: char) -> String {
         if real == real.trunc() && real.abs() < 1e15 {
             return format!("{}", real as i64);
         }
-        return format!("{}", real);
+        return excel_part(real);
     }
 
     if real_is_zero {
@@ -2875,14 +2881,14 @@ fn format_complex(real: f64, imag: f64, suffix: char) -> String {
         if imag == imag.trunc() && imag.abs() < 1e15 {
             return format!("{}{}", imag as i64, suffix);
         }
-        return format!("{}{}", imag, suffix);
+        return format!("{}{}", excel_part(imag), suffix);
     }
 
     // Both parts are non-zero
     let real_str = if real == real.trunc() && real.abs() < 1e15 {
         format!("{}", real as i64)
     } else {
-        format!("{}", real)
+        excel_part(real)
     };
 
     let imag_str = if (imag - 1.0).abs() < 1e-15 {
@@ -2893,12 +2899,12 @@ fn format_complex(real: f64, imag: f64, suffix: char) -> String {
         if imag == imag.trunc() && imag.abs() < 1e15 {
             format!("+{}{}", imag as i64, suffix)
         } else {
-            format!("+{}{}", imag, suffix)
+            format!("+{}{}", excel_part(imag), suffix)
         }
     } else if imag == imag.trunc() && imag.abs() < 1e15 {
         format!("{}{}", imag as i64, suffix)
     } else {
-        format!("{}{}", imag, suffix)
+        format!("{}{}", excel_part(imag), suffix)
     };
 
     format!("{}{}", real_str, imag_str)
