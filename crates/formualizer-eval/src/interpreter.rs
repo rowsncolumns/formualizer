@@ -643,8 +643,12 @@ impl<'a> Interpreter<'a> {
                     return callable.invoke(self, &eval_args);
                 }
 
-                Err(ExcelError::new(ExcelErrorKind::Name)
-                    .with_message(format!("Unknown function: {name}")))
+                // Same contract as `eval_function_to_calc`: an unknown function is a
+                // `#NAME?` value that IS*/IFERROR can catch, not a hard failure.
+                Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                    ExcelError::new(ExcelErrorKind::Name)
+                        .with_message(format!("Unknown function: {name}")),
+                )))
             }
         }
     }
@@ -903,10 +907,21 @@ impl<'a> Interpreter<'a> {
 
         let lowered = self.lower_structured_table_ref(reference, self.current_sheet)?;
         let target = lowered.as_ref().unwrap_or(reference);
-        let view = self
-            .context
-            .resolve_range_view(target, self.current_sheet)?
-            .with_cancel_token(self.context.cancellation_token());
+        let view = match self.context.resolve_range_view(target, self.current_sheet) {
+            Ok(view) => view,
+            // A defined name that does not resolve is Excel's `#NAME?` *value*, not a
+            // failure of the formula: `=ISERROR(FOO)` is TRUE, `=IFERROR(FOO,1)` is 1 and
+            // `=ERROR.TYPE(FOO)` is 5. Surfacing it as `Err` would bypass every
+            // argument-level handler. Cancellation is the one genuine abort.
+            Err(e)
+                if matches!(target, ReferenceType::NamedRange(_))
+                    && e.kind != ExcelErrorKind::Cancelled =>
+            {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+            }
+            Err(e) => return Err(e),
+        };
+        let view = view.with_cancel_token(self.context.cancellation_token());
         Ok(crate::traits::CalcValue::Range(view))
     }
 
@@ -1414,20 +1429,16 @@ impl<'a> Interpreter<'a> {
                 (Ok(a), Ok(b)) => (a, b),
                 (Err(e), _) | (_, Err(e)) => return Ok(LiteralValue::Error(e)),
             };
-            // Excel domain: negative base with non-integer exponent -> #NUM!
+            // Excel domain: negative base with non-integer exponent -> #NUM!,
+            // 0^0 -> #NUM!, 0 to a negative power -> #DIV/0!
             if a < 0.0 && b.fract() != 0.0 {
                 return Ok(LiteralValue::Error(ExcelError::new_num()));
             }
-            // Excel: 0^0 is #NUM! and 0^negative is #DIV/0! (IEEE would give 1 / +inf).
-            if a == 0.0 {
-                if b == 0.0 {
-                    return Ok(LiteralValue::Error(ExcelError::new_num()));
-                }
-                if b < 0.0 {
-                    return Ok(LiteralValue::Error(ExcelError::from_error_string(
-                        "#DIV/0!",
-                    )));
-                }
+            if a == 0.0 && b == 0.0 {
+                return Ok(LiteralValue::Error(ExcelError::new_num()));
+            }
+            if a == 0.0 && b < 0.0 {
+                return Ok(LiteralValue::Error(ExcelError::new_div()));
             }
             match crate::coercion::sanitize_numeric(a.powf(b)) {
                 Ok(n) => Ok(LiteralValue::Number(n)),
@@ -1619,8 +1630,14 @@ impl<'a> Interpreter<'a> {
                 };
                 let res = match (Self::compare_rank(&l), Self::compare_rank(&r)) {
                     (Some(1), Some(1)) => {
-                        let a = crate::coercion::to_number_strict(&l)?;
-                        let b = crate::coercion::to_number_strict(&r)?;
+                        // Excel compares numbers at 15 significant digits, so
+                        // `=0.1+0.2=0.3` is TRUE.
+                        let a = crate::coercion::to_excel_precision(
+                            crate::coercion::to_number_strict(&l)?,
+                        );
+                        let b = crate::coercion::to_excel_precision(
+                            crate::coercion::to_number_strict(&r)?,
+                        );
                         self.cmp_f64(a, b, op)
                     }
                     (Some(2), Some(2)) => match (&l, &r) {

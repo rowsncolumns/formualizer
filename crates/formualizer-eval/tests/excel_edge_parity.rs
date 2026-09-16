@@ -252,3 +252,35 @@ fn totals_specifier_on_a_table_without_totals_row_is_ref_error() {
     assert_err("=Sales[[#Totals],[Amount]]", ExcelErrorKind::Ref);
     assert_num("=SUM(Sales[Amount])", 30.0);
 }
+
+// ───────────── E-33: bare `[@Col]` outside any table ─────────────
+
+#[test]
+fn bare_this_row_reference_outside_any_table_is_name_error() {
+    let mut e = seeded();
+    let res = e.set_cell_formula("Sheet1", 10, 11, parse("=[@Amount]").unwrap());
+    match res {
+        Err(err) => assert_eq!(err.kind, ExcelErrorKind::Name, "ingest rejects with #NAME?"),
+        Ok(()) => {
+            e.evaluate_all().unwrap();
+            let v = e.get_cell_value("Sheet1", 10, 11).unwrap_or(LiteralValue::Empty);
+            assert!(
+                matches!(&v, LiteralValue::Error(er) if er.kind == ExcelErrorKind::Name),
+                "installed formula must evaluate to #NAME?, got {v:?}"
+            );
+        }
+    }
+    // A named this-row ref outside the table's rows is #VALUE! (E-33 second form).
+    let res = e.set_cell_formula("Sheet1", 10, 12, parse("=Sales[@Amount]").unwrap());
+    match res {
+        Err(err) => assert_eq!(err.kind, ExcelErrorKind::Value),
+        Ok(()) => {
+            e.evaluate_all().unwrap();
+            let v = e.get_cell_value("Sheet1", 10, 12).unwrap_or(LiteralValue::Empty);
+            assert!(
+                matches!(&v, LiteralValue::Error(er) if er.kind == ExcelErrorKind::Value),
+                "installed formula must evaluate to #VALUE!, got {v:?}"
+            );
+        }
+    }
+}

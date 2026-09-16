@@ -385,10 +385,12 @@ fn round_element(n: &LiteralValue, digits: &LiteralValue) -> LiteralValue {
         let n = elem_num(n)?;
         let digits = elem_num(digits)? as i32;
         let f = 10f64.powi(digits.abs());
+        // Excel rounds the 15-significant-digit decimal, so `ROUND(1.005,2)` is
+        // 1.01 even though 1.005*100 is 100.49999999999999 as a double.
         let out = if digits >= 0 {
-            (n * f).round() / f
+            crate::coercion::to_excel_precision(n * f).round() / f
         } else {
-            (n / f).round() * f
+            crate::coercion::to_excel_precision(n / f).round() * f
         };
         Ok(LiteralValue::Number(out))
     };
@@ -463,9 +465,9 @@ fn rounddown_element(n: &LiteralValue, digits: &LiteralValue) -> LiteralValue {
         let digits = elem_num(digits)? as i32;
         let f = 10f64.powi(digits.abs());
         let out = if digits >= 0 {
-            (n * f).trunc() / f
+            crate::coercion::to_excel_precision(n * f).trunc() / f
         } else {
-            (n / f).trunc() * f
+            crate::coercion::to_excel_precision(n / f).trunc() * f
         };
         Ok(LiteralValue::Number(out))
     };
@@ -539,7 +541,8 @@ fn roundup_element(n: &LiteralValue, digits: &LiteralValue) -> LiteralValue {
         let n = elem_num(n)?;
         let digits = elem_num(digits)? as i32;
         let f = 10f64.powi(digits.abs());
-        let mut scaled = if digits >= 0 { n * f } else { n / f };
+        let mut scaled =
+            crate::coercion::to_excel_precision(if digits >= 0 { n * f } else { n / f });
         if scaled > 0.0 {
             scaled = scaled.ceil();
         } else {
@@ -726,8 +729,14 @@ fn ceiling_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> LiteralValue
                 "#DIV/0!",
             )));
         }
+        // Excel: a positive number with a negative significance is #NUM!; a
+        // negative number with a negative significance rounds away from zero.
         if sig < 0.0 {
-            sig = sig.abs(); /* Excel nuances: #NUM! when sign mismatch; simplified TODO */
+            if n > 0.0 {
+                return Ok(LiteralValue::Error(ExcelError::new_num()));
+            }
+            sig = sig.abs();
+            return Ok(LiteralValue::Number((n / sig).floor() * sig));
         }
         let k = (n / sig).ceil();
         Ok(LiteralValue::Number(k * sig))
@@ -1173,16 +1182,12 @@ fn power_element(base: &LiteralValue, expv: &LiteralValue) -> LiteralValue {
         if base < 0.0 && (expv.fract().abs() > 1e-12) {
             return Ok(LiteralValue::Error(ExcelError::new_num()));
         }
-        // Excel: POWER(0,0) is #NUM! and POWER(0,negative) is #DIV/0!.
-        if base == 0.0 {
-            if expv == 0.0 {
-                return Ok(LiteralValue::Error(ExcelError::new_num()));
-            }
-            if expv < 0.0 {
-                return Ok(LiteralValue::Error(ExcelError::from_error_string(
-                    "#DIV/0!",
-                )));
-            }
+        // Excel: 0^0 is #NUM!, 0 to a negative power is #DIV/0!.
+        if base == 0.0 && expv == 0.0 {
+            return Ok(LiteralValue::Error(ExcelError::new_num()));
+        }
+        if base == 0.0 && expv < 0.0 {
+            return Ok(LiteralValue::Error(ExcelError::new_div()));
         }
         Ok(LiteralValue::Number(base.powf(expv)))
     };

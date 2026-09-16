@@ -221,11 +221,11 @@ impl Function for CountFn {
                     }
                 }
             } else {
+                // COUNT never propagates: an error argument is simply not a number.
                 let v = arg.value()?.into_literal();
-                if let LiteralValue::Error(e) = v {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                }
-                if !matches!(v, LiteralValue::Empty) && coerce_num(&v).is_ok() {
+                if !matches!(v, LiteralValue::Empty | LiteralValue::Error(_))
+                    && coerce_num(&v).is_ok()
+                {
                     count += 1;
                 }
             }
@@ -836,7 +836,8 @@ mod tests_count {
     }
 
     #[test]
-    fn count_direct_error_argument_propagates() {
+    fn count_ignores_direct_error_argument() {
+        // Excel: COUNT never propagates; `COUNT(A1,NA())` counts the number only.
         let wb = TestWorkbook::new().with_function(std::sync::Arc::new(CountFn));
         let ctx = interp(&wb);
         let err = ASTNode::new(
@@ -845,13 +846,17 @@ mod tests_count {
             ))),
             None,
         );
-        let args = vec![ArgumentHandle::new(&err, &ctx)];
+        let one = ASTNode::new(ASTNodeType::Literal(LiteralValue::Int(1)), None);
+        let args = vec![
+            ArgumentHandle::new(&one, &ctx),
+            ArgumentHandle::new(&err, &ctx),
+        ];
         let f = ctx.context.get_function("", "COUNT").unwrap();
         let fctx = ctx.function_context(None);
-        match f.dispatch(&args, &fctx).unwrap().into_literal() {
-            LiteralValue::Error(e) => assert_eq!(e, "#DIV/0!"),
-            v => panic!("unexpected {v:?}"),
-        }
+        assert_eq!(
+            f.dispatch(&args, &fctx).unwrap().into_literal(),
+            LiteralValue::Number(1.0)
+        );
     }
 }
 
