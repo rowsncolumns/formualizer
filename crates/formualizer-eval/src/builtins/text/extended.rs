@@ -839,6 +839,12 @@ impl Function for FixedFn {
         } else {
             2
         };
+        // Excel caps FIXED at 127 decimal places; anything above is #VALUE!.
+        if decimals > 127 {
+            return Ok(CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new_value(),
+            )));
+        }
 
         let no_commas = if args.len() >= 3 {
             match scalar_like_value(&args[2])? {

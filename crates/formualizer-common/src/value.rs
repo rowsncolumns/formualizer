@@ -228,9 +228,10 @@ pub fn number_to_excel_text(n: f64) -> String {
         .split_once('e')
         .expect("f64 `{:e}` always has an exponent");
     let exp: i32 = exp.parse().expect("f64 `{:e}` exponent is an integer");
+    let (mantissa, exp) = round_tie_away_from_zero(n, mantissa, exp);
     let mantissa = match mantissa.find('.') {
         Some(_) => mantissa.trim_end_matches('0').trim_end_matches('.'),
-        None => mantissa,
+        None => mantissa.as_str(),
     };
     if exp < -4 || exp >= 15 {
         let sign = if exp < 0 { '-' } else { '+' };
@@ -252,6 +253,82 @@ pub fn number_to_excel_text(n: f64) -> String {
         format!("{int_part}.{frac_part}")
     };
     if negative { format!("-{body}") } else { body }
+}
+
+/// `{:.14e}` rounds the double's exact decimal expansion half-to-even, but Excel (like
+/// JavaScript's `toExponential`) rounds an exact tie half *away from zero*:
+/// `1234567890123445` spells "1.23456789012345E+15" and `123456789012344.5` spells
+/// "123456789012345". Ties are only possible when the double is exactly the 16-digit value
+/// `(10·M + 5) × 10^(exp-15)` below an even `M`, so that single case is detected exactly on
+/// the binary representation and bumped to `M + 1`. Returns the (possibly adjusted)
+/// 15-digit `d.dddddddddddddd` mantissa and decimal exponent.
+fn round_tie_away_from_zero(n: f64, mantissa: &str, exp: i32) -> (String, i32) {
+    let (negative, digits) = match mantissa.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, mantissa),
+    };
+    let m: u64 = digits
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .expect("`{:.14e}` mantissa is 15 decimal digits");
+    if m % 2 == 1 || !is_exact_decimal(n.abs(), 10 * u128::from(m) + 5, exp - 15) {
+        return (mantissa.to_string(), exp);
+    }
+    let (m, exp) = if m + 1 == 1_000_000_000_000_000 {
+        (100_000_000_000_000, exp + 1)
+    } else {
+        (m + 1, exp)
+    };
+    let sign = if negative { "-" } else { "" };
+    (
+        format!(
+            "{sign}{}.{:014}",
+            m / 100_000_000_000_000,
+            m % 100_000_000_000_000
+        ),
+        exp,
+    )
+}
+
+/// True when the finite, non-zero `abs` is *exactly* `mant × 10^k`, decided on the double's
+/// binary decomposition `m × 2^e` (so no decimal rounding is involved). Magnitudes that do
+/// not fit the u128 arithmetic cannot be ties and report `false`.
+fn is_exact_decimal(abs: f64, mant: u128, k: i32) -> bool {
+    let bits = abs.to_bits();
+    let exp_bits = ((bits >> 52) & 0x7ff) as i32;
+    let frac = bits & ((1u64 << 52) - 1);
+    let (m, e) = if exp_bits == 0 {
+        (u128::from(frac), -1074)
+    } else {
+        (u128::from(frac | (1u64 << 52)), exp_bits - 1075)
+    };
+    // m × 2^e == mant × 10^k  ⇔  lhs × 2^e == rhs with the power of ten folded into one side.
+    let (lhs, rhs) = if k >= 0 {
+        match 10u128
+            .checked_pow(k as u32)
+            .and_then(|p| p.checked_mul(mant))
+        {
+            Some(rhs) => (m, rhs),
+            None => return false,
+        }
+    } else {
+        match 10u128
+            .checked_pow((-k) as u32)
+            .and_then(|p| p.checked_mul(m))
+        {
+            Some(lhs) => (lhs, mant),
+            None => return false,
+        }
+    };
+    if e >= 0 {
+        let s = e as u32;
+        s < 128 && rhs.trailing_zeros() >= s && (rhs >> s) == lhs
+    } else {
+        let s = (-e) as u32;
+        s < 128 && rhs.leading_zeros() >= s && (rhs << s) == lhs
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +359,40 @@ mod number_to_excel_text_tests {
         assert_eq!(number_to_excel_text(-7.0), "-7");
         assert_eq!(number_to_excel_text(0.0001), "0.0001");
         assert_eq!(number_to_excel_text(0.00012345), "0.00012345");
+    }
+
+    #[test]
+    fn exact_ties_round_half_away_from_zero() {
+        // 16-significant-digit doubles ending in 5: Excel and JS `toExponential(14)` round
+        // the tie away from zero, `{:.14e}` alone would round to even.
+        assert_eq!(
+            number_to_excel_text(1234567890123445.0),
+            "1.23456789012345E+15"
+        );
+        assert_eq!(
+            number_to_excel_text(-1234567890123445.0),
+            "-1.23456789012345E+15"
+        );
+        assert_eq!(number_to_excel_text(123456789012344.5), "123456789012345");
+        assert_eq!(number_to_excel_text(12345678901234.25), "12345678901234.3");
+        assert_eq!(
+            number_to_excel_text(12345678901234450.0),
+            "1.23456789012345E+16"
+        );
+        // Ties that already round up to the even digit are unchanged.
+        assert_eq!(number_to_excel_text(123456789012345.5), "123456789012346");
+        // A 15-digit-or-shorter value has no tie to resolve.
+        assert_eq!(number_to_excel_text(0.5), "0.5");
+        assert_eq!(number_to_excel_text(2.5), "2.5");
+        assert_eq!(number_to_excel_text(123456789012345.0), "123456789012345");
+        // 0.1234567890123455 is not exactly representable (the double is
+        // 0.12345678901234549695…), so the exact binary value decides: no tie, round down.
+        assert_eq!(
+            number_to_excel_text(0.1234567890123455),
+            "0.123456789012345"
+        );
+        // Carry across the mantissa (9.99…95 → 1.00…0E+16).
+        assert_eq!(number_to_excel_text(9999999999999995.0), "1E+16");
     }
 
     #[test]
