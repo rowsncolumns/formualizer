@@ -82,6 +82,16 @@ fn is_bounded_range_arg(arg: &ArgumentHandle<'_, '_>) -> bool {
     }
 }
 
+/// A range parameter handed a non-reference (`=SUMIF(FOO,1)` with `FOO` undefined, `INDIRECT`
+/// of garbage) sees the error *value* that expression produced. Excel propagates it —
+/// `=SUMIF(FOO,1)` is `#NAME?` — rather than matching nothing and answering 0.
+fn non_reference_range_arg(arg: &ArgumentHandle<'_, '_>) -> Result<LiteralValue, ExcelError> {
+    match arg.value()?.into_literal() {
+        LiteralValue::Error(e) => Err(e),
+        v => Ok(v),
+    }
+}
+
 fn eval_if_family<'a, 'b>(
     args: &[ArgumentHandle<'a, 'b>],
     ctx: &dyn FunctionContext<'b>,
@@ -109,7 +119,7 @@ fn eval_if_family<'a, 'b>(
         let pred = crate::args::parse_criteria(&args[1].value()?.into_literal())?;
         let crit_rv = args[0].range_view().ok();
         let crit_val = if crit_rv.is_none() {
-            Some(args[0].value()?.into_literal())
+            Some(non_reference_range_arg(&args[0])?)
         } else {
             None
         };
@@ -121,14 +131,14 @@ fn eval_if_family<'a, 'b>(
                     let crit_dims = crit_specs[0].0.as_ref().map(|v| v.dims()).unwrap_or((1, 1));
                     sum_view = Some(v.expand_to(crit_dims.0, crit_dims.1));
                 } else {
-                    sum_scalar = Some(args[2].value()?.into_literal());
+                    sum_scalar = Some(non_reference_range_arg(&args[2])?);
                 }
             } else {
                 // Default target is criteria range
                 if let Ok(v) = args[0].range_view() {
                     sum_view = Some(v);
                 } else {
-                    sum_scalar = Some(args[0].value()?.into_literal());
+                    sum_scalar = Some(non_reference_range_arg(&args[0])?);
                 }
             }
         }
@@ -160,7 +170,7 @@ fn eval_if_family<'a, 'b>(
                 }
 
                 if val.is_none() && rv.is_none() {
-                    val = Some(args[i].value()?.into_literal());
+                    val = Some(non_reference_range_arg(&args[i])?);
                 }
 
                 let pred = crate::args::parse_criteria(&args[i + 1].value()?.into_literal())?;
@@ -181,7 +191,7 @@ fn eval_if_family<'a, 'b>(
                 }
                 sum_view = Some(v);
             } else {
-                sum_scalar = Some(args[0].value()?.into_literal());
+                sum_scalar = Some(non_reference_range_arg(&args[0])?);
             }
             for i in (1..args.len()).step_by(2) {
                 let mut rv = args[i].range_view().ok();
@@ -200,7 +210,7 @@ fn eval_if_family<'a, 'b>(
                 }
 
                 if val.is_none() && rv.is_none() {
-                    val = Some(args[i].value()?.into_literal());
+                    val = Some(non_reference_range_arg(&args[i])?);
                 }
 
                 let pred = crate::args::parse_criteria(&args[i + 1].value()?.into_literal())?;

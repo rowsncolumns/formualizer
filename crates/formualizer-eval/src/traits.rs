@@ -371,9 +371,9 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 ASTNodeType::Reference { reference, .. } => {
                     self.interp.reference_for_current_offset(reference)
                 }
-                ASTNodeType::Function { .. } | ASTNodeType::BinaryOp { .. } => {
-                    self.interp.evaluate_ast_as_reference(node)
-                }
+                ASTNodeType::Function { .. }
+                | ASTNodeType::BinaryOp { .. }
+                | ASTNodeType::UnaryOp { .. } => self.interp.evaluate_ast_as_reference(node),
                 _ => Err(ExcelError::new(ExcelErrorKind::Ref)
                     .with_message("Expected a reference (by-ref argument)")),
             },
@@ -392,7 +392,8 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                         self.interp.reference_for_current_offset(&reference)
                     }
                     crate::engine::arena::AstNodeData::Function { .. }
-                    | crate::engine::arena::AstNodeData::BinaryOp { .. } => self
+                    | crate::engine::arena::AstNodeData::BinaryOp { .. }
+                    | crate::engine::arena::AstNodeData::UnaryOp { .. } => self
                         .interp
                         .evaluate_arena_ast_as_reference(*id, data_store, sheet_registry),
                     _ => Err(ExcelError::new(ExcelErrorKind::Ref)
@@ -657,8 +658,6 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                                 .with_cancel_token(self.interp.context.cancellation_token()),
                         )
                     }
-                    _ => Err(ExcelError::new(ExcelErrorKind::Ref)
-                        .with_message("Argument cannot be interpreted as a range.")),
                 }
             }
         }
@@ -951,9 +950,9 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 ASTNodeType::Reference { reference, .. } => {
                     self.interp.reference_for_current_offset(reference)
                 }
-                ASTNodeType::Function { .. } | ASTNodeType::BinaryOp { .. } => {
-                    self.interp.evaluate_ast_as_reference(node)
-                }
+                ASTNodeType::Function { .. }
+                | ASTNodeType::BinaryOp { .. }
+                | ASTNodeType::UnaryOp { .. } => self.interp.evaluate_ast_as_reference(node),
                 _ => Err(ExcelError::new(ExcelErrorKind::Ref)
                     .with_message("Argument is not a reference")),
             },
@@ -971,7 +970,8 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                         self.reference_for_eval()
                     }
                     crate::engine::arena::AstNodeData::Function { .. }
-                    | crate::engine::arena::AstNodeData::BinaryOp { .. } => self
+                    | crate::engine::arena::AstNodeData::BinaryOp { .. }
+                    | crate::engine::arena::AstNodeData::UnaryOp { .. } => self
                         .interp
                         .evaluate_arena_ast_as_reference(*id, data_store, sheet_registry),
                     _ => Err(ExcelError::new(ExcelErrorKind::Ref)
@@ -1290,9 +1290,14 @@ pub trait Resolver: ReferenceResolver + RangeResolver + NamedRangeResolver + Tab
                             "Legacy Headers/Totals variants not used; use SpecialItem".to_string(),
                         ))
                     }
-                    None => Err(ExcelError::new(ExcelErrorKind::Ref).with_message(
-                        "Table reference without specifier is unsupported".to_string(),
-                    )),
+                    // A bare table name (`Table1`) is its data body, as in Excel.
+                    None => {
+                        if let Some(body) = t.data_body() {
+                            Ok(body)
+                        } else {
+                            Ok(Box::new(InMemoryRange::new(vec![])))
+                        }
+                    }
                 }
             }
             ReferenceType::NamedRange(n) => {
@@ -1521,6 +1526,19 @@ pub trait EvaluationContext: Resolver + FunctionProvider + SourceResolver {
 
     /// Optional: Physical sheet bounds (max rows, max cols) if known.
     fn sheet_bounds(&self, _sheet: &str) -> Option<(u32, u32)> {
+        None
+    }
+
+    /// The rectangle the spilled-range operator `A1#` denotes for the 1-based anchor
+    /// `(row, col)`: `(start_row, start_col, end_row, end_col)` of the dynamic-array spill the
+    /// cell anchors. A formula cell that does not spill is its own 1×1 region. `None` when the
+    /// cell holds no formula (Excel: `#REF!`), or for contexts that do not track spills.
+    fn spill_range_of_anchor(
+        &self,
+        _sheet: &str,
+        _row: u32,
+        _col: u32,
+    ) -> Option<(u32, u32, u32, u32)> {
         None
     }
 

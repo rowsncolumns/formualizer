@@ -31,6 +31,32 @@ fn days_in_year(year: i32) -> f64 {
     }
 }
 
+/// Excel's actual/actual (`YEARFRAC` basis 1) year length for the span `s..=e` (`s <= e`).
+///
+/// A span of one year or less — same calendar year, or consecutive years with the end
+/// month/day not past the start month/day — is measured against 366 days when it lies inside a
+/// single leap year or straddles a Feb 29, else 365. A longer span is measured against the
+/// average length of the calendar years it touches. The securities functions (`PRICEDISC`,
+/// `INTRATE`, `ACCRINTM`, …) are defined in terms of the same rule, so it lives here for both.
+pub fn actual_actual_year_length(s: NaiveDate, e: NaiveDate) -> f64 {
+    let at_most_one_year = s.year() == e.year()
+        || (e.year() == s.year() + 1
+            && (s.month() > e.month() || (s.month() == e.month() && s.day() >= e.day())));
+    if !at_most_one_year {
+        let total: f64 = (s.year()..=e.year()).map(days_in_year).sum();
+        return total / (e.year() - s.year() + 1) as f64;
+    }
+    let leap = |y: i32| days_in_year(y) == 366.0;
+    let mar1 = |y: i32| NaiveDate::from_ymd_opt(y, 3, 1).expect("mar 1");
+    let straddles_feb29 = (leap(s.year()) && s < mar1(s.year()) && e >= mar1(s.year()))
+        || (leap(e.year()) && s < mar1(e.year()) && e >= mar1(e.year()));
+    if (s.year() == e.year() && leap(s.year())) || straddles_feb29 {
+        366.0
+    } else {
+        365.0
+    }
+}
+
 fn is_last_day_of_month(d: NaiveDate) -> bool {
     d.succ_opt().is_none_or(|next| next.month() != d.month())
 }
@@ -151,10 +177,17 @@ impl Function for DaysFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let end = coerce_to_date(&args[0])?;
-        let start = coerce_to_date(&args[1])?;
+        let end = coerce_to_serial(&args[0])?;
+        let start = coerce_to_serial(&args[1])?;
+        // Validate the range the way every other date function does (#NUM! below 0)…
+        serial_to_date(end)?;
+        serial_to_date(start)?;
+        // …but subtract the truncated serials themselves: Excel's phantom 1900-02-29
+        // (serial 60) is a day like any other (DAYS(60,59) = DAYS(61,60) = 1,
+        // DAYS(61,59) = 2), which a NaiveDate difference cannot say because serial 60
+        // has no real date to map to.
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            (end - start).num_days() as f64,
+            end.trunc() - start.trunc(),
         )))
     }
 }
@@ -265,7 +298,8 @@ impl Function for Days360Fn {
 ///
 /// # Remarks
 /// - Supported `basis` values: `0` (US 30/360), `1` (actual/actual), `2` (actual/360), `3` (actual/365), `4` (European 30/360).
-/// - If `start_date > end_date`, the result is negative.
+/// - Basis `1` follows Excel: a span of one year or less is divided by 366 when it lies in a single leap year or straddles a Feb 29 (else 365); a longer span is divided by the average length of the calendar years it touches.
+/// - The order of the dates does not matter: `start_date > end_date` gives the same (non-negative) fraction, as in Excel.
 /// - Invalid `basis` values return `#NUM!`.
 /// - Serial dates are interpreted with the Excel 1900 mapping rather than workbook `1900`/`1904` context.
 ///
@@ -374,38 +408,24 @@ impl Function for YearFracFn {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)));
         }
 
-        let (s, e, sign) = if start <= end {
-            (start, end, 1.0)
+        // Excel swaps the dates when start_date > end_date: the fraction is never negative.
+        let (s, e) = if start <= end {
+            (start, end)
         } else {
-            (end, start, -1.0)
+            (end, start)
         };
 
         let actual_days = (e - s).num_days() as f64;
         let frac = match basis {
             0 => days_360_between(s, e, false) as f64 / 360.0,
-            1 => {
-                if s.year() == e.year() {
-                    actual_days / days_in_year(s.year())
-                } else {
-                    let start_year_end = NaiveDate::from_ymd_opt(s.year() + 1, 1, 1).unwrap();
-                    let end_year_start = NaiveDate::from_ymd_opt(e.year(), 1, 1).unwrap();
-
-                    let mut out = (start_year_end - s).num_days() as f64 / days_in_year(s.year());
-                    for year in (s.year() + 1)..e.year() {
-                        out += 1.0;
-                    }
-                    out + (e - end_year_start).num_days() as f64 / days_in_year(e.year())
-                }
-            }
+            1 => actual_days / actual_actual_year_length(s, e),
             2 => actual_days / 360.0,
             3 => actual_days / 365.0,
             4 => days_360_between(s, e, true) as f64 / 360.0,
             _ => unreachable!(),
         };
 
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            sign * frac,
-        )))
+        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(frac)))
     }
 }
 

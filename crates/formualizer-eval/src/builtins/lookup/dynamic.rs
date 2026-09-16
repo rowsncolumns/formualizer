@@ -74,6 +74,25 @@ pub fn super_wildcard_match(pattern: &str, text: &str) -> bool {
     super::lookup_utils::wildcard_pattern_match(pattern, text)
 }
 
+/// Is `arg` a reference whose extent is not fully declared — a whole-row / whole-column range, or a
+/// table / external / 3-D form the range view sizes on its own? Value arguments (array literals,
+/// function results) are fully sized by their view and return `false`.
+fn is_open_ended_reference(arg: &ArgumentHandle<'_, '_>) -> bool {
+    use formualizer_parse::parser::ReferenceType;
+    match arg.as_reference_or_eval() {
+        Ok(ReferenceType::Cell { .. }) => false,
+        Ok(ReferenceType::Range {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            ..
+        }) => start_row.is_none() || start_col.is_none() || end_row.is_none() || end_col.is_none(),
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
 /* ───────────────────────── XLOOKUP() ───────────────────────── */
 
 #[derive(Debug)]
@@ -277,6 +296,23 @@ impl Function for XLookupFn {
                 ExcelError::new(ExcelErrorKind::Value),
             )));
         };
+
+        // Excel: the return array must span the lookup array's length along the lookup axis
+        // (`XLOOKUP(v,A1:A5,B1:B3)` is #VALUE!). Only checked when neither side is a whole-row /
+        // whole-column reference — those views are trimmed to the sheet's used region, so their
+        // dims are not the declared extents.
+        if !is_open_ended_reference(&args[1]) && !is_open_ended_reference(&args[2]) {
+            let (need, have) = if vertical {
+                (lookup_rows, ret_rows)
+            } else {
+                (lookup_cols, ret_cols)
+            };
+            if need > 0 && need != have {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                    ExcelError::new(ExcelErrorKind::Value),
+                )));
+            }
+        }
 
         let lookup_len = {
             let raw = if vertical { lookup_rows } else { lookup_cols };
@@ -3027,9 +3063,15 @@ impl Function for SequenceFn {
         };
         let start = if args.len() >= 3 { num(&args[2])? } else { 1.0 };
         let step = if args.len() >= 4 { num(&args[3])? } else { 1.0 };
-        if rows <= 0 || cols <= 0 {
+        // Excel: a zero-sized SEQUENCE is an empty array (#CALC!); negative dims are #VALUE!.
+        if rows < 0 || cols < 0 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new(ExcelErrorKind::Value),
+            )));
+        }
+        if rows == 0 || cols == 0 {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new(ExcelErrorKind::Calc),
             )));
         }
         if let Some(e) = generated_array_too_large(rows, cols) {
@@ -4149,11 +4191,17 @@ mod tests {
     }
 
     #[test]
-    fn sequence_negative_and_zero_dims_keep_value_error() {
+    fn sequence_negative_dims_are_value_error_and_zero_dims_are_calc_error() {
         let wb = TestWorkbook::new().with_function(Arc::new(SequenceFn));
         let ctx = wb.interpreter();
         let f = ctx.context.get_function("", "SEQUENCE").unwrap();
-        for (r, c) in [(0i64, 5i64), (-3, 5), (5, 0), (5, -1)] {
+        // Excel: a zero-sized result is an empty array (#CALC!); negative dims are #VALUE!.
+        for (r, c, kind) in [
+            (0i64, 5i64, formualizer_common::ExcelErrorKind::Calc),
+            (5, 0, formualizer_common::ExcelErrorKind::Calc),
+            (-3, 5, formualizer_common::ExcelErrorKind::Value),
+            (5, -1, formualizer_common::ExcelErrorKind::Value),
+        ] {
             let rows = lit(LiteralValue::Int(r));
             let cols = lit(LiteralValue::Int(c));
             let args = vec![
@@ -4165,14 +4213,8 @@ mod tests {
                 .unwrap()
                 .into_literal()
             {
-                LiteralValue::Error(e) => {
-                    assert_eq!(
-                        e.kind,
-                        formualizer_common::ExcelErrorKind::Value,
-                        "SEQUENCE({r},{c})"
-                    )
-                }
-                other => panic!("expected #VALUE! for SEQUENCE({r},{c}), got {other:?}"),
+                LiteralValue::Error(e) => assert_eq!(e.kind, kind, "SEQUENCE({r},{c})"),
+                other => panic!("expected {kind:?} for SEQUENCE({r},{c}), got {other:?}"),
             }
         }
     }

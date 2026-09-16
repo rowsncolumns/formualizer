@@ -182,6 +182,102 @@ pub fn combine_references(
     })
 }
 
+/// Combine two references with the intersection operator (a space): the rectangle both operands
+/// share. Excel semantics: `A1:B2 B1:C3` → `B1:B2`; disjoint operands → `#NULL!`; operands on
+/// different sheets → `#NULL!`. An open-ended bound (`A:A`, `1:1`) clips to the other operand's
+/// bound on that axis, so `A:A 3:3` → `A3`.
+///
+/// `current_sheet` is the sheet an unqualified operand lives on, so `Sheet1!A1:B2 A1:C3` written
+/// on Sheet1 intersects instead of failing the sheet comparison.
+pub fn intersect_references(
+    a: &ReferenceType,
+    b: &ReferenceType,
+    current_sheet: &str,
+) -> Result<ReferenceType, ExcelError> {
+    type OpenBounds = (Option<u32>, Option<u32>, Option<u32>, Option<u32>);
+    fn to_bounds(r: &ReferenceType) -> Option<(Option<String>, OpenBounds)> {
+        match r {
+            ReferenceType::Cell {
+                sheet, row, col, ..
+            } => Some((
+                sheet.clone(),
+                (Some(*row), Some(*col), Some(*row), Some(*col)),
+            )),
+            ReferenceType::Range {
+                sheet,
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                ..
+            } => Some((sheet.clone(), (*start_row, *start_col, *end_row, *end_col))),
+            _ => None,
+        }
+    }
+    let not_reference = || {
+        ExcelError::new(ExcelErrorKind::Value)
+            .with_message("Intersection operands must be references")
+    };
+    let (sheet_a, (a_sr, a_sc, a_er, a_ec)) = to_bounds(a).ok_or_else(not_reference)?;
+    let (sheet_b, (b_sr, b_sc, b_er, b_ec)) = to_bounds(b).ok_or_else(not_reference)?;
+
+    let sheet_a_name = sheet_a.as_deref().unwrap_or(current_sheet);
+    let sheet_b_name = sheet_b.as_deref().unwrap_or(current_sheet);
+    if !sheet_a_name.eq_ignore_ascii_case(sheet_b_name) {
+        return Err(ExcelError::new(ExcelErrorKind::Null)
+            .with_message("References on different sheets do not intersect"));
+    }
+
+    // The intersection starts at the LATER start and ends at the EARLIER end; `None` is an
+    // unbounded edge and defers to the other operand.
+    let max_start = |x: Option<u32>, y: Option<u32>| match (x, y) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (x, None) => x,
+        (None, y) => y,
+    };
+    let min_end = |x: Option<u32>, y: Option<u32>| match (x, y) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (x, None) => x,
+        (None, y) => y,
+    };
+    let sr = max_start(a_sr, b_sr);
+    let sc = max_start(a_sc, b_sc);
+    let er = min_end(a_er, b_er);
+    let ec = min_end(a_ec, b_ec);
+    let disjoint =
+        |start: Option<u32>, end: Option<u32>| matches!((start, end), (Some(s), Some(e)) if s > e);
+    if disjoint(sr, er) || disjoint(sc, ec) {
+        return Err(
+            ExcelError::new(ExcelErrorKind::Null).with_message("References do not intersect")
+        );
+    }
+
+    let sheet = sheet_a.or(sheet_b);
+    if let (Some(r), Some(c), Some(er_v), Some(ec_v)) = (sr, sc, er, ec)
+        && r == er_v
+        && c == ec_v
+    {
+        return Ok(ReferenceType::Cell {
+            sheet,
+            row: r,
+            col: c,
+            row_abs: false,
+            col_abs: false,
+        });
+    }
+    Ok(ReferenceType::Range {
+        sheet,
+        start_row: sr,
+        start_col: sc,
+        end_row: er,
+        end_col: ec,
+        start_row_abs: false,
+        start_col_abs: false,
+        end_row_abs: false,
+        end_col_abs: false,
+    })
+}
+
 impl fmt::Display for Coord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.col_abs() {

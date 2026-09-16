@@ -3729,10 +3729,11 @@ where
                 return Err(ExcelError::new(ExcelErrorKind::NImpl)
                     .with_message("Complex structured references not yet supported".to_string()));
             }
-            None => {
-                return Err(ExcelError::new(ExcelErrorKind::NImpl)
-                    .with_message("Table reference without specifier is unsupported".to_string()));
-            }
+            // A bare table name (`Table1`) is its data body, as in Excel.
+            None => table
+                .data_body()
+                .map(|r| r.materialise().into_owned())
+                .unwrap_or_default(),
         };
 
         Ok(RangeView::from_owned_rows(owned, self.config.date_system))
@@ -22670,9 +22671,30 @@ where
     ) -> Option<formualizer_parse::parser::ReferenceType> {
         use crate::engine::named_range::NamedDefinition;
         use formualizer_parse::parser::ReferenceType;
-        let entry = self
+        let Some(entry) = self
             .graph
-            .resolve_name_entry(name, self.graph.default_sheet_id())?;
+            .resolve_name_entry(name, self.graph.default_sheet_id())
+        else {
+            // A bare table name is the table's data body.
+            let table = self.graph.resolve_table_entry(name)?;
+            let (start, end) = (table.range.start, table.range.end);
+            let data_start_row = start.coord.row() + 1 + u32::from(table.header_row);
+            let data_end_row = (end.coord.row() + 1).saturating_sub(u32::from(table.totals_row));
+            if data_end_row < data_start_row {
+                return None;
+            }
+            return Some(ReferenceType::Range {
+                sheet: Some(self.graph.sheet_name(start.sheet_id).to_string()),
+                start_row: Some(data_start_row),
+                start_col: Some(start.coord.col() + 1),
+                end_row: Some(data_end_row),
+                end_col: Some(end.coord.col() + 1),
+                start_row_abs: true,
+                start_col_abs: true,
+                end_row_abs: true,
+                end_col_abs: true,
+            });
+        };
         match &entry.definition {
             NamedDefinition::Cell(c) => Some(ReferenceType::Cell {
                 sheet: Some(self.graph.sheet_name(c.sheet_id).to_string()),
@@ -22968,10 +22990,26 @@ where
                     .graph
                     .sheet_id(current_sheet)
                     .ok_or_else(|| ExcelError::new(ExcelErrorKind::Ref))?;
-                let named = self
-                    .graph
-                    .resolve_name_entry(name, current_id)
-                    .ok_or_else(|| ExcelError::new(ExcelErrorKind::Ref))?;
+                let Some(named) = self.graph.resolve_name_entry(name, current_id) else {
+                    // A bare table name is the table's data body.
+                    let table = self
+                        .graph
+                        .resolve_table_entry(name)
+                        .ok_or_else(|| ExcelError::new(ExcelErrorKind::Ref))?;
+                    let first_data_row =
+                        table.range.start.coord.row() + u32::from(table.header_row);
+                    return Ok(Some(ReferenceInfo {
+                        first_sheet_index: self
+                            .graph
+                            .sheet_reg()
+                            .active_position_by_id(table.range.start.sheet_id),
+                        sheet_count: Some(1),
+                        first_cell: Some(CellRef::new(
+                            table.range.start.sheet_id,
+                            Coord::new(first_data_row, table.range.start.coord.col(), true, true),
+                        )),
+                    }));
+                };
                 match &named.definition {
                     NamedDefinition::Cell(cell) => ReferenceInfo {
                         first_sheet_index: self
@@ -23117,6 +23155,38 @@ where
         }
 
         computed
+    }
+
+    fn spill_range_of_anchor(
+        &self,
+        sheet: &str,
+        row: u32,
+        col: u32,
+    ) -> Option<(u32, u32, u32, u32)> {
+        let sheet_id = self.graph.sheet_id(sheet)?;
+        let anchor = CellRef::new(sheet_id, Coord::from_excel(row, col, true, true));
+        let region = self.graph.spill_region_of(anchor);
+        if region.is_empty() {
+            // A formula that produced a single value is a 1×1 "spill"; a plain value is not an
+            // anchor at all.
+            let vertex = self.graph.get_vertex_for_cell(&anchor)?;
+            return matches!(
+                self.graph.get_vertex_kind(vertex),
+                VertexKind::FormulaScalar | VertexKind::FormulaArray
+            )
+            .then_some((row, col, row, col));
+        }
+        let mut bounds = (u32::MAX, u32::MAX, 0u32, 0u32);
+        for cell in region {
+            let (r, c) = (cell.coord.row() + 1, cell.coord.col() + 1);
+            bounds = (
+                bounds.0.min(r),
+                bounds.1.min(c),
+                bounds.2.max(r),
+                bounds.3.max(c),
+            );
+        }
+        Some(bounds)
     }
 
     fn sheet_bounds(&self, sheet: &str) -> Option<(u32, u32)> {
@@ -23467,6 +23537,17 @@ where
                     }
                 }
 
+                // A bare table name (`=ROWS(Table1)`, `=SUM(Table1)`) parses as a name; it is
+                // the table's data body, exactly like `Table1[#Data]`.
+                if self.graph.resolve_table_entry(name).is_some() {
+                    let table_ref =
+                        ReferenceType::Table(formualizer_parse::parser::TableReference {
+                            name: name.clone(),
+                            specifier: Some(formualizer_parse::parser::TableSpecifier::Data),
+                        });
+                    return self.resolve_range_view(&table_ref, current_sheet);
+                }
+
                 if let Some(source) = self.graph.resolve_source_scalar_entry(name) {
                     let version = source
                         .version
@@ -23516,11 +23597,8 @@ where
                     };
 
                     let av = match &tref.specifier {
-                        None => {
-                            return Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
-                                "Table reference without specifier is unsupported".to_string(),
-                            ));
-                        }
+                        // A bare table name (`Table1`) is its data body, as in Excel.
+                        None => select(data_sr, sc0, data_er, ec0),
                         Some(formualizer_parse::parser::TableSpecifier::Column(col)) => {
                             let Some(idx) = table.col_index(col) else {
                                 return Err(ExcelError::new(ExcelErrorKind::Ref).with_message(
@@ -23564,21 +23642,22 @@ where
                         | Some(formualizer_parse::parser::TableSpecifier::SpecialItem(
                             formualizer_parse::parser::SpecialItem::Headers,
                         )) => {
+                            // Excel: selecting a band the table does not have is #REF!.
                             if !has_headers {
-                                asheet.range_view(1, 1, 0, 0)
-                            } else {
-                                select(sr0, sc0, sr0, ec0)
+                                return Err(ExcelError::new(ExcelErrorKind::Ref)
+                                    .with_message("Table has no header row".to_string()));
                             }
+                            select(sr0, sc0, sr0, ec0)
                         }
                         Some(formualizer_parse::parser::TableSpecifier::Totals)
                         | Some(formualizer_parse::parser::TableSpecifier::SpecialItem(
                             formualizer_parse::parser::SpecialItem::Totals,
                         )) => {
                             if !has_totals {
-                                asheet.range_view(1, 1, 0, 0)
-                            } else {
-                                select(er0, sc0, er0, ec0)
+                                return Err(ExcelError::new(ExcelErrorKind::Ref)
+                                    .with_message("Table has no totals row".to_string()));
                             }
+                            select(er0, sc0, er0, ec0)
                         }
                         Some(
                             spec @ (formualizer_parse::parser::TableSpecifier::SpecialItem(

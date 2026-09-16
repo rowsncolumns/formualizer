@@ -774,6 +774,10 @@ impl ReferenceType {
             let (start_row, start_row_abs) = split(start_row);
             let (end_col, end_col_abs) = split(end_col);
             let (end_row, end_row_abs) = split(end_row);
+            let ((start_row, start_row_abs), (end_row, end_row_abs)) =
+                order_range_axis((start_row, start_row_abs), (end_row, end_row_abs));
+            let ((start_col, start_col_abs), (end_col, end_col_abs)) =
+                order_range_axis((start_col, start_col_abs), (end_col, end_col_abs));
 
             Ok(ReferenceType::Range3D {
                 sheet_first: first.to_string(),
@@ -886,6 +890,14 @@ impl ReferenceType {
             let (start_row, start_row_abs) = split(start_row);
             let (end_col, end_col_abs) = split(end_col);
             let (end_row, end_row_abs) = split(end_row);
+            // Excel accepts corners in any order (`B2:A1`, `A3:A1`) and normalises the
+            // reference to top-left:bottom-right on entry, so a range never reaches the
+            // evaluator with `start > end`. Each axis is swapped independently, carrying its
+            // `$` anchors with the coordinate they were written on.
+            let ((start_row, start_row_abs), (end_row, end_row_abs)) =
+                order_range_axis((start_row, start_row_abs), (end_row, end_row_abs));
+            let ((start_col, start_col_abs), (end_col, end_col_abs)) =
+                order_range_axis((start_col, start_col_abs), (end_col, end_col_abs));
 
             if let Some((book_token, sheet_name)) = external_sheet {
                 Ok(ReferenceType::External(ExternalReference {
@@ -992,6 +1004,17 @@ impl ReferenceType {
         } else {
             row.to_string()
         }
+    }
+}
+
+/// Order one axis of a range so the bounded start is never past the bounded end. Open-ended
+/// bounds (`A:A`, `1:1`) have nothing to compare and pass through untouched.
+type RangeBound = (Option<u32>, bool);
+
+fn order_range_axis(start: RangeBound, end: RangeBound) -> (RangeBound, RangeBound) {
+    match (start.0, end.0) {
+        (Some(s), Some(e)) if s > e => (end, start),
+        _ => (start, end),
     }
 }
 
@@ -2716,15 +2739,53 @@ impl Parser {
     }
 
     fn parse_operand(&mut self, span: TokenSpan) -> Result<ASTNode, ParserError> {
+        /// Excel reads at most 15 significant digits of a numeric literal and TRUNCATES the
+        /// rest (`=123456789012345678` is `123456789012345000`, `1234567890123456` is
+        /// `1234567890123450` — the classic credit-card-number case), rather than taking the
+        /// nearest double. Returns the truncated spelling, or `None` when the literal already
+        /// fits (so `0.1`, `1E-300`, … parse bit-identically).
+        fn excel_significant_digits(text: &str) -> Option<String> {
+            let (mantissa, exponent) = match text.find(['e', 'E']) {
+                Some(i) => text.split_at(i),
+                None => (text, ""),
+            };
+            let mut out = String::with_capacity(text.len());
+            let mut significant = 0usize;
+            let mut truncated = false;
+            for ch in mantissa.chars() {
+                if ch.is_ascii_digit() {
+                    if significant > 0 || ch != '0' {
+                        significant += 1;
+                    }
+                    if significant > 15 {
+                        out.push('0');
+                        truncated = true;
+                        continue;
+                    }
+                }
+                out.push(ch);
+            }
+            if !truncated {
+                return None;
+            }
+            out.push_str(exponent);
+            Some(out)
+        }
+
         let value = self.span_value(&span);
         let token = self.span_to_token(&span);
 
         match span.subtype {
             TokenSubType::Number => {
-                let value = value.parse::<f64>().map_err(|_| ParserError {
-                    message: format!("Invalid number: {value}"),
-                    position: Some(self.position),
-                })?;
+                let truncated = excel_significant_digits(value);
+                let value = truncated
+                    .as_deref()
+                    .unwrap_or(value)
+                    .parse::<f64>()
+                    .map_err(|_| ParserError {
+                        message: format!("Invalid number: {value}"),
+                        position: Some(self.position),
+                    })?;
                 Ok(ASTNode::new(
                     ASTNodeType::Literal(LiteralValue::Number(value)),
                     Some(token),
