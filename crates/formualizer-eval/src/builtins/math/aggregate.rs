@@ -3,9 +3,10 @@ use crate::args::ArgSchema;
 use crate::engine::VisibilityMaskMode;
 use crate::function::Function;
 use crate::function_contract::FunctionDependencyContract;
+use crate::reference::{CellRef, Coord};
 use crate::traits::{ArgumentHandle, FunctionContext};
 use arrow_array::Array;
-use formualizer_common::{ExcelError, ExcelErrorKind, LiteralValue};
+use formualizer_common::{ExcelError, LiteralValue};
 use formualizer_macros::func_caps;
 
 /* ─────────────────────────── SUM() ──────────────────────────── */
@@ -949,13 +950,36 @@ mod tests_average {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum VisibilityPolicy {
     IncludeAll,
+    /// SUBTOTAL 1–11: rows hidden by an AutoFilter are always excluded, manually
+    /// hidden rows still count.
+    ExcludeFilterHidden,
     ExcludeManualOrFilterHidden,
+}
+
+impl VisibilityPolicy {
+    fn mask_mode(self) -> Option<VisibilityMaskMode> {
+        match self {
+            VisibilityPolicy::IncludeAll => None,
+            VisibilityPolicy::ExcludeFilterHidden => Some(VisibilityMaskMode::ExcludeFilterHidden),
+            VisibilityPolicy::ExcludeManualOrFilterHidden => {
+                Some(VisibilityMaskMode::ExcludeManualOrFilterHidden)
+            }
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ErrorPolicy {
     Propagate,
     Ignore,
+}
+
+/// Whether cells that are themselves `SUBTOTAL(...)` / `AGGREGATE(...)` formulas are
+/// skipped. Excel always skips them for SUBTOTAL and for AGGREGATE options 0–3.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum NestedPolicy {
+    Exclude,
+    Include,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -971,23 +995,59 @@ enum AggregateOp {
     Sum,
     VarSample,
     VarPopulation,
+    Median,
+    ModeSngl,
+    Large,
+    Small,
+    PercentileInc,
+    QuartileInc,
+    PercentileExc,
+    QuartileExc,
+}
+
+impl AggregateOp {
+    /// Excel `function_num` 1–19 (SUBTOTAL only accepts 1–11 / 101–111).
+    fn from_function_num(function_num: i32) -> Option<AggregateOp> {
+        match function_num {
+            1 => Some(AggregateOp::Average),
+            2 => Some(AggregateOp::Count),
+            3 => Some(AggregateOp::CountA),
+            4 => Some(AggregateOp::Max),
+            5 => Some(AggregateOp::Min),
+            6 => Some(AggregateOp::Product),
+            7 => Some(AggregateOp::StdevSample),
+            8 => Some(AggregateOp::StdevPopulation),
+            9 => Some(AggregateOp::Sum),
+            10 => Some(AggregateOp::VarSample),
+            11 => Some(AggregateOp::VarPopulation),
+            12 => Some(AggregateOp::Median),
+            13 => Some(AggregateOp::ModeSngl),
+            14 => Some(AggregateOp::Large),
+            15 => Some(AggregateOp::Small),
+            16 => Some(AggregateOp::PercentileInc),
+            17 => Some(AggregateOp::QuartileInc),
+            18 => Some(AggregateOp::PercentileExc),
+            19 => Some(AggregateOp::QuartileExc),
+            _ => None,
+        }
+    }
+
+    /// Functions 14–19 use the array form `AGGREGATE(fn, options, array, k)`.
+    fn takes_k(self) -> bool {
+        matches!(
+            self,
+            AggregateOp::Large
+                | AggregateOp::Small
+                | AggregateOp::PercentileInc
+                | AggregateOp::QuartileInc
+                | AggregateOp::PercentileExc
+                | AggregateOp::QuartileExc
+        )
+    }
 }
 
 fn aggregate_op_from_function_num(function_num: i32) -> Option<AggregateOp> {
-    match function_num {
-        1 => Some(AggregateOp::Average),
-        2 => Some(AggregateOp::Count),
-        3 => Some(AggregateOp::CountA),
-        4 => Some(AggregateOp::Max),
-        5 => Some(AggregateOp::Min),
-        6 => Some(AggregateOp::Product),
-        7 => Some(AggregateOp::StdevSample),
-        8 => Some(AggregateOp::StdevPopulation),
-        9 => Some(AggregateOp::Sum),
-        10 => Some(AggregateOp::VarSample),
-        11 => Some(AggregateOp::VarPopulation),
-        _ => None,
-    }
+    AggregateOp::from_function_num(function_num)
 }
 
 fn parse_strict_int_arg(arg: &ArgumentHandle<'_, '_>) -> Result<i32, ExcelError> {
@@ -1037,28 +1097,45 @@ fn numeric_from_range_value(value: &LiteralValue) -> Option<f64> {
     }
 }
 
+/// `=SUBTOTAL(…)` / `=AGGREGATE(…)` (any case, any leading whitespace) — the cells
+/// Excel skips when a SUBTOTAL/AGGREGATE range contains other subtotals.
+fn formula_is_nested_aggregate(formula: &str) -> bool {
+    let body = formula.trim_start().trim_start_matches('=').trim_start();
+    let head: String = body
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic() || *c == '.')
+        .flat_map(|c| c.to_uppercase())
+        .collect();
+    (head == "SUBTOTAL" || head == "AGGREGATE") && body[head.len()..].trim_start().starts_with('(')
+}
+
 #[derive(Debug, Default)]
 struct AggregateCollector {
     numeric_values: Vec<f64>,
     counta: usize,
 }
 
+#[derive(Copy, Clone, Debug)]
+struct CollectPolicy {
+    op: AggregateOp,
+    visibility: VisibilityPolicy,
+    errors: ErrorPolicy,
+    nested: NestedPolicy,
+}
+
 impl AggregateCollector {
     fn collect_args<'a, 'b>(
         args: &[ArgumentHandle<'a, 'b>],
-        start_idx: usize,
         ctx: &dyn FunctionContext<'b>,
-        op: AggregateOp,
-        visibility_policy: VisibilityPolicy,
-        error_policy: ErrorPolicy,
+        policy: CollectPolicy,
     ) -> Result<Self, ExcelError> {
         let mut out = Self::default();
 
-        for arg in args.iter().skip(start_idx) {
+        for arg in args {
             if let Ok(view) = arg.range_view() {
-                out.collect_range_arg(&view, ctx, op, visibility_policy, error_policy)?;
+                out.collect_range_arg(&view, ctx, policy)?;
             } else {
-                out.consume_scalar_value(arg.value()?.into_literal(), op, error_policy)?;
+                out.consume_scalar_value(arg.value()?.into_literal(), policy.op, policy.errors)?;
             }
         }
 
@@ -1069,15 +1146,18 @@ impl AggregateCollector {
         &mut self,
         view: &crate::engine::range_view::RangeView<'_>,
         ctx: &dyn FunctionContext<'b>,
-        op: AggregateOp,
-        visibility_policy: VisibilityPolicy,
-        error_policy: ErrorPolicy,
+        policy: CollectPolicy,
     ) -> Result<(), ExcelError> {
-        let visibility_mask = match visibility_policy {
-            VisibilityPolicy::IncludeAll => None,
-            VisibilityPolicy::ExcludeManualOrFilterHidden => {
-                ctx.get_row_visibility_mask(view, VisibilityMaskMode::ExcludeManualOrFilterHidden)
-            }
+        let visibility_mask = policy
+            .visibility
+            .mask_mode()
+            .and_then(|mode| ctx.get_row_visibility_mask(view, mode));
+
+        // Nested SUBTOTAL/AGGREGATE exclusion needs the cells' formulas; hosts that
+        // cannot map the view back to sheet cells (owned/array views) skip it.
+        let nested_sheet = match policy.nested {
+            NestedPolicy::Exclude => ctx.sheet_id_by_name(view.sheet_name()),
+            NestedPolicy::Include => None,
         };
 
         let (_, cols) = view.dims();
@@ -1094,14 +1174,41 @@ impl AggregateCollector {
                 }
 
                 for col in 0..cols {
-                    // Phase-1 contract: nested SUBTOTAL/AGGREGATE exclusion is deferred.
-                    // Nested aggregate results are treated as ordinary scalar values.
-                    self.consume_range_value(view.get_cell(rel_row, col), op, error_policy)?;
+                    let value = view.get_cell(rel_row, col);
+                    if let Some(sheet_id) = nested_sheet
+                        && matches!(
+                            value,
+                            LiteralValue::Number(_) | LiteralValue::Int(_) | LiteralValue::Error(_)
+                        )
+                        && self.is_nested_aggregate_cell(
+                            ctx,
+                            sheet_id,
+                            (view.start_row() + rel_row) as u32,
+                            (view.start_col() + col) as u32,
+                        )
+                    {
+                        continue;
+                    }
+                    self.consume_range_value(value, policy.op, policy.errors)?;
                 }
             }
         }
 
         Ok(())
+    }
+
+    fn is_nested_aggregate_cell<'b>(
+        &self,
+        ctx: &dyn FunctionContext<'b>,
+        sheet_id: crate::reference::SheetId,
+        row0: u32,
+        col0: u32,
+    ) -> bool {
+        let cell = CellRef::new(sheet_id, Coord::new(row0, col0, false, false));
+        match ctx.formula_text_at_cell(cell) {
+            Ok(Some(text)) => formula_is_nested_aggregate(&text),
+            _ => false,
+        }
     }
 
     fn consume_range_value(
@@ -1210,6 +1317,113 @@ impl AggregateCollector {
         }
     }
 
+    /// Order-statistic functions (AGGREGATE 12–19). `k` is the fourth argument for
+    /// 14–19 (LARGE/SMALL rank, PERCENTILE p, QUARTILE quart) and unused otherwise.
+    fn finalize_order_statistic(mut self, op: AggregateOp, k: Option<f64>) -> LiteralValue {
+        use super::super::stats::{nth_smallest, percentile_exc, percentile_inc};
+        let nums = &mut self.numeric_values;
+        let num_or_err = |r: Result<f64, ExcelError>| match r {
+            Ok(v) => LiteralValue::Number(v),
+            Err(e) => LiteralValue::Error(e),
+        };
+        match op {
+            AggregateOp::Median => {
+                if nums.is_empty() {
+                    return LiteralValue::Error(ExcelError::new_num());
+                }
+                let n = nums.len();
+                let mid = n / 2;
+                let med = if n % 2 == 1 {
+                    nth_smallest(nums, mid)
+                } else {
+                    let (lo, hi) = super::super::stats::adjacent_smallest(nums, mid - 1);
+                    (lo + hi) / 2.0
+                };
+                LiteralValue::Number(med)
+            }
+            AggregateOp::ModeSngl => {
+                if nums.is_empty() {
+                    return LiteralValue::Error(ExcelError::new_na());
+                }
+                nums.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let (mut best_val, mut best_cnt) = (nums[0], 1usize);
+                let (mut cur_val, mut cur_cnt) = (nums[0], 1usize);
+                for &v in &nums[1..] {
+                    if (v - cur_val).abs() < 1e-12 {
+                        cur_cnt += 1;
+                    } else {
+                        if cur_cnt > best_cnt {
+                            best_cnt = cur_cnt;
+                            best_val = cur_val;
+                        }
+                        cur_val = v;
+                        cur_cnt = 1;
+                    }
+                }
+                if cur_cnt > best_cnt {
+                    best_cnt = cur_cnt;
+                    best_val = cur_val;
+                }
+                if best_cnt <= 1 {
+                    LiteralValue::Error(ExcelError::new_na())
+                } else {
+                    LiteralValue::Number(best_val)
+                }
+            }
+            AggregateOp::Large | AggregateOp::Small => {
+                let Some(k) = k else {
+                    return LiteralValue::Error(ExcelError::new_value());
+                };
+                let k = k as i64;
+                if nums.is_empty() || k < 1 || k as usize > nums.len() {
+                    return LiteralValue::Error(ExcelError::new_num());
+                }
+                let idx = if op == AggregateOp::Large {
+                    nums.len() - k as usize
+                } else {
+                    k as usize - 1
+                };
+                LiteralValue::Number(nth_smallest(nums, idx))
+            }
+            AggregateOp::PercentileInc | AggregateOp::PercentileExc => {
+                let Some(p) = k else {
+                    return LiteralValue::Error(ExcelError::new_value());
+                };
+                if op == AggregateOp::PercentileInc {
+                    num_or_err(percentile_inc(nums, p))
+                } else {
+                    num_or_err(percentile_exc(nums, p))
+                }
+            }
+            AggregateOp::QuartileInc | AggregateOp::QuartileExc => {
+                let Some(q) = k else {
+                    return LiteralValue::Error(ExcelError::new_value());
+                };
+                let q = q as i64;
+                if nums.is_empty() || !(0..=4).contains(&q) {
+                    return LiteralValue::Error(ExcelError::new_num());
+                }
+                if op == AggregateOp::QuartileInc {
+                    match q {
+                        0 => LiteralValue::Number(nth_smallest(nums, 0)),
+                        4 => {
+                            let idx = nums.len() - 1;
+                            LiteralValue::Number(nth_smallest(nums, idx))
+                        }
+                        _ => num_or_err(percentile_inc(nums, q as f64 / 4.0)),
+                    }
+                } else {
+                    // QUARTILE.EXC is undefined at the extremes.
+                    if q == 0 || q == 4 {
+                        return LiteralValue::Error(ExcelError::new_num());
+                    }
+                    num_or_err(percentile_exc(nums, q as f64 / 4.0))
+                }
+            }
+            _ => LiteralValue::Error(ExcelError::new_value()),
+        }
+    }
+
     fn finalize(self, op: AggregateOp) -> LiteralValue {
         use super::super::utils::aggregate_result;
         match op {
@@ -1262,6 +1476,7 @@ impl AggregateCollector {
                 Ok(v) => aggregate_result(v),
                 Err(e) => LiteralValue::Error(e),
             },
+            order_statistic => self.finalize_order_statistic(order_statistic, None),
         }
     }
 }
@@ -1314,8 +1529,9 @@ impl Function for SubtotalFn {
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
 
+        // 1–11 skip only AutoFilter-hidden rows; 101–111 skip manually hidden rows too.
         let (mapped_code, visibility) = if (1..=11).contains(&function_num) {
-            (function_num, VisibilityPolicy::IncludeAll)
+            (function_num, VisibilityPolicy::ExcludeFilterHidden)
         } else if (101..=111).contains(&function_num) {
             (
                 function_num - 100,
@@ -1333,14 +1549,13 @@ impl Function for SubtotalFn {
             )));
         };
 
-        let collected = match AggregateCollector::collect_args(
-            args,
-            1,
-            ctx,
+        let policy = CollectPolicy {
             op,
             visibility,
-            ErrorPolicy::Propagate,
-        ) {
+            errors: ErrorPolicy::Propagate,
+            nested: NestedPolicy::Exclude,
+        };
+        let collected = match AggregateCollector::collect_args(&args[1..], ctx, policy) {
             Ok(c) => c,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
@@ -1397,14 +1612,7 @@ impl Function for AggregateFn {
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
 
-        let op = if (1..=11).contains(&function_num) {
-            aggregate_op_from_function_num(function_num)
-                .expect("validated AGGREGATE function_num maps to operation")
-        } else if (12..=19).contains(&function_num) {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new(ExcelErrorKind::NImpl),
-            )));
-        } else {
+        let Some(op) = aggregate_op_from_function_num(function_num) else {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
@@ -1415,34 +1623,67 @@ impl Function for AggregateFn {
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
 
-        let (visibility, error_policy) = match options {
-            0 => (VisibilityPolicy::IncludeAll, ErrorPolicy::Propagate),
-            1 => (
-                VisibilityPolicy::ExcludeManualOrFilterHidden,
-                ErrorPolicy::Propagate,
-            ),
-            2 => (VisibilityPolicy::IncludeAll, ErrorPolicy::Ignore),
-            3 => (
-                VisibilityPolicy::ExcludeManualOrFilterHidden,
-                ErrorPolicy::Ignore,
-            ),
-            4..=7 => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                    ExcelError::new(ExcelErrorKind::NImpl),
-                )));
-            }
-            _ => {
+        // options: bit 0 = skip hidden rows, bit 1 = skip errors, bit 2 = include
+        // nested SUBTOTAL/AGGREGATE results (0–3 exclude them, 4–7 keep them).
+        if !(0..=7).contains(&options) {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new_value(),
+            )));
+        }
+        let visibility = if options & 1 == 1 {
+            VisibilityPolicy::ExcludeManualOrFilterHidden
+        } else {
+            VisibilityPolicy::IncludeAll
+        };
+        let errors = if options & 2 == 2 {
+            ErrorPolicy::Ignore
+        } else {
+            ErrorPolicy::Propagate
+        };
+        let nested = if options & 4 == 4 {
+            NestedPolicy::Include
+        } else {
+            NestedPolicy::Exclude
+        };
+        let policy = CollectPolicy {
+            op,
+            visibility,
+            errors,
+            nested,
+        };
+
+        if op.takes_k() {
+            // Array form: AGGREGATE(function_num, options, array, k).
+            if args.len() != 4 {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                     ExcelError::new_value(),
                 )));
             }
-        };
-
-        let collected =
-            match AggregateCollector::collect_args(args, 2, ctx, op, visibility, error_policy) {
+            let k_raw = args[3].value()?.into_literal();
+            if let LiteralValue::Error(e) = k_raw {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+            }
+            let k = match coerce_num(&k_raw) {
+                Ok(k) if k.is_finite() => k,
+                _ => {
+                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                        ExcelError::new_value(),
+                    )));
+                }
+            };
+            let collected = match AggregateCollector::collect_args(&args[2..3], ctx, policy) {
                 Ok(c) => c,
                 Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
             };
+            return Ok(crate::traits::CalcValue::Scalar(
+                collected.finalize_order_statistic(op, Some(k)),
+            ));
+        }
+
+        let collected = match AggregateCollector::collect_args(&args[2..], ctx, policy) {
+            Ok(c) => c,
+            Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
+        };
 
         Ok(crate::traits::CalcValue::Scalar(collected.finalize(op)))
     }
@@ -1652,7 +1893,7 @@ mod tests_subtotal_aggregate {
     }
 
     #[test]
-    fn aggregate_unsupported_option_returns_nimpl() {
+    fn aggregate_option_four_ignores_nothing() {
         let wb = TestWorkbook::new().with_function(std::sync::Arc::new(AggregateFn));
         let ctx = interp(&wb);
 
@@ -1665,24 +1906,130 @@ mod tests_subtotal_aggregate {
                 lit(LiteralValue::Array(vec![vec![LiteralValue::Int(1)]])),
             ],
         );
-        assert_error_kind(out, ExcelErrorKind::NImpl);
+        assert_num_close(out, 1.0);
+    }
+
+    fn sample_array() -> ASTNode {
+        lit(LiteralValue::Array(vec![vec![
+            LiteralValue::Int(3),
+            LiteralValue::Int(1),
+            LiteralValue::Int(4),
+            LiteralValue::Int(1),
+            LiteralValue::Int(5),
+            LiteralValue::Int(9),
+            LiteralValue::Int(2),
+            LiteralValue::Int(6),
+        ]]))
+    }
+
+    fn aggregate(
+        ctx: &crate::interpreter::Interpreter<'_>,
+        function_num: i64,
+        options: i64,
+        k: Option<f64>,
+    ) -> LiteralValue {
+        let mut nodes = vec![
+            lit(LiteralValue::Int(function_num)),
+            lit(LiteralValue::Int(options)),
+            sample_array(),
+        ];
+        if let Some(k) = k {
+            nodes.push(lit(LiteralValue::Number(k)));
+        }
+        dispatch(ctx, "AGGREGATE", &nodes)
     }
 
     #[test]
-    fn aggregate_unsupported_function_num_returns_nimpl() {
+    fn aggregate_order_statistic_functions_12_to_19() {
         let wb = TestWorkbook::new().with_function(std::sync::Arc::new(AggregateFn));
         let ctx = interp(&wb);
 
+        assert_num_close(aggregate(&ctx, 12, 0, None), 3.5); // MEDIAN
+        assert_num_close(aggregate(&ctx, 13, 0, None), 1.0); // MODE.SNGL
+        assert_num_close(aggregate(&ctx, 14, 0, Some(2.0)), 6.0); // LARGE
+        assert_num_close(aggregate(&ctx, 15, 0, Some(2.0)), 1.0); // SMALL
+        assert_num_close(aggregate(&ctx, 16, 0, Some(0.5)), 3.5); // PERCENTILE.INC
+        assert_num_close(aggregate(&ctx, 17, 0, Some(1.0)), 1.75); // QUARTILE.INC
+        assert_num_close(aggregate(&ctx, 18, 0, Some(0.5)), 3.5); // PERCENTILE.EXC
+        assert_num_close(aggregate(&ctx, 19, 0, Some(1.0)), 1.25); // QUARTILE.EXC
+    }
+
+    #[test]
+    fn aggregate_k_argument_errors_follow_excel() {
+        let wb = TestWorkbook::new().with_function(std::sync::Arc::new(AggregateFn));
+        let ctx = interp(&wb);
+
+        // 14–19 require the array form with k.
+        assert_error_kind(aggregate(&ctx, 14, 0, None), ExcelErrorKind::Value);
+        assert_error_kind(aggregate(&ctx, 14, 0, Some(0.0)), ExcelErrorKind::Num);
+        assert_error_kind(aggregate(&ctx, 15, 0, Some(9.0)), ExcelErrorKind::Num);
+        assert_error_kind(aggregate(&ctx, 18, 0, Some(0.0)), ExcelErrorKind::Num);
+        assert_error_kind(aggregate(&ctx, 19, 0, Some(4.0)), ExcelErrorKind::Num);
+        assert_error_kind(aggregate(&ctx, 20, 0, None), ExcelErrorKind::Value);
+        assert_error_kind(aggregate(&ctx, 9, 8, None), ExcelErrorKind::Value);
+    }
+
+    #[test]
+    fn aggregate_options_four_to_seven_control_errors_and_hidden_rows() {
+        let wb = TestWorkbook::new().with_function(std::sync::Arc::new(AggregateFn));
+        let ctx = interp(&wb);
+        let with_error = || {
+            lit(LiteralValue::Array(vec![vec![
+                LiteralValue::Int(1),
+                LiteralValue::Error(ExcelError::new_div()),
+                LiteralValue::Int(2),
+            ]]))
+        };
+        for options in [4, 5] {
+            let out = dispatch(
+                &ctx,
+                "AGGREGATE",
+                &[
+                    lit(LiteralValue::Int(9)),
+                    lit(LiteralValue::Int(options)),
+                    with_error(),
+                ],
+            );
+            assert_error_kind(out, ExcelErrorKind::Div);
+        }
+        for options in [6, 7] {
+            let out = dispatch(
+                &ctx,
+                "AGGREGATE",
+                &[
+                    lit(LiteralValue::Int(9)),
+                    lit(LiteralValue::Int(options)),
+                    with_error(),
+                ],
+            );
+            assert_num_close(out, 3.0);
+        }
+        // Array form with errors ignored: AGGREGATE(14,6,{…},1) = 9.
         let out = dispatch(
             &ctx,
             "AGGREGATE",
             &[
-                lit(LiteralValue::Int(12)),
-                lit(LiteralValue::Int(0)),
-                lit(LiteralValue::Array(vec![vec![LiteralValue::Int(1)]])),
+                lit(LiteralValue::Int(14)),
+                lit(LiteralValue::Int(6)),
+                lit(LiteralValue::Array(vec![vec![
+                    LiteralValue::Int(9),
+                    LiteralValue::Error(ExcelError::new_na()),
+                    LiteralValue::Int(2),
+                ]])),
+                lit(LiteralValue::Int(1)),
             ],
         );
-        assert_error_kind(out, ExcelErrorKind::NImpl);
+        assert_num_close(out, 9.0);
+    }
+
+    #[test]
+    fn nested_aggregate_formula_detection() {
+        assert!(formula_is_nested_aggregate("=SUBTOTAL(9,A1:A3)"));
+        assert!(formula_is_nested_aggregate("= subtotal ( 109 , A1 )"));
+        assert!(formula_is_nested_aggregate("AGGREGATE(9,6,A1:A3)"));
+        assert!(!formula_is_nested_aggregate("=SUM(A1:A3)"));
+        assert!(!formula_is_nested_aggregate("=SUBTOTALS"));
+        assert!(!formula_is_nested_aggregate("=1+SUBTOTAL(9,A1)"));
     }
 }
 

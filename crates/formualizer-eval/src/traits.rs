@@ -1349,6 +1349,12 @@ pub trait EvaluationContext: Resolver + FunctionProvider + SourceResolver {
         Ok(None)
     }
 
+    /// Stable sheet id for a sheet name, so a [`RangeView`] can be turned back into
+    /// [`CellRef`]s (SUBTOTAL/AGGREGATE nested-aggregate exclusion). Default `None`.
+    fn sheet_id_by_name(&self, _sheet: &str) -> Option<crate::reference::SheetId> {
+        None
+    }
+
     /// Clock provider for volatile date/time builtins.
     ///
     /// Default when `system-clock` feature is enabled: `SystemClock(Local)` for
@@ -1549,6 +1555,11 @@ pub trait FunctionContext<'ctx> {
         Ok(None)
     }
 
+    /// Stable sheet id for a sheet name (see [`EvaluationContext::sheet_id_by_name`]).
+    fn sheet_id_by_name(&self, _sheet: &str) -> Option<crate::reference::SheetId> {
+        None
+    }
+
     fn volatile_level(&self) -> VolatileLevel;
     fn workbook_seed(&self) -> u64;
     fn recalc_epoch(&self) -> u64;
@@ -1678,6 +1689,10 @@ impl<'a> FunctionContext<'a> for DefaultFunctionContext<'a> {
 
     fn formula_text_at_cell(&self, cell: CellRef) -> Result<Option<String>, ExcelError> {
         self.base.formula_text_at_cell(cell)
+    }
+
+    fn sheet_id_by_name(&self, sheet: &str) -> Option<crate::reference::SheetId> {
+        self.base.sheet_id_by_name(sheet)
     }
 
     fn timezone(&self) -> &crate::timezone::TimeZoneSpec {

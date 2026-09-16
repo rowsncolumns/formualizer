@@ -22661,6 +22661,10 @@ where
         self.graph.sheet_reg().active_position(sheet)
     }
 
+    fn sheet_id_by_name(&self, sheet: &str) -> Option<SheetId> {
+        self.graph.sheet_id(sheet)
+    }
+
     fn current_sheet_index(&self, current_sheet: &str) -> Option<usize> {
         self.sheet_index_by_name(current_sheet)
     }
