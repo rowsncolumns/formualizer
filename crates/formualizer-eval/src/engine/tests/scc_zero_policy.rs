@@ -70,7 +70,11 @@ fn static_zero_stamps_members_zero_and_dependents_compute_with_zero() {
 
         assert_eq!(num(&engine, 1, 1), 0.0, "{detection:?}: A1 displays 0");
         assert_eq!(num(&engine, 1, 2), 0.0, "{detection:?}: B1 displays 0");
-        assert_eq!(num(&engine, 1, 3), 1.0, "{detection:?}: =A1+1 computes with 0");
+        assert_eq!(
+            num(&engine, 1, 3),
+            1.0,
+            "{detection:?}: =A1+1 computes with 0"
+        );
         assert_eq!(
             engine.get_cell_value("Sheet1", 1, 4),
             Some(LiteralValue::Boolean(false)),
@@ -99,8 +103,16 @@ fn zero_accepts_self_references_at_ingest_and_stamps_zero() {
         engine.evaluate_all().unwrap();
 
         assert_eq!(num(&engine, 1, 1), 0.0, "{detection:?}: =A1+1 in A1 is 0");
-        assert_eq!(num(&engine, 3, 1), 0.0, "{detection:?}: =SUM(A3:A5) in A3 is 0");
-        assert_eq!(num(&engine, 6, 1), 1.0, "{detection:?}: dependent reads A3 as 0");
+        assert_eq!(
+            num(&engine, 3, 1),
+            0.0,
+            "{detection:?}: =SUM(A3:A5) in A3 is 0"
+        );
+        assert_eq!(
+            num(&engine, 6, 1),
+            1.0,
+            "{detection:?}: dependent reads A3 as 0"
+        );
         assert_eq!(cycle_cells_1based(&engine), vec![(1, 1), (3, 1)]);
     }
 }
@@ -119,7 +131,10 @@ fn runtime_zero_phantom_pair_evaluates_and_live_pair_is_zero() {
     engine.evaluate_all().unwrap();
     assert_eq!(num(&engine, 2, 1), 555.0);
     assert_eq!(num(&engine, 3, 1), 999.0);
-    assert!(cycle_cells_1based(&engine).is_empty(), "phantom SCC reports no cycle");
+    assert!(
+        cycle_cells_1based(&engine).is_empty(),
+        "phantom SCC reports no cycle"
+    );
 
     engine
         .set_cell_value("Sheet1", 1, 1, LiteralValue::Boolean(false))
@@ -148,7 +163,11 @@ fn zero_stamp_is_reported_in_eval_delta_once() {
         })
         .collect();
     changed.sort_unstable();
-    assert_eq!(changed, vec![(1, 1), (1, 2)], "members land in the delta once");
+    assert_eq!(
+        changed,
+        vec![(1, 1), (1, 2)],
+        "members land in the delta once"
+    );
 
     // Touch an unrelated cell: the members re-stamp 0 over 0 → no delta for them.
     set_number(&mut engine, 9, 9, 1.0);
