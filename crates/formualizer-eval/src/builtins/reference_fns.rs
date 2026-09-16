@@ -712,6 +712,151 @@ fn arg_indirect() -> Vec<ArgSchema> {
     ]
 }
 
+/// One `R…C…` operand of an R1C1 reference: `R2C1`, `R[1]C[-1]`, `RC`, `R2` (whole row),
+/// `C3` (whole column). Relative offsets need the evaluating cell (1-based `current`).
+fn parse_r1c1_part(
+    part: &str,
+    current: Option<(u32, u32)>,
+) -> Result<(Option<u32>, Option<u32>), ExcelError> {
+    // Reads `<n>` or `[<n>]` after an axis letter; `None` with nothing consumed is the bare
+    // axis letter (= the current row/column).
+    fn axis(rest: &str, current: Option<u32>) -> Result<(Option<u32>, &str), ExcelError> {
+        let bad = || ExcelError::new(ExcelErrorKind::Ref);
+        if let Some(inner) = rest.strip_prefix('[') {
+            let close = inner.find(']').ok_or_else(bad)?;
+            let offset: i64 = inner[..close].trim().parse().map_err(|_| bad())?;
+            let base = current.ok_or_else(bad)? as i64;
+            let index = base + offset;
+            if index < 1 {
+                return Err(bad());
+            }
+            return Ok((Some(index as u32), &inner[close + 1..]));
+        }
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits == 0 {
+            return Ok((Some(current.ok_or_else(bad)?), rest));
+        }
+        let index: u32 = rest[..digits].parse().map_err(|_| bad())?;
+        if index < 1 {
+            return Err(bad());
+        }
+        Ok((Some(index), &rest[digits..]))
+    }
+
+    let bad = || ExcelError::new(ExcelErrorKind::Ref);
+    let part = part.trim();
+    let mut rest = part;
+    let mut row = None;
+    let mut col = None;
+    if let Some(after) = rest.strip_prefix(['R', 'r']) {
+        let (r, tail) = axis(after, current.map(|c| c.0))?;
+        row = r;
+        rest = tail;
+    }
+    if let Some(after) = rest.strip_prefix(['C', 'c']) {
+        let (c, tail) = axis(after, current.map(|c| c.1))?;
+        col = c;
+        rest = tail;
+    }
+    if !rest.is_empty() || (row.is_none() && col.is_none()) {
+        return Err(bad());
+    }
+    Ok((row, col))
+}
+
+/// Parse R1C1 reference text for `INDIRECT(text, FALSE)`. `None` when the text is not R1C1 at
+/// all (a defined name or table), `Some(Err(#REF!))` for malformed R1C1 or a relative part
+/// without an evaluating cell.
+fn parse_r1c1_reference(
+    text: &str,
+    current_cell: Option<crate::reference::CellRef>,
+) -> Option<Result<ReferenceType, ExcelError>> {
+    let text = text.trim();
+    // Sheet qualifier: `Sheet2!…` or `'My Sheet'!…` (a quoted title may itself contain `!`).
+    let (sheet, body) = if let Some(quoted) = text.strip_prefix('\'') {
+        let mut close = None;
+        let bytes = quoted.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                close = Some(i);
+                break;
+            }
+            i += 1;
+        }
+        let close = close?;
+        let body = quoted[close + 1..].strip_prefix('!')?;
+        (Some(quoted[..close].replace("''", "'")), body)
+    } else if let Some((sheet, body)) = text.rsplit_once('!') {
+        (Some(sheet.to_string()), body)
+    } else {
+        (None, text)
+    };
+    // R1C1 operands start with an axis letter followed by a digit, `[` , `C`/`c`, `:` or the
+    // end; anything else (`Data`, `Rate`, `Table1[Col]`) is a name, not R1C1.
+    let looks_r1c1 = |part: &str| {
+        let mut chars = part.chars();
+        matches!(chars.next(), Some('R' | 'r' | 'C' | 'c'))
+            && chars
+                .next()
+                .is_none_or(|c| c.is_ascii_digit() || matches!(c, '[' | 'C' | 'c'))
+    };
+    let (first, second) = match body.split_once(':') {
+        Some((a, b)) => (a.trim(), Some(b.trim())),
+        None => (body.trim(), None),
+    };
+    if !looks_r1c1(first) || second.is_some_and(|s| !looks_r1c1(s)) {
+        return None;
+    }
+    let current = current_cell.map(|c| (c.coord.row() + 1, c.coord.col() + 1));
+    let build = || -> Result<ReferenceType, ExcelError> {
+        let (r1, c1) = parse_r1c1_part(first, current)?;
+        let (r2, c2) = match second {
+            Some(part) => parse_r1c1_part(part, current)?,
+            None => (r1, c1),
+        };
+        if let (Some(r1), Some(c1), Some(r2), Some(c2)) = (r1, c1, r2, c2)
+            && r1 == r2
+            && c1 == c2
+        {
+            return Ok(ReferenceType::Cell {
+                sheet: sheet.clone(),
+                row: r1,
+                col: c1,
+                row_abs: true,
+                col_abs: true,
+            });
+        }
+        // A whole-row/column operand (`R2`, `C3`) leaves the other axis open on BOTH ends;
+        // mixing an open and a bounded operand (`R2:R3C1`) is not a rectangle.
+        if r1.is_some() != r2.is_some() || c1.is_some() != c2.is_some() {
+            return Err(ExcelError::new(ExcelErrorKind::Ref));
+        }
+        let order = |a: Option<u32>, b: Option<u32>| match (a, b) {
+            (Some(a), Some(b)) => (Some(a.min(b)), Some(a.max(b))),
+            _ => (None, None),
+        };
+        let (start_row, end_row) = order(r1, r2);
+        let (start_col, end_col) = order(c1, c2);
+        Ok(ReferenceType::Range {
+            sheet: sheet.clone(),
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            start_row_abs: true,
+            start_col_abs: true,
+            end_row_abs: true,
+            end_col_abs: true,
+        })
+    };
+    Some(build())
+}
+
 #[derive(Debug)]
 pub struct IndirectFn;
 
@@ -722,7 +867,8 @@ pub struct IndirectFn;
 ///
 /// # Remarks
 /// - `a1_style` defaults to `TRUE` (A1 style parsing).
-/// - `a1_style=FALSE` (R1C1 parsing) is currently not implemented and returns `#N/IMPL!`.
+/// - `a1_style=FALSE` parses R1C1 text: `R2C1` is absolute, `R[1]C[-1]` is relative to the
+///   evaluating cell, `R2` / `C3` are a whole row / column, and `Sheet2!R1C1:R3C2` is a range.
 /// - Invalid or unresolved references return `#REF!`.
 /// - The function is volatile because target references can change without direct dependency links.
 ///
@@ -785,7 +931,7 @@ impl Function for IndirectFn {
     fn eval_reference<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Option<Result<ReferenceType, ExcelError>> {
         if args.is_empty() {
             return Some(Err(ExcelError::new(ExcelErrorKind::Value)));
@@ -814,16 +960,17 @@ impl Function for IndirectFn {
         };
 
         if !a1_style {
-            // The A1/R1C1 flag does not apply to defined names or tables (they are
-            // neither A1 nor R1C1 syntax). Excel resolves `INDIRECT(name, FALSE)`
-            // exactly like `INDIRECT(name)`, so handle those before refusing R1C1.
-            // Real R1C1 cell/range text remains unsupported.
+            // R1C1 text (`R2C1`, `R[1]C[-1]`, `Sheet2!R1C1:R3C2`, `R2`, `C3`) — relative parts
+            // are offsets from the evaluating cell. The flag does not apply to defined names or
+            // tables (they are neither A1 nor R1C1 syntax): Excel resolves
+            // `INDIRECT(name, FALSE)` exactly like `INDIRECT(name)`.
+            if let Some(reference) = parse_r1c1_reference(&ref_text, ctx.current_cell()) {
+                return Some(reference);
+            }
             return match formualizer_parse::parser::ReferenceType::from_string(&ref_text) {
                 Ok(ReferenceType::NamedRange(name)) => Some(Ok(ReferenceType::NamedRange(name))),
                 Ok(ReferenceType::Table(tref)) => Some(Ok(ReferenceType::Table(tref))),
-                _ => Some(Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
-                    "INDIRECT with R1C1 style (second argument FALSE) is not yet supported",
-                ))),
+                _ => Some(Err(ExcelError::new(ExcelErrorKind::Ref))),
             };
         }
 
