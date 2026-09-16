@@ -928,7 +928,7 @@ impl<'a> Interpreter<'a> {
                         self.current_sheet,
                     );
 
-                    return fun.dispatch(&handles, &fctx);
+                    return Self::function_error_as_value(fun.dispatch(&handles, &fctx));
                 }
 
                 if let Some(callable) = self.resolve_local_callable(name) {
@@ -1617,6 +1617,24 @@ impl<'a> Interpreter<'a> {
         callable.invoke(self, &eval_args)
     }
 
+    /// A worksheet function that fails with an Excel error has *produced* that error: in
+    /// Excel `=ISERROR(VLOOKUP(1,FOO,1,FALSE))` is TRUE and `=IF(ISERROR(SUMIF(FOO,1)),1,2)`
+    /// is 1 — the idiom every pre-IFERROR workbook uses. Builtins reach such errors through
+    /// `?` on `ArgumentHandle::range_view()`/`resolve_range_view` (an undefined name, a
+    /// `#REF!` reference), which would otherwise bypass every argument-level handler and
+    /// make IS* disagree with IFERROR on the same expression. Cancellation is the one
+    /// genuine abort.
+    fn function_error_as_value(
+        result: Result<crate::traits::CalcValue<'a>, ExcelError>,
+    ) -> Result<crate::traits::CalcValue<'a>, ExcelError> {
+        match result {
+            Err(e) if e.kind != ExcelErrorKind::Cancelled => {
+                Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)))
+            }
+            other => other,
+        }
+    }
+
     fn eval_function_to_calc(
         &self,
         name: &str,
@@ -1631,7 +1649,7 @@ impl<'a> Interpreter<'a> {
                 self.current_cell,
                 self.current_sheet,
             );
-            return fun.dispatch(&handles, &fctx);
+            return Self::function_error_as_value(fun.dispatch(&handles, &fctx));
         }
 
         if let Some(callable) = self.resolve_local_callable(name) {

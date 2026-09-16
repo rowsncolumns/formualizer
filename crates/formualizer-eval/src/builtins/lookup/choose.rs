@@ -97,7 +97,7 @@ impl Function for ChooseFn {
                     kinds: smallvec::smallvec![ArgKind::Any],
                     required: true,
                     by_ref: false, // Could be reference but we'll unwrap value or pass through
-                    shape: ShapeKind::Scalar, // Treat each choice as scalar (top-left if range)
+                    shape: ShapeKind::Scalar, // Raw handles (SHORT_CIRCUIT): a range choice passes through as a reference
                     coercion: CoercionPolicy::None,
                     max: None,
                     repeating: Some(1), // any number of choices after index
@@ -111,7 +111,7 @@ impl Function for ChooseFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.len() < 2 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
@@ -123,6 +123,16 @@ impl Function for ChooseFn {
         let index_val = args[0].value()?.into_literal();
         if let LiteralValue::Error(e) = index_val {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+        }
+
+        // Excel: an array `index_num` selects element-wise and lifts the picked choices into the
+        // result — `CHOOSE({1,3},"a","b","c")` spills `{"a","c"}`, `CHOOSE({1,2},A1:A5,C1:C5)`
+        // column-stacks the two ranges into 5×2 (the `VLOOKUP(v,CHOOSE({1,2},B:B,A:A),2,0)`
+        // "lookup left" idiom).
+        if let LiteralValue::Array(rows) = index_val {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Array(
+                choose_elementwise(rows, args, ctx),
+            )));
         }
 
         // NumberStrict index semantics (previously enforced by eager dispatch
@@ -149,6 +159,88 @@ impl Function for ChooseFn {
         let selected_arg = &args[index as usize];
         selected_arg.value()
     }
+}
+
+/// `CHOOSE` over an array `index_num`. Every element of the index picks a choice; the result is the
+/// broadcast of the index array against the picked choices, the way Excel lifts a scalar function
+/// over arrays: a dimension of size 1 stretches, and a cell that a smaller operand does not reach is
+/// `#N/A`. A range choice contributes its cells (materialized once, only if some index picks it —
+/// untaken choices stay unevaluated), so `CHOOSE({1,2},A1:A5,C1:C5)` is the 5×2 column-stack and
+/// `SUM(CHOOSE({1,2},A1:A5,C1:C5))` adds both columns. An out-of-range or non-numeric index element
+/// is `#VALUE!` in its own cell only.
+fn choose_elementwise<'a, 'b, 'c>(
+    index: Vec<Vec<LiteralValue>>,
+    args: &'c [ArgumentHandle<'a, 'b>],
+    ctx: &dyn FunctionContext<'b>,
+) -> Vec<Vec<LiteralValue>> {
+    let choices = args.len() - 1;
+    let picks: Vec<Vec<Result<usize, ExcelError>>> = index
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|idx| {
+                    let i = match idx {
+                        LiteralValue::Number(n) => *n as i64,
+                        LiteralValue::Int(i) => *i,
+                        LiteralValue::Error(e) => return Err(e.clone()),
+                        _ => return Err(ExcelError::new(ExcelErrorKind::Value)),
+                    };
+                    if i < 1 || i as usize > choices {
+                        return Err(ExcelError::new(ExcelErrorKind::Value));
+                    }
+                    Ok(i as usize)
+                })
+                .collect()
+        })
+        .collect();
+
+    let mut materialized: Vec<Option<Vec<Vec<LiteralValue>>>> = vec![None; choices + 1];
+    for pick in picks.iter().flatten().flatten() {
+        if materialized[*pick].is_none() {
+            materialized[*pick] = Some(match materialize_rows_2d(&args[*pick], ctx) {
+                Ok(rows) => rows,
+                Err(e) => vec![vec![LiteralValue::Error(e)]],
+            });
+        }
+    }
+
+    fn dims<T>(rows: &[Vec<T>]) -> (usize, usize) {
+        (rows.len(), rows.first().map_or(0, |r| r.len()))
+    }
+    let (mut n_rows, mut n_cols) = dims(&index);
+    for rows in materialized.iter().flatten() {
+        let (r, c) = dims(rows);
+        n_rows = n_rows.max(r);
+        n_cols = n_cols.max(c);
+    }
+    // Broadcast lookup: a unit dimension stretches; beyond a larger operand's extent is `#N/A`.
+    let at = |rows: &[Vec<LiteralValue>], i: usize, j: usize| -> Option<LiteralValue> {
+        let (br, bc) = dims(rows);
+        let r = if br == 1 { 0 } else { i };
+        let c = if bc == 1 { 0 } else { j };
+        rows.get(r).and_then(|row| row.get(c)).cloned()
+    };
+    let na = || LiteralValue::Error(ExcelError::new(ExcelErrorKind::Na));
+
+    (0..n_rows)
+        .map(|i| {
+            (0..n_cols)
+                .map(|j| {
+                    let (br, bc) = dims(&picks);
+                    let r = if br == 1 { 0 } else { i };
+                    let c = if bc == 1 { 0 } else { j };
+                    match picks.get(r).and_then(|row| row.get(c)) {
+                        None => na(),
+                        Some(Err(e)) => LiteralValue::Error(e.clone()),
+                        Some(Ok(pick)) => materialized[*pick]
+                            .as_ref()
+                            .and_then(|rows| at(rows, i, j))
+                            .unwrap_or_else(na),
+                    }
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /* ───────────────────────── CHOOSECOLS() / CHOOSEROWS() ───────────────────────── */

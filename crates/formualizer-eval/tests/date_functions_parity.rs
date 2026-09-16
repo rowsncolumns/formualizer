@@ -2,7 +2,8 @@
 //! `DATE` counts across Excel's phantom 1900-02-29 (`DATE(1900,2,29)` = 60), `YEAR`/`MONTH`/`DAY`
 //! report serial 60 as Feb 29 and serial 0 as "January 0, 1900", `DAYS360` accepts text dates,
 //! and the already-correct `DATEDIF`, `WEEKNUM`, `ISOWEEKNUM`, `WORKDAY` and `TIME` semantics
-//! are pinned.
+//! are pinned. The phantom day is a real day to every serial-difference and weekday walk too:
+//! `DAYS`, `DATEDIF "d"`, `EDATE`, `EOMONTH`, `NETWORKDAYS[.INTL]`, `WORKDAY[.INTL]`, `WEEKDAY`.
 
 use formualizer_common::{ExcelErrorKind, LiteralValue};
 use formualizer_eval::engine::{DateSystem, Engine, EvalConfig};
@@ -170,4 +171,78 @@ fn time_wraps_at_24_hours() {
     assert_num("=TIME(24,0,0)", 0.0);
     assert_num("=TIME(12,0,0)", 0.5);
     assert_num("=TIME(12.9,0,0)", 0.5);
+}
+
+#[test]
+fn days_and_datedif_d_subtract_whole_serials() {
+    // The phantom 1900-02-29 (serial 60) is a day on either side; times are ignored.
+    assert_num("=DAYS(60,59)", 1.0);
+    assert_num("=DAYS(61,60)", 1.0);
+    assert_num("=DAYS(61,59)", 2.0);
+    assert_num("=DAYS(62,59)", 3.0);
+    assert_num("=DAYS(59,60)", -1.0);
+    assert_num("=DAYS(2.9,1.1)", 1.0);
+    assert_num("=DAYS(\"2024-03-01\",\"2024-01-31\")", 30.0);
+    assert_error("=DAYS(1,-1)", ExcelErrorKind::Num);
+    assert_num("=DATEDIF(59,60,\"d\")", 1.0);
+    assert_num("=DATEDIF(60,61,\"d\")", 1.0);
+    assert_num("=DATEDIF(59,61,\"d\")", 2.0);
+    assert_num("=DATEDIF(1.9,3.2,\"d\")", 2.0);
+    assert_error("=DATEDIF(60,59,\"d\")", ExcelErrorKind::Num);
+}
+
+#[test]
+fn edate_and_eomonth_treat_serial_60_as_a_day() {
+    assert_num("=EDATE(60,1)", 89.0);
+    assert_num("=EDATE(59,1)", 88.0);
+    assert_num("=EDATE(31,1)", 60.0);
+    assert_num("=EDATE(61,-1)", 32.0);
+    assert_error("=EDATE(1,-1)", ExcelErrorKind::Num);
+    assert_num("=EDATE(\"2023-01-31\",1)", 44985.0);
+    assert_num("=EDATE(\"2024-01-31\",1)", 45351.0);
+    assert_num("=EDATE(\"15-Jan-2011\",1.9)", 40589.0);
+    assert_num("=EDATE(DATE(9999,12,31),0)", 2958465.0);
+    assert_error("=EDATE(DATE(9999,12,31),1)", ExcelErrorKind::Num);
+    assert_num("=EOMONTH(59,0)", 60.0);
+    assert_num("=EOMONTH(60,0)", 60.0);
+    assert_num("=EOMONTH(1,0)", 31.0);
+    assert_num("=EOMONTH(61,-1)", 60.0);
+    assert_num("=EOMONTH(1,-1)", 0.0);
+    assert_error("=EOMONTH(1,-2)", ExcelErrorKind::Num);
+    assert_num("=EOMONTH(\"2024-01-15\",1)", 45351.0);
+    assert_num("=EOMONTH(DATE(9999,12,1),0)", 2958465.0);
+}
+
+#[test]
+fn networkdays_and_workday_walk_serials_with_excel_weekdays() {
+    // Excel calls serial 1 a Sunday and the phantom serial 60 a Wednesday.
+    assert_num("=WEEKDAY(0)", 7.0);
+    assert_num("=WEEKDAY(1)", 1.0);
+    assert_num("=WEEKDAY(59)", 3.0);
+    assert_num("=WEEKDAY(60)", 4.0);
+    assert_num("=WEEKDAY(61)", 5.0);
+    assert_num("=NETWORKDAYS(59,61)", 3.0);
+    assert_num("=NETWORKDAYS(61,59)", -3.0);
+    assert_num("=NETWORKDAYS(59,61,60)", 2.0);
+    assert_num("=NETWORKDAYS(1,7)", 5.0);
+    assert_num("=NETWORKDAYS(59.9,61.2)", 3.0);
+    assert_num("=NETWORKDAYS.INTL(59,61,\"0000011\")", 3.0);
+    assert_num("=NETWORKDAYS.INTL(1,7,11)", 6.0);
+    assert_num("=NETWORKDAYS(\"10/1/2012\",\"3/1/2013\",{41235})", 109.0);
+    assert_num("=WORKDAY(59,1)", 60.0);
+    assert_num("=WORKDAY(59,2)", 61.0);
+    assert_num("=WORKDAY(61,-1)", 60.0);
+    assert_num("=WORKDAY(60,-1)", 59.0);
+    assert_error("=WORKDAY(1,-1)", ExcelErrorKind::Num);
+    assert_num("=WORKDAY.INTL(59,1,11)", 60.0);
+}
+
+#[test]
+fn time_bounds_components_and_rejects_negative_totals() {
+    assert_error("=TIME(0,0,86400)", ExcelErrorKind::Num);
+    assert_error("=TIME(32768,0,0)", ExcelErrorKind::Num);
+    assert_num("=TIME(32767,0,0)", 7.0 / 24.0);
+    assert_num("=TIME(8,-15,0)", 7.75 / 24.0);
+    assert_error("=TIME(0,-1,0)", ExcelErrorKind::Num);
+    assert_error("=TIME(-12,0,0)", ExcelErrorKind::Num);
 }

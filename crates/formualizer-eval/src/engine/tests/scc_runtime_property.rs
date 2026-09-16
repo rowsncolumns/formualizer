@@ -35,10 +35,9 @@
 //! The generated subset is intentionally narrow (numbers, `+ - *`,
 //! comparisons, `IF`, `NOT`, `SUM` over explicit ranges, boolean/number
 //! guards) so coercion is trivial and the oracle is auditable by eye. No
-//! division or text is generated, so the only errors that can ever surface are
-//! `#CIRC` (the cycle verdict) and the `#VALUE!` the engine's `IF`/`NOT`
-//! produce when an error reaches a *condition* — a documented, pre-#112 error
-//! rule the oracle reproduces faithfully (see the KNOWN ENGINE QUIRK notes) so
+//! division or text is generated, so the only error that can ever surface is
+//! `#CIRC` (the cycle verdict); an error reaching an `IF`/`NOT` *condition*
+//! propagates as itself, exactly like Excel (`IF(#REF!>0,1,0)` is `#REF!`), so
 //! the property stays sharp on cycle classification.
 
 use crate::engine::{CycleConfig, CycleDetection, CyclePolicy, Engine, EvalConfig};
@@ -280,17 +279,14 @@ fn gen_formula(rng: &mut Rng, i: usize, n_guards: usize, n: usize) -> String {
 ///     regardless of how the value is later consumed (an `IF` *guard* that
 ///     re-enters the cell still makes the cell a member — spec §7.3).
 ///   * `CircSettled` — a `#CIRC` value *read from an already-stamped member*
-///     by a cell that is itself **not** a member. It still propagates as
-///     `#CIRC` through arithmetic/comparison, but when fed into an `IF`/`NOT`
-///     *condition* the engine's coercion turns it into `#VALUE!` (see the
-///     KNOWN ENGINE QUIRK note on `eval_node`). Both map to the engine's
-///     `#CIRC` *only* when they survive to a cell's final value; the split
-///     exists purely to reproduce the IF-condition coercion faithfully.
-///   * `Value` — the `#VALUE!` produced by that coercion.
-///
-/// Keeping this split is what lets the oracle stay a faithful mirror of the
-/// engine's *documented* error handling while remaining sharp on the cycle
-/// classification that is the actual subject of the test.
+///     by a cell that is itself **not** a member. It propagates as `#CIRC`
+///     through arithmetic, comparison and — like every other error — an
+///     `IF`/`NOT` *condition* (see the note on `condition_error`). Both
+///     flavors map to the engine's single `#CIRC` cell value; the split is
+///     kept so the oracle can tell a live member from a downstream reader.
+///   * `Value` — a `#VALUE!` from the engine's condition coercion. The
+///     generated subset no longer produces one (errors propagate), so an
+///     engine `#VALUE!` is a reportable discrepancy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EKind {
     Circ,
@@ -867,22 +863,14 @@ impl GuardEval<'_> {
 
 /// IF/NOT condition coercion of an error operand.
 ///
-/// KNOWN ENGINE QUIRK (pre-#112, general error handling — NOT a cycle bug):
-/// `IfFn::eval`/`NotFn` coerce a *non*-bool/*non*-number condition to
-/// `#VALUE!` rather than propagating the condition's own error (the `IfFn`
-/// docs even state "non-numeric/non-boolean conditions return #VALUE!").
-///
-/// The one case the engine does NOT reach this coercion for is a cell that is
-/// itself a live-cycle member: such a cell is stamped `#CIRC` structurally
-/// during the SCC task, before any IF body runs. The oracle mirrors that by
-/// keeping an *active* re-entry (`Circ`) circular even when it flows through a
-/// guard (spec §7.3), and only coercing a `#CIRC` that was *read from another,
-/// already-stamped member* (`CircSettled`) — or any other error — to `#VALUE!`.
+/// An error in an `IF`/`NOT` condition propagates as itself, as in Excel
+/// (`IF(NA(),1,2)` is `#N/A`; spreadsheet#546 B-32). A live-cycle member is
+/// stamped `#CIRC` structurally during the SCC task before any IF body runs,
+/// so an *active* re-entry (`Circ`) flowing through a guard keeps the cell a
+/// member (spec §7.3); a `#CIRC` *read from another, already-stamped member*
+/// (`CircSettled`) reaches the downstream reader as the `#CIRC` value itself.
 fn condition_error(e: EKind) -> OVal {
-    match e {
-        EKind::Circ => OVal::Err(EKind::Circ), // member: stays #CIRC
-        EKind::CircSettled | EKind::Value => OVal::Err(EKind::Value),
-    }
+    OVal::Err(e)
 }
 
 fn lit_to_oval(v: &LiteralValue) -> OVal {
@@ -934,10 +922,10 @@ fn engine_to_oval(v: &Option<LiteralValue>) -> Result<OVal, String> {
         Some(LiteralValue::Error(e)) if e.kind == ExcelErrorKind::Circ => {
             Ok(OVal::Err(EKind::Circ))
         }
-        // The only other error the generated subset can yield is the
-        // documented IF/NOT condition-coercion `#VALUE!` (see the KNOWN ENGINE
-        // QUIRK note). Any *other* error kind would be a genuine surprise and
-        // is surfaced as an un-modelable value (test failure).
+        // A `#VALUE!` is modelled so it fails the comparison loudly (the
+        // oracle never predicts one — IF/NOT propagate a `#CIRC` condition —
+        // rather than as an un-modelable value). Any *other* error kind would
+        // be a genuine surprise and is surfaced as an un-modelable value.
         Some(LiteralValue::Error(e)) if e.kind == ExcelErrorKind::Value => {
             Ok(OVal::Err(EKind::Value))
         }
@@ -1127,8 +1115,9 @@ fn oracle_self_check_known_shapes() {
     let mut o = Oracle::new(&wb);
     assert_eq!(o.value_of(2), OVal::Num(5.0));
 
-    // Downstream non-member reading a member through an IF condition ⇒ #VALUE!
-    // (the documented IfFn coercion). A1↔A2 live cycle; A3 reads A1 via guard.
+    // Downstream non-member reading a member through an IF condition ⇒ the
+    // member's #CIRC propagates (errors in a condition are not coerced).
+    // A1↔A2 live cycle; A3 reads A1 via guard.
     let wb = Workbook {
         seed: 0,
         cells: vec![
@@ -1139,7 +1128,7 @@ fn oracle_self_check_known_shapes() {
     };
     let mut o = Oracle::new(&wb);
     assert!(!o.member[2], "A3 is a downstream reader, not a member");
-    assert_eq!(o.value_of(2), OVal::Err(EKind::Value));
+    assert_eq!(o.value_of(2), OVal::Err(EKind::CircSettled));
 }
 
 /// Self-check that the engine harness round-trips the same known shapes, so

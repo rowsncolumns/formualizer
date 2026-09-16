@@ -11,7 +11,33 @@ use crate::tokenizer::Associativity;
 /// - References printed via .normalise()
 /// - Array literals: {1, 2; 3, 4}
 pub fn pretty_print(ast: &ASTNode) -> String {
-    pretty_print_node(ast)
+    pretty_print_node(ast, Spacing::Padded)
+}
+
+/// How a rendered formula spaces its punctuation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spacing {
+    /// The canonical form: `A1 + B1`, `SUM(A1, B1)`, `{1, 2; 3, 4}`.
+    Padded,
+    /// Excel's own spelling: `A1+B1`, `SUM(A1,B1)`, `{1,2;3,4}` — what the formula bar shows and
+    /// what OOXML stores, so rewritten formula text matches what the user typed.
+    Compact,
+}
+
+impl Spacing {
+    fn list_sep(self) -> &'static str {
+        match self {
+            Spacing::Padded => ", ",
+            Spacing::Compact => ",",
+        }
+    }
+
+    fn row_sep(self) -> &'static str {
+        match self {
+            Spacing::Padded => "; ",
+            Spacing::Compact => ";",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,8 +144,9 @@ fn pretty_child(
     parent_prec: u8,
     parent_assoc: Associativity,
     side: Side,
+    spacing: Spacing,
 ) -> String {
-    let s = pretty_print_node(child);
+    let s = pretty_print_node(child, spacing);
     if child_needs_parens(child, parent_op, parent_prec, parent_assoc, side) {
         format!("({s})")
     } else {
@@ -127,7 +154,26 @@ fn pretty_child(
     }
 }
 
-fn pretty_print_node(ast: &ASTNode) -> String {
+/// A numeric literal the way Excel's formula bar spells it: 15 significant digits, trailing zeros
+/// dropped, and scientific notation only once the integer part outgrows 15 digits (`=1E+20`, but
+/// `=0.000001` stays decimal — the formula bar never shortens a small constant to `1E-06`).
+fn excel_formula_number(n: f64) -> String {
+    let general = formualizer_common::number_to_excel_text(n);
+    let Some((mantissa, exp)) = general.split_once("E-") else {
+        return general;
+    };
+    let Ok(exp) = exp.parse::<usize>() else {
+        return general;
+    };
+    let (sign, mantissa) = match mantissa.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", mantissa),
+    };
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    format!("{sign}0.{}{digits}", "0".repeat(exp - 1))
+}
+
+fn pretty_print_node(ast: &ASTNode, spacing: Spacing) -> String {
     match &ast.node_type {
         ASTNodeType::Literal(value) => match value {
             // Quote and escape text literals to preserve Excel semantics
@@ -135,11 +181,17 @@ fn pretty_print_node(ast: &ASTNode) -> String {
                 let escaped = s.replace('"', "\"\"");
                 format!("\"{escaped}\"")
             }
+            // An omitted argument (`SUM(A1,)`, `IF(c,,1)`) prints as nothing: Excel distinguishes
+            // it from a typed `""` (`SUM(A1,"")` is #VALUE!, `IF(c,"",1)` returns text).
+            crate::LiteralValue::Empty => String::new(),
+            // Excel spells its literals upper-case and its numbers with 15 significant digits.
+            crate::LiteralValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+            crate::LiteralValue::Number(n) => excel_formula_number(*n),
             _ => format!("{value}"),
         },
         ASTNodeType::Reference { reference, .. } => reference.normalise(),
         ASTNodeType::UnaryOp { op, expr } => {
-            let inner = pretty_print_node(expr);
+            let inner = pretty_print_node(expr, spacing);
             let inner = if unary_operand_needs_parens(op, expr) {
                 format!("({inner})")
             } else {
@@ -154,29 +206,30 @@ fn pretty_print_node(ast: &ASTNode) -> String {
         }
         ASTNodeType::BinaryOp { op, left, right } => {
             let (prec, assoc) = infix_info(op);
-            let left_s = pretty_child(left, op, prec, assoc, Side::Left);
-            let right_s = pretty_child(right, op, prec, assoc, Side::Right);
+            let left_s = pretty_child(left, op, prec, assoc, Side::Left, spacing);
+            let right_s = pretty_child(right, op, prec, assoc, Side::Right, spacing);
 
-            match op.as_str() {
+            match (op.as_str(), spacing) {
                 // Reference range operator prints tight; intersection is a
                 // single space rather than the generic three-space infix form.
-                ":" => format!("{left_s}:{right_s}"),
-                " " => format!("{left_s} {right_s}"),
-                "," => format!("{left_s}, {right_s}"),
-                _ => format!("{left_s} {op} {right_s}"),
+                (":", _) => format!("{left_s}:{right_s}"),
+                (" ", _) => format!("{left_s} {right_s}"),
+                (",", _) => format!("{left_s}{}{right_s}", spacing.list_sep()),
+                (_, Spacing::Padded) => format!("{left_s} {op} {right_s}"),
+                (_, Spacing::Compact) => format!("{left_s}{op}{right_s}"),
             }
         }
         ASTNodeType::Function { name, args } => {
             let args_str = args
                 .iter()
-                .map(pretty_print_node)
+                .map(|a| pretty_print_node(a, spacing))
                 .collect::<Vec<String>>()
-                .join(", ");
+                .join(spacing.list_sep());
 
             format!("{}({})", name.to_uppercase(), args_str)
         }
         ASTNodeType::Call { callee, args } => {
-            let callee_str = pretty_print_node(callee);
+            let callee_str = pretty_print_node(callee, spacing);
             // Wrap the callee in parentheses if it isn't already a callable-looking
             // primary (function call or another call expression). This keeps things
             // like `(1 + 2)(3)` unambiguous when round-tripping unusual ASTs.
@@ -186,9 +239,9 @@ fn pretty_print_node(ast: &ASTNode) -> String {
             };
             let args_str = args
                 .iter()
-                .map(pretty_print_node)
+                .map(|a| pretty_print_node(a, spacing))
                 .collect::<Vec<String>>()
-                .join(", ");
+                .join(spacing.list_sep());
             format!("{callee_rendered}({args_str})")
         }
         ASTNodeType::Array(rows) => {
@@ -196,12 +249,12 @@ fn pretty_print_node(ast: &ASTNode) -> String {
                 .iter()
                 .map(|row| {
                     row.iter()
-                        .map(pretty_print_node)
+                        .map(|v| pretty_print_node(v, spacing))
                         .collect::<Vec<String>>()
-                        .join(", ")
+                        .join(spacing.list_sep())
                 })
                 .collect::<Vec<String>>()
-                .join("; ");
+                .join(spacing.row_sep());
 
             format!("{{{rows_str}}}")
         }
@@ -214,6 +267,15 @@ fn pretty_print_node(ast: &ASTNode) -> String {
 /// a formula reconstructed from an AST.
 pub fn canonical_formula(ast: &ASTNode) -> String {
     format!("={}", pretty_print(ast))
+}
+
+/// Render an AST the way Excel spells a formula, prefixed with '=': no spaces around binary
+/// operators or after argument / array separators (`=SUM(A1,B1)*2`, `{1,2;3,4}`), references
+/// normalised, function names upper-cased. Use this when rewriting STORED formula text (a
+/// reference shift, a sheet rename, a shared-formula expansion) so the text stays the way the user
+/// typed it and the way OOXML stores it; `canonical_formula` is the padded display form.
+pub fn excel_formula(ast: &ASTNode) -> String {
+    format!("={}", pretty_print_node(ast, Spacing::Compact))
 }
 
 /// Tokenizes and parses a formula, then pretty-prints it.
@@ -284,6 +346,57 @@ mod tests {
         let formula = "=a1 + b2 *     3";
         let pretty = pretty_parse_render(formula).unwrap();
         assert_eq!(pretty, "=A1 + B2 * 3");
+    }
+
+    #[test]
+    fn test_excel_formula_is_compact_excel_spelling() {
+        // Excel's formula bar / OOXML spelling: no spaces around operators or after separators.
+        let ast = parse("=sum(  a1, b2  ) * 3 + $A$1").unwrap();
+        assert_eq!(excel_formula(&ast), "=SUM(A1,B2)*3+$A$1");
+        let ast = parse("={1, 2; 3, 4}").unwrap();
+        assert_eq!(excel_formula(&ast), "={1,2;3,4}");
+        // Precedence parentheses, the range/intersection operators, and unary forms are kept.
+        let ast = parse("=(a1+b1)*c1").unwrap();
+        assert_eq!(excel_formula(&ast), "=(A1+B1)*C1");
+        let ast = parse("=SUM(A1:B2 B1:C3)").unwrap();
+        assert_eq!(excel_formula(&ast), "=SUM(A1:B2 B1:C3)");
+        let ast = parse("=-A1%").unwrap();
+        assert_eq!(excel_formula(&ast), "=-A1%");
+        let ast = parse(r#"=IF(A1>1,"a,b","c")"#).unwrap();
+        assert_eq!(excel_formula(&ast), r#"=IF(A1>1,"a,b","c")"#);
+        // Padded canonical form is untouched.
+        assert_eq!(pretty_parse_render("=a1+b2*3").unwrap(), "=A1 + B2 * 3");
+    }
+
+    #[test]
+    fn test_excel_formula_spells_literals_like_excel() {
+        // Booleans upper-case, numbers in Excel's General form (15 significant digits, `E+nn`).
+        let ast = parse(r#"=IF(B2="a",true,false)"#).unwrap();
+        assert_eq!(excel_formula(&ast), r#"=IF(B2="a",TRUE,FALSE)"#);
+        let ast = parse("=1E+20").unwrap();
+        assert_eq!(excel_formula(&ast), "=1E+20");
+        let ast = parse("=100000000000000000000").unwrap();
+        assert_eq!(excel_formula(&ast), "=1E+20");
+        let ast = parse("=1.50*2+0.000001").unwrap();
+        assert_eq!(excel_formula(&ast), "=1.5*2+0.000001");
+        let ast = parse("=-0.0000000125+1E-9").unwrap();
+        assert_eq!(excel_formula(&ast), "=-0.0000000125+0.000000001");
+        let ast = parse("=1/3+0.333333333333333333").unwrap();
+        assert_eq!(excel_formula(&ast), "=1/3+0.333333333333333");
+        // An omitted argument stays omitted — `SUM(x,)` and `SUM(x,"")` mean different things.
+        let ast = parse("=SUM(A2:A3,)").unwrap();
+        assert_eq!(excel_formula(&ast), "=SUM(A2:A3,)");
+        let ast = parse("=IF(A1,,1)").unwrap();
+        assert_eq!(excel_formula(&ast), "=IF(A1,,1)");
+        let ast = parse("=CHOOSE(1,A1,,C1,,E1)").unwrap();
+        assert_eq!(excel_formula(&ast), "=CHOOSE(1,A1,,C1,,E1)");
+        let ast = parse(r#"=SUM(A1,"")"#).unwrap();
+        assert_eq!(excel_formula(&ast), r#"=SUM(A1,"")"#);
+        // The padded canonical form spells literals the same way.
+        assert_eq!(
+            pretty_parse_render("=IF(A1,,true)").unwrap(),
+            "=IF(A1, , TRUE)"
+        );
     }
 
     #[test]

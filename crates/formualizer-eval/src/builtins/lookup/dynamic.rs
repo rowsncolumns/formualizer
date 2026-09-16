@@ -40,24 +40,27 @@ use std::collections::HashMap;
  * - Per-dimension: Excel sheet limits (1,048,576 rows × 16,384 cols — the
  *   same values as `EvalConfig::default().max_sheet_rows/max_sheet_cols`).
  *   A generated array larger than a sheet can never spill successfully
- *   (`SpillBoundsPolicy::Strict`), so it is `#NUM!` unconditionally.
+ *   (`SpillBoundsPolicy::Strict`), so it is `#SPILL!` unconditionally —
+ *   the error Excel shows for `=SEQUENCE(2000000)` ("spill range is too
+ *   big") — without allocating the array first.
  * - Total cells: 2^24 (16,777,216). `LiteralValue` is ≥32 bytes, so this
- *   already bounds the transient allocation near ~0.5 GiB — three orders
- *   of magnitude above the engine's default spill cap
- *   (`SpillConfig::max_spill_cells` = 10,000) which would reject the
- *   result downstream anyway. Anything larger risks OOM before that
- *   downstream guard can run.
+ *   already bounds the transient allocation near ~0.5 GiB. Anything larger
+ *   risks OOM before the engine's spill planner can reject the result, so
+ *   it fails closed as `#NUM!`.
  */
 const GENERATED_ARRAY_MAX_ROWS: i64 = 1_048_576;
 const GENERATED_ARRAY_MAX_COLS: i64 = 16_384;
 const GENERATED_ARRAY_MAX_CELLS: i64 = 1 << 24;
 
-/// Returns `Some(#NUM!)` when a `rows x cols` generated array exceeds the
-/// allocation guard; uses checked arithmetic so overflowing products fail
-/// closed. Callers have already rejected `rows <= 0 || cols <= 0`.
+/// Returns `Some(#SPILL!)` when a `rows x cols` generated array is taller or
+/// wider than a sheet, `Some(#NUM!)` when it exceeds the allocation guard;
+/// uses checked arithmetic so overflowing products fail closed. Callers have
+/// already rejected `rows <= 0 || cols <= 0`.
 fn generated_array_too_large(rows: i64, cols: i64) -> Option<ExcelError> {
     if rows > GENERATED_ARRAY_MAX_ROWS || cols > GENERATED_ARRAY_MAX_COLS {
-        return Some(ExcelError::new(ExcelErrorKind::Num));
+        return Some(
+            ExcelError::new(ExcelErrorKind::Spill).with_message("Spill exceeds sheet bounds"),
+        );
     }
     match rows.checked_mul(cols) {
         Some(total) if total <= GENERATED_ARRAY_MAX_CELLS => None,
@@ -69,6 +72,25 @@ fn generated_array_too_large(rows: i64, cols: i64) -> Option<ExcelError> {
 
 pub fn super_wildcard_match(pattern: &str, text: &str) -> bool {
     super::lookup_utils::wildcard_pattern_match(pattern, text)
+}
+
+/// Is `arg` a reference whose extent is not fully declared — a whole-row / whole-column range, or a
+/// table / external / 3-D form the range view sizes on its own? Value arguments (array literals,
+/// function results) are fully sized by their view and return `false`.
+fn is_open_ended_reference(arg: &ArgumentHandle<'_, '_>) -> bool {
+    use formualizer_parse::parser::ReferenceType;
+    match arg.as_reference_or_eval() {
+        Ok(ReferenceType::Cell { .. }) => false,
+        Ok(ReferenceType::Range {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            ..
+        }) => start_row.is_none() || start_col.is_none() || end_row.is_none() || end_col.is_none(),
+        Ok(_) => true,
+        Err(_) => false,
+    }
 }
 
 /* ───────────────────────── XLOOKUP() ───────────────────────── */
@@ -274,6 +296,23 @@ impl Function for XLookupFn {
                 ExcelError::new(ExcelErrorKind::Value),
             )));
         };
+
+        // Excel: the return array must span the lookup array's length along the lookup axis
+        // (`XLOOKUP(v,A1:A5,B1:B3)` is #VALUE!). Only checked when neither side is a whole-row /
+        // whole-column reference — those views are trimmed to the sheet's used region, so their
+        // dims are not the declared extents.
+        if !is_open_ended_reference(&args[1]) && !is_open_ended_reference(&args[2]) {
+            let (need, have) = if vertical {
+                (lookup_rows, ret_rows)
+            } else {
+                (lookup_cols, ret_cols)
+            };
+            if need > 0 && need != have {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                    ExcelError::new(ExcelErrorKind::Value),
+                )));
+            }
+        }
 
         let lookup_len = {
             let raw = if vertical { lookup_rows } else { lookup_cols };
@@ -3024,9 +3063,15 @@ impl Function for SequenceFn {
         };
         let start = if args.len() >= 3 { num(&args[2])? } else { 1.0 };
         let step = if args.len() >= 4 { num(&args[3])? } else { 1.0 };
-        if rows <= 0 || cols <= 0 {
+        // Excel: a zero-sized SEQUENCE is an empty array (#CALC!); negative dims are #VALUE!.
+        if rows < 0 || cols < 0 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new(ExcelErrorKind::Value),
+            )));
+        }
+        if rows == 0 || cols == 0 {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new(ExcelErrorKind::Calc),
             )));
         }
         if let Some(e) = generated_array_too_large(rows, cols) {
@@ -4044,17 +4089,27 @@ mod tests {
         assert!(generated_array_too_large(4096, 4096).is_none());
         // One past the cap: #NUM!.
         assert!(generated_array_too_large(4096, 4097).is_some());
-        // Per-dimension Excel sheet limits.
+        assert_eq!(
+            generated_array_too_large(4096, 4097).map(|e| e.kind),
+            Some(formualizer_common::ExcelErrorKind::Num)
+        );
+        // Per-dimension Excel sheet limits: can never spill → #SPILL! (Excel), not #NUM!.
         assert!(generated_array_too_large(1_048_576, 1).is_none());
-        assert!(generated_array_too_large(1_048_577, 1).is_some());
+        assert_eq!(
+            generated_array_too_large(1_048_577, 1).map(|e| e.kind),
+            Some(formualizer_common::ExcelErrorKind::Spill)
+        );
         assert!(generated_array_too_large(1, 16_384).is_none());
-        assert!(generated_array_too_large(1, 16_385).is_some());
+        assert_eq!(
+            generated_array_too_large(1, 16_385).map(|e| e.kind),
+            Some(formualizer_common::ExcelErrorKind::Spill)
+        );
         // checked_mul overflow path fails closed.
         assert!(generated_array_too_large(i64::MAX, i64::MAX).is_some());
     }
 
     #[test]
-    fn sequence_oversized_returns_num_error_quickly() {
+    fn sequence_oversized_returns_spill_error_quickly() {
         let wb = TestWorkbook::new().with_function(Arc::new(SequenceFn));
         let ctx = wb.interpreter();
         let f = ctx.context.get_function("", "SEQUENCE").unwrap();
@@ -4073,14 +4128,27 @@ mod tests {
         let elapsed = started.elapsed();
         match v {
             LiteralValue::Error(e) => {
-                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Num)
+                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Spill)
             }
-            other => panic!("expected #NUM! got {other:?}"),
+            other => panic!("expected #SPILL! got {other:?}"),
         }
         assert!(
             elapsed.as_millis() < 250,
             "oversized SEQUENCE must short-circuit, took {elapsed:?}"
         );
+        // Taller than the sheet but a legal total: still #SPILL! (Excel), without allocating.
+        let rows = lit(LiteralValue::Int(2_000_000));
+        let args = vec![ArgumentHandle::new(&rows, &ctx)];
+        match f
+            .dispatch(&args, &ctx.function_context(None))
+            .unwrap()
+            .into_literal()
+        {
+            LiteralValue::Error(e) => {
+                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Spill)
+            }
+            other => panic!("expected #SPILL! got {other:?}"),
+        }
 
         // Total-cells cap: full-sheet request (1,048,576 x 16,384) is #NUM!.
         let rows = lit(LiteralValue::Int(1_048_576));
@@ -4123,11 +4191,17 @@ mod tests {
     }
 
     #[test]
-    fn sequence_negative_and_zero_dims_keep_value_error() {
+    fn sequence_negative_dims_are_value_error_and_zero_dims_are_calc_error() {
         let wb = TestWorkbook::new().with_function(Arc::new(SequenceFn));
         let ctx = wb.interpreter();
         let f = ctx.context.get_function("", "SEQUENCE").unwrap();
-        for (r, c) in [(0i64, 5i64), (-3, 5), (5, 0), (5, -1)] {
+        // Excel: a zero-sized result is an empty array (#CALC!); negative dims are #VALUE!.
+        for (r, c, kind) in [
+            (0i64, 5i64, formualizer_common::ExcelErrorKind::Calc),
+            (5, 0, formualizer_common::ExcelErrorKind::Calc),
+            (-3, 5, formualizer_common::ExcelErrorKind::Value),
+            (5, -1, formualizer_common::ExcelErrorKind::Value),
+        ] {
             let rows = lit(LiteralValue::Int(r));
             let cols = lit(LiteralValue::Int(c));
             let args = vec![
@@ -4139,23 +4213,18 @@ mod tests {
                 .unwrap()
                 .into_literal()
             {
-                LiteralValue::Error(e) => {
-                    assert_eq!(
-                        e.kind,
-                        formualizer_common::ExcelErrorKind::Value,
-                        "SEQUENCE({r},{c})"
-                    )
-                }
-                other => panic!("expected #VALUE! for SEQUENCE({r},{c}), got {other:?}"),
+                LiteralValue::Error(e) => assert_eq!(e.kind, kind, "SEQUENCE({r},{c})"),
+                other => panic!("expected {kind:?} for SEQUENCE({r},{c}), got {other:?}"),
             }
         }
     }
 
     #[test]
-    fn randarray_oversized_returns_num_error_quickly() {
+    fn randarray_oversized_returns_spill_error_quickly() {
         let wb = TestWorkbook::new().with_function(Arc::new(RandArrayFn));
         let ctx = wb.interpreter();
         let f = ctx.context.get_function("", "RANDARRAY").unwrap();
+        // Wider than a sheet → #SPILL! (Excel), without allocating.
         let rows = lit(LiteralValue::Number(1e6));
         let cols = lit(LiteralValue::Number(1e6));
         let args = vec![
@@ -4170,14 +4239,31 @@ mod tests {
         let elapsed = started.elapsed();
         match v {
             LiteralValue::Error(e) => {
-                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Num)
+                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Spill)
             }
-            other => panic!("expected #NUM! got {other:?}"),
+            other => panic!("expected #SPILL! got {other:?}"),
         }
         assert!(
             elapsed.as_millis() < 250,
             "oversized RANDARRAY must short-circuit, took {elapsed:?}"
         );
+        // Fits the sheet's dimensions but exceeds the allocation guard → #NUM!.
+        let rows = lit(LiteralValue::Int(8192));
+        let cols = lit(LiteralValue::Int(8192));
+        let args = vec![
+            ArgumentHandle::new(&rows, &ctx),
+            ArgumentHandle::new(&cols, &ctx),
+        ];
+        match f
+            .dispatch(&args, &ctx.function_context(None))
+            .unwrap()
+            .into_literal()
+        {
+            LiteralValue::Error(e) => {
+                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Num)
+            }
+            other => panic!("expected #NUM! got {other:?}"),
+        }
     }
 
     #[test]

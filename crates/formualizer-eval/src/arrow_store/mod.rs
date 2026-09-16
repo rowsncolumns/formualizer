@@ -4577,26 +4577,19 @@ impl ArrowSheet {
             // Sparse sheet: keep inserted columns cheap by materializing no chunks.
             Vec::new()
         };
-        let mut cols_new: Vec<ArrowColumn> = Vec::with_capacity(self.columns.len() + count);
         let before_idx = before.min(self.columns.len());
-        for (i, col) in self.columns.iter_mut().enumerate() {
-            if i == before_idx {
-                for _ in 0..count {
-                    cols_new.push(empty_col(&lens));
-                }
-            }
-            cols_new.push(col.clone());
-        }
-        if before_idx == self.columns.len() {
-            for _ in 0..count {
-                cols_new.push(empty_col(&lens));
-            }
-        }
-        // Fix column indices
-        for (idx, col) in cols_new.iter_mut().enumerate() {
+        // Move the existing columns around the inserted run — never clone them. A write that
+        // grows the sheet one column at a time (a wide spill committing left to right) used to
+        // re-clone every column, chunks and overlays included, per inserted column: quadratic,
+        // and a full-width `SEQUENCE(1,16384)` never finished.
+        let tail = self.columns.split_off(before_idx);
+        self.columns.reserve(count + tail.len());
+        self.columns.extend((0..count).map(|_| empty_col(&lens)));
+        self.columns.extend(tail);
+        // Fix column indices from the insertion point on (earlier ones are unchanged).
+        for (idx, col) in self.columns.iter_mut().enumerate().skip(before_idx) {
             col.index = idx as u32;
         }
-        self.columns = cols_new;
         // chunk_starts unchanged; lens were matched
     }
 

@@ -2739,15 +2739,53 @@ impl Parser {
     }
 
     fn parse_operand(&mut self, span: TokenSpan) -> Result<ASTNode, ParserError> {
+        /// Excel reads at most 15 significant digits of a numeric literal and TRUNCATES the
+        /// rest (`=123456789012345678` is `123456789012345000`, `1234567890123456` is
+        /// `1234567890123450` — the classic credit-card-number case), rather than taking the
+        /// nearest double. Returns the truncated spelling, or `None` when the literal already
+        /// fits (so `0.1`, `1E-300`, … parse bit-identically).
+        fn excel_significant_digits(text: &str) -> Option<String> {
+            let (mantissa, exponent) = match text.find(['e', 'E']) {
+                Some(i) => text.split_at(i),
+                None => (text, ""),
+            };
+            let mut out = String::with_capacity(text.len());
+            let mut significant = 0usize;
+            let mut truncated = false;
+            for ch in mantissa.chars() {
+                if ch.is_ascii_digit() {
+                    if significant > 0 || ch != '0' {
+                        significant += 1;
+                    }
+                    if significant > 15 {
+                        out.push('0');
+                        truncated = true;
+                        continue;
+                    }
+                }
+                out.push(ch);
+            }
+            if !truncated {
+                return None;
+            }
+            out.push_str(exponent);
+            Some(out)
+        }
+
         let value = self.span_value(&span);
         let token = self.span_to_token(&span);
 
         match span.subtype {
             TokenSubType::Number => {
-                let value = value.parse::<f64>().map_err(|_| ParserError {
-                    message: format!("Invalid number: {value}"),
-                    position: Some(self.position),
-                })?;
+                let truncated = excel_significant_digits(value);
+                let value = truncated
+                    .as_deref()
+                    .unwrap_or(value)
+                    .parse::<f64>()
+                    .map_err(|_| ParserError {
+                        message: format!("Invalid number: {value}"),
+                        position: Some(self.position),
+                    })?;
                 Ok(ASTNode::new(
                     ASTNodeType::Literal(LiteralValue::Number(value)),
                     Some(token),
@@ -2894,7 +2932,7 @@ impl Parser {
             && self.tokens[self.position].subtype == TokenSubType::Arg
         {
             args.push(ASTNode::new(
-                ASTNodeType::Literal(LiteralValue::Text("".to_string())),
+                ASTNodeType::Literal(LiteralValue::Empty),
                 None,
             ));
         } else {
@@ -2917,14 +2955,14 @@ impl Parser {
                         && next_token.subtype == TokenSubType::Arg
                     {
                         args.push(ASTNode::new(
-                            ASTNodeType::Literal(LiteralValue::Text("".to_string())),
+                            ASTNodeType::Literal(LiteralValue::Empty),
                             None,
                         ));
                     } else if next_token.token_type == TokenType::Func
                         && next_token.subtype == TokenSubType::Close
                     {
                         args.push(ASTNode::new(
-                            ASTNodeType::Literal(LiteralValue::Text("".to_string())),
+                            ASTNodeType::Literal(LiteralValue::Empty),
                             None,
                         ));
                         self.position += 1;
@@ -2934,7 +2972,7 @@ impl Parser {
                     }
                 } else {
                     args.push(ASTNode::new(
-                        ASTNodeType::Literal(LiteralValue::Text("".to_string())),
+                        ASTNodeType::Literal(LiteralValue::Empty),
                         None,
                     ));
                 }

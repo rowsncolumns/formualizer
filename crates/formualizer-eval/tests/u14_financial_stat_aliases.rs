@@ -76,6 +76,67 @@ fn cumulative_windows_reconcile_with_pmt() {
     assert_close("=CUMPRINC(0.1,3,100,1,3,1)", -100.0, 1e-9);
 }
 
+#[test]
+fn ipmt_with_beginning_of_period_payments_accrues_on_the_post_payment_balance() {
+    // PMT(0.1,3,100,0,1) = -36.5559; period 2 interest = -(100 - 36.5559) * 0.1 (Excel -6.34441).
+    let pmt = num("=PMT(0.1,3,100,0,1)");
+    assert_close("=IPMT(0.1,1,3,100,0,1)", 0.0, 1e-12);
+    assert_close("=IPMT(0.1,2,3,100,0,1)", -(100.0 + pmt) * 0.1, 1e-9);
+    assert_close("=IPMT(0.1,2,3,100,0,1)", -6.34441088, 1e-7);
+    // The three interest charges total 3 × PMT − principal.
+    assert_close(
+        "=IPMT(0.1,1,3,100,0,1)+IPMT(0.1,2,3,100,0,1)+IPMT(0.1,3,3,100,0,1)",
+        3.0 * pmt + 100.0,
+        1e-9,
+    );
+    // End-of-period reference values (Excel docs) are unchanged.
+    assert_close("=IPMT(0.1/12,1,3*12,8000)", -66.66666667, 1e-6);
+    assert_close("=IPMT(0.1,3,3,8000)", -292.4471299, 1e-6);
+    // PPMT = PMT − IPMT: PMT(0.1,2,2000) = −1152.380952, first-period interest −200.
+    assert_close("=PPMT(0.1,1,2,2000)", -952.380952, 1e-6);
+    assert_close(
+        "=PPMT(0.08/12,10,10*12,200000)-(PMT(0.08/12,120,200000)-IPMT(0.08/12,10,120,200000))",
+        0.0,
+        1e-12,
+    );
+}
+
+#[test]
+fn ipmt_and_ppmt_reconcile_with_the_cumulative_windows_for_both_timings() {
+    for pay_type in [0, 1] {
+        for per in 1..=3 {
+            assert_close(
+                &format!(
+                    "=IPMT(0.1,{per},3,100,0,{pay_type})-CUMIPMT(0.1,3,100,{per},{per},{pay_type})"
+                ),
+                0.0,
+                1e-12,
+            );
+            assert_close(
+                &format!("=PPMT(0.1,{per},3,100,0,{pay_type})-CUMPRINC(0.1,3,100,{per},{per},{pay_type})"),
+                0.0,
+                1e-12,
+            );
+        }
+    }
+}
+
+#[test]
+fn cumulative_windows_truncate_fractional_periods() {
+    // Excel: nper, start_period, end_period and type are truncated to integers.
+    assert_close("=CUMIPMT(0.1,3,100,1.5,2,0)", -16.97885, 1e-5);
+    assert_close(
+        "=CUMIPMT(0.1,3,100,1.5,2.9,0)-CUMIPMT(0.1,3,100,1,2,0)",
+        0.0,
+        1e-12,
+    );
+    assert_close(
+        "=CUMPRINC(0.1,3.7,100,1.5,2.9,0.4)-CUMPRINC(0.1,3,100,1,2,0)",
+        0.0,
+        1e-12,
+    );
+}
+
 // ── DB / VDB / FVSCHEDULE (C-J18, A-16) ─────────────────────────────────────────────────────
 
 #[test]
@@ -246,6 +307,92 @@ fn discounted_and_maturity_securities_match_excel_reference_examples() {
         1e-6,
     );
     assert_num_error("=PRICEDISC(DATE(2008,3,1),DATE(2008,2,16),0.0525,100,2)");
+}
+
+// ── YEARFRAC basis 1 — Excel's actual/actual rule, shared with the securities ─────────────────
+
+#[test]
+fn yearfrac_actual_actual_follows_excel() {
+    // ≤ 1 year across a year boundary with no Feb 29 inside → 365 (was prorated 61/365 + 31/366).
+    assert_close(
+        "=YEARFRAC(DATE(2023,11,1),DATE(2024,2,1),1)",
+        92.0 / 365.0,
+        1e-12,
+    );
+    // ≤ 1 year inside a single leap year → 366 even though Feb 29 is outside the span.
+    assert_close(
+        "=YEARFRAC(DATE(2024,3,1),DATE(2024,6,1),1)",
+        92.0 / 366.0,
+        1e-12,
+    );
+    // ≤ 1 year straddling a Feb 29 → 366 (Excel docs: 0.989071038 / 0.915300546).
+    assert_close(
+        "=YEARFRAC(DATE(2020,2,5),DATE(2021,2,1),1)",
+        0.989071038,
+        1e-9,
+    );
+    assert_close(
+        "=YEARFRAC(DATE(2020,2,1),DATE(2021,1,1),1)",
+        0.915300546,
+        1e-9,
+    );
+    // > 1 year → average length of the calendar years touched.
+    assert_close(
+        "=YEARFRAC(DATE(2022,2,16),DATE(2025,3,1),1)",
+        1109.0 / 365.25,
+        1e-9,
+    );
+    assert_close(
+        "=YEARFRAC(DATE(2012,1,1),DATE(2019,7,30),1)",
+        7.575633128,
+        1e-9,
+    );
+    assert_close(
+        "=YEARFRAC(DATE(2020,2,1),DATE(2022,1,1),1)",
+        1.916058394,
+        1e-9,
+    );
+    // Excel swaps reversed dates: the fraction is never negative (JS engine agrees).
+    assert_close(
+        "=YEARFRAC(DATE(2024,2,1),DATE(2023,11,1),1)",
+        92.0 / 365.0,
+        1e-12,
+    );
+    assert_close(
+        "=YEARFRAC(DATE(2012,7,30),DATE(2012,1,1))",
+        0.58055556,
+        1e-8,
+    );
+}
+
+#[test]
+fn discount_securities_use_the_yearfrac_year_length() {
+    assert_close(
+        "=PRICEDISC(DATE(2023,11,1),DATE(2024,2,1),0.05,100,1)",
+        100.0 - 5.0 * 92.0 / 365.0,
+        1e-9,
+    );
+    assert_close(
+        "=PRICEDISC(DATE(2024,3,1),DATE(2024,6,1),0.05,100,1)",
+        100.0 - 5.0 * 92.0 / 366.0,
+        1e-9,
+    );
+    for (s, m) in [
+        ("DATE(2023,11,1)", "DATE(2024,2,1)"),
+        ("DATE(2024,3,1)", "DATE(2024,6,1)"),
+        ("DATE(2022,2,16)", "DATE(2025,3,1)"),
+    ] {
+        assert_close(
+            &format!("=PRICEDISC({s},{m},0.05,100,1)-(100-5*YEARFRAC({s},{m},1))"),
+            0.0,
+            1e-12,
+        );
+        assert_close(
+            &format!("=INTRATE({s},{m},100,105,1)-0.05/YEARFRAC({s},{m},1)"),
+            0.0,
+            1e-12,
+        );
+    }
 }
 
 // ── Excel 2007 statistical compatibility names (A-15) ───────────────────────────────────────

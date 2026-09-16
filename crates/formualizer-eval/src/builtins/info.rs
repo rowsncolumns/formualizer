@@ -1657,12 +1657,14 @@ impl Function for ErrorTypeFn {
                     ExcelErrorKind::Num => 6,
                     ExcelErrorKind::Na => 7,
                     ExcelErrorKind::Error => 8,
-                    // Non-standard extensions (codes 9-13)
-                    ExcelErrorKind::NImpl => 9,
-                    ExcelErrorKind::Spill => 10,
-                    ExcelErrorKind::Calc => 11,
-                    ExcelErrorKind::Circ => 12,
-                    ExcelErrorKind::Cancelled => 13,
+                    // Excel: #GETTING_DATA 8, #SPILL! 9, #CONNECT! 10, #BLOCKED! 11,
+                    // #UNKNOWN! 12, #FIELD! 13, #CALC! 14.
+                    ExcelErrorKind::Spill => 9,
+                    ExcelErrorKind::Calc => 14,
+                    // Non-Excel kinds map onto #UNKNOWN! and codes past Excel's table.
+                    ExcelErrorKind::NImpl => 12,
+                    ExcelErrorKind::Circ => 15,
+                    ExcelErrorKind::Cancelled => 16,
                 };
                 Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(code)))
             }
@@ -2011,6 +2013,14 @@ impl Function for AreasFn {
             return arity_error();
         }
         match args[0].as_reference_or_eval() {
+            // A defined name is a reference syntactically; it still has to resolve
+            // (`=AREAS(FOO)` with FOO undefined is `#NAME?`, not 1).
+            Ok(formualizer_parse::parser::ReferenceType::NamedRange(_)) => {
+                match args[0].range_view() {
+                    Ok(_) => Ok(scalar(LiteralValue::Int(1))),
+                    Err(e) => Ok(scalar(LiteralValue::Error(e))),
+                }
+            }
             Ok(_) => Ok(scalar(LiteralValue::Int(1))),
             Err(_) => Ok(error_value(ExcelErrorKind::Value)),
         }

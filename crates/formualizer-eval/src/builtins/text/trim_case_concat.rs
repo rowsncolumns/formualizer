@@ -38,7 +38,11 @@ fn flattened_values(arg: &ArgumentHandle<'_, '_>) -> Result<Vec<LiteralValue>, E
 }
 
 fn to_text<'a, 'b>(a: &ArgumentHandle<'a, 'b>) -> Result<String, ExcelError> {
-    let v = scalar_like_value(a)?;
+    literal_text(scalar_like_value(a)?)
+}
+
+/// Excel's text form of one non-array value; an error is returned as `Err` to propagate.
+fn literal_text(v: LiteralValue) -> Result<String, ExcelError> {
     Ok(match v {
         LiteralValue::Text(s) => s,
         LiteralValue::Empty => String::new(),
@@ -349,6 +353,7 @@ pub struct ConcatFn;
 ///
 /// # Remarks
 /// - Accepts one or more arguments.
+/// - Range and array arguments contribute every cell in row-major order.
 /// - Blank values contribute an empty string.
 /// - Numbers and booleans are coerced to text.
 /// - Errors are propagated as soon as encountered.
@@ -405,9 +410,13 @@ impl Function for ConcatFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         _: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        // Every cell of a range / array argument is appended (`CONCAT(A1:A2)`), unlike
+        // CONCATENATE, which reads a scalar per argument.
         let mut out = String::new();
         for a in args {
-            out.push_str(&to_text(a)?);
+            for v in flattened_values(a)? {
+                out.push_str(&literal_text(v)?);
+            }
         }
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(out)))
     }
@@ -473,9 +482,13 @@ impl Function for ConcatenateFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        ctx: &dyn FunctionContext<'b>,
+        _: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        ConcatFn.eval(args, ctx)
+        let mut out = String::new();
+        for a in args {
+            out.push_str(&to_text(a)?);
+        }
+        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(out)))
     }
 }
 
