@@ -321,25 +321,28 @@ impl Function for TextFn {
         let num = match val {
             LiteralValue::Number(f) => f,
             LiteralValue::Int(i) => i as f64,
-            LiteralValue::Text(t) => match ctx.locale().parse_number_invariant(&t) {
-                Some(n) => n,
-                None => {
-                    // Excel returns the text argument unchanged only when it is
-                    // *clearly* non-numeric (e.g. =TEXT("abc","00") -> "abc"). Text
-                    // that contains digits may be a number, date, currency or
-                    // fraction that Excel would coerce and format (e.g. "3-1",
-                    // "$5", "1/2", or locale-ambiguous "1.234,56"); handling those
-                    // requires a shared TEXT/VALUE coercion that does not exist yet,
-                    // so we conservatively keep returning #VALUE! for them rather
-                    // than passing them through unformatted.
-                    if t.chars().any(|c| c.is_ascii_digit()) {
-                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                            ExcelError::new_value(),
-                        )));
+            // The same text→number coercion as VALUE() and the operators: numeric, currency,
+            // percent, date/time text, and year-less dates in the clock's year
+            // (`TEXT("1/2","yyyy")` is this year).
+            LiteralValue::Text(t) => {
+                match crate::coercion::parse_numeric_text_with_clock(&t, &ctx.locale(), ctx.clock())
+                {
+                    Some(n) => n,
+                    None => {
+                        // Excel returns the text argument unchanged only when it is
+                        // *clearly* non-numeric (e.g. =TEXT("abc","00") -> "abc"). Digit-bearing
+                        // text the shared coercion did not accept (a mixed fraction like
+                        // "1 1/2", locale-ambiguous "1.234,56") is something Excel might still
+                        // coerce, so it stays #VALUE! rather than passing through unformatted.
+                        if t.chars().any(|c| c.is_ascii_digit()) {
+                            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                                ExcelError::new_value(),
+                            )));
+                        }
+                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(t)));
                     }
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(t)));
                 }
-            },
+            }
             // Booleans are not numbers to TEXT: Excel returns them as the text "TRUE"/"FALSE"
             // whatever the format code (`TEXT(TRUE,"0")` → "TRUE").
             LiteralValue::Boolean(b) => {

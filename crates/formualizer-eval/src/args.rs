@@ -441,7 +441,7 @@ pub fn validate_and_prepare<'a, 'b>(
                                 }
                             }
                             CoercionPolicy::NumberLenientText => {
-                                match crate::coercion::to_number_lenient(v.as_ref()) {
+                                match arg.lenient_number(v.as_ref()) {
                                     Ok(n) => Cow::Owned(LiteralValue::Number(n)),
                                     Err(e) => {
                                         if options.warn_only {

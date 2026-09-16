@@ -1,4 +1,6 @@
-use super::super::utils::{ARG_RANGE_NUM_LENIENT_ONE, ARG_RANGE_NUM_LENIENT_TWO, coerce_num};
+use super::super::utils::{
+    ARG_RANGE_NUM_LENIENT_ONE, ARG_RANGE_NUM_LENIENT_TWO, coerce_num, coerce_num_for, coerce_num_in,
+};
 use crate::args::ArgSchema;
 use crate::engine::VisibilityMaskMode;
 use crate::function::Function;
@@ -132,7 +134,7 @@ fn sum_argument(arg: &ArgumentHandle<'_, '_>) -> Result<f64, ExcelError> {
     }
     match arg.value()?.into_literal() {
         LiteralValue::Error(e) => Err(e),
-        v => coerce_num(&v),
+        v => coerce_num_for(arg, &v),
     }
 }
 
@@ -328,7 +330,7 @@ impl Function for CountFn {
                 // COUNT never propagates: an error argument is simply not a number.
                 let v = arg.value()?.into_literal();
                 if !matches!(v, LiteralValue::Empty | LiteralValue::Error(_))
-                    && coerce_num(&v).is_ok()
+                    && coerce_num_for(arg, &v).is_ok()
                 {
                     count += 1;
                 }
@@ -565,7 +567,7 @@ impl Function for SumProductFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         use crate::broadcast::{broadcast_shape, project_index};
 
@@ -627,7 +629,7 @@ impl Function for SumProductFn {
                         LiteralValue::Error(e) => {
                             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
                         }
-                        _ => match super::super::utils::coerce_num(&lv) {
+                        _ => match coerce_num_in(ctx, &lv) {
                             Ok(n) => {
                                 prod *= n;
                             }
@@ -1167,7 +1169,7 @@ fn parse_strict_int_arg(arg: &ArgumentHandle<'_, '_>) -> Result<i32, ExcelError>
         return Err(e);
     }
 
-    let n = coerce_num(&raw)?;
+    let n = coerce_num_for(arg, &raw)?;
     if !n.is_finite() {
         return Err(ExcelError::new_value());
     }
@@ -1246,7 +1248,12 @@ impl AggregateCollector {
             if let Ok(view) = arg.range_view() {
                 out.collect_range_arg(&view, ctx, policy)?;
             } else {
-                out.consume_scalar_value(arg.value()?.into_literal(), policy.op, policy.errors)?;
+                out.consume_scalar_value(
+                    ctx,
+                    arg.value()?.into_literal(),
+                    policy.op,
+                    policy.errors,
+                )?;
             }
         }
 
@@ -1355,6 +1362,7 @@ impl AggregateCollector {
 
     fn consume_scalar_value(
         &mut self,
+        ctx: &dyn FunctionContext<'_>,
         value: LiteralValue,
         op: AggregateOp,
         error_policy: ErrorPolicy,
@@ -1389,12 +1397,14 @@ impl AggregateCollector {
                         }
                     }
                     AggregateOp::Count => {
-                        if !matches!(other, LiteralValue::Empty) && coerce_num(&other).is_ok() {
+                        if !matches!(other, LiteralValue::Empty)
+                            && coerce_num_in(ctx, &other).is_ok()
+                        {
                             self.numeric_values.push(0.0);
                         }
                     }
                     _ => {
-                        if let Ok(n) = coerce_num(&other) {
+                        if let Ok(n) = coerce_num_in(ctx, &other) {
                             self.numeric_values.push(n);
                         }
                     }
@@ -1774,7 +1784,7 @@ impl Function for AggregateFn {
             if let LiteralValue::Error(e) = k_raw {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
             }
-            let k = match coerce_num(&k_raw) {
+            let k = match coerce_num_for(&args[3], &k_raw) {
                 Ok(k) if k.is_finite() => k,
                 _ => {
                     return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(

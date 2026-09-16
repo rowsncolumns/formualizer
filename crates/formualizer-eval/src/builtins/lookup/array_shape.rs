@@ -137,7 +137,7 @@ fn ignore_mode<'b>(args: &[ArgumentHandle<'_, 'b>]) -> Result<i64, ExcelError> {
         LiteralValue::Int(i) => i,
         LiteralValue::Number(n) => n as i64,
         LiteralValue::Error(e) => return Err(e),
-        other => crate::coercion::to_number_lenient(&other)? as i64,
+        other => crate::builtins::utils::coerce_num_for(&args[1], &other)? as i64,
     };
     if !(0..=3).contains(&n) {
         return Err(
@@ -409,7 +409,7 @@ fn opt_count<'b>(args: &[ArgumentHandle<'_, 'b>], idx: usize) -> Result<Option<i
         LiteralValue::Int(i) => Some(i),
         LiteralValue::Number(n) => Some(n.trunc() as i64),
         LiteralValue::Error(e) => return Err(e),
-        other => Some(crate::coercion::to_number_lenient(&other)?.trunc() as i64),
+        other => Some(crate::builtins::utils::coerce_num_for(&args[idx], &other)?.trunc() as i64),
     })
 }
 

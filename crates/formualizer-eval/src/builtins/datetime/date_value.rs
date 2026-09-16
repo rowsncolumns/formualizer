@@ -71,7 +71,7 @@ impl Function for DateValueFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         let date_text = match args[0].value()?.into_literal() {
             LiteralValue::Text(s) => s,
@@ -84,8 +84,20 @@ impl Function for DateValueFn {
             }
         };
 
-        // Try common date formats
-        // Excel accepts many formats, we'll support a subset
+        // Excel's text→date coercion first — the parser VALUE() and the operators use: en-US
+        // m/d/y, ISO, month names, "<date> <time>", and year-less forms in the evaluation
+        // clock's year (Excel's DATEVALUE documentation: the current year is used when the year
+        // is omitted, so `DATEVALUE("1/2")` is January 2 of this year). Time information is
+        // dropped, as in Excel.
+        if let Some(serial) =
+            crate::coercion::parse_date_time_text_with_clock(&date_text, ctx.clock())
+        {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
+                serial.floor(),
+            )));
+        }
+
+        // Legacy fallback formats the shared parser does not cover (day-first `15/01/2024`).
         let formats = [
             "%Y-%m-%d",  // 2024-01-15
             "%m/%d/%Y",  // 01/15/2024

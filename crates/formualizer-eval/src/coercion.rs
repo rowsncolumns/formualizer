@@ -39,14 +39,16 @@ pub fn to_number_lenient_with_locale(
 
 /// Lenient numeric coercion with the evaluation clock: like
 /// [`to_number_lenient_with_locale`], plus Excel's year-less date text (`"1/2"`, `"Jan 2"`,
-/// `"2-Jan"`) resolved in the clock's current year — the same `today()` `TODAY()` reads.
+/// `"2-Jan"`) resolved in the clock's current year — the same `today()` `TODAY()` reads. The
+/// clock is read only when the text turns out to be a year-less date; plain numeric text and
+/// full dates never touch it.
 pub fn to_number_lenient_with_clock(
     value: &LiteralValue,
     loc: &crate::locale::Locale,
     clock: &dyn crate::timezone::ClockProvider,
 ) -> Result<f64, ExcelError> {
     match value {
-        LiteralValue::Text(_) => to_number_lenient_on(value, loc, Some(clock.today())),
+        LiteralValue::Text(s) => text_to_number(s, loc, &|| Some(clock.today())),
         _ => to_number_strict(value),
     }
 }
@@ -57,12 +59,20 @@ fn to_number_lenient_on(
     today: Option<chrono::NaiveDate>,
 ) -> Result<f64, ExcelError> {
     match value {
-        LiteralValue::Text(s) => parse_numeric_text_on(s, loc, today).ok_or_else(|| {
-            ExcelError::new(ExcelErrorKind::Value)
-                .with_message(format!("Cannot convert '{s}' to number"))
-        }),
+        LiteralValue::Text(s) => text_to_number(s, loc, &|| today),
         _ => to_number_strict(value),
     }
+}
+
+fn text_to_number(
+    text: &str,
+    loc: &crate::locale::Locale,
+    today: &dyn Fn() -> Option<chrono::NaiveDate>,
+) -> Result<f64, ExcelError> {
+    parse_numeric_text_lazy(text, loc, today).ok_or_else(|| {
+        ExcelError::new(ExcelErrorKind::Value)
+            .with_message(format!("Cannot convert '{text}' to number"))
+    })
 }
 
 /// Excel's text→number coercion used by arithmetic and `VALUE()`: numeric text
@@ -81,8 +91,25 @@ pub fn parse_numeric_text_on(
     loc: &crate::locale::Locale,
     today: Option<chrono::NaiveDate>,
 ) -> Option<f64> {
+    parse_numeric_text_lazy(text, loc, &|| today)
+}
+
+/// [`parse_numeric_text`] with the evaluation clock supplying the year for year-less date text.
+pub fn parse_numeric_text_with_clock(
+    text: &str,
+    loc: &crate::locale::Locale,
+    clock: &dyn crate::timezone::ClockProvider,
+) -> Option<f64> {
+    parse_numeric_text_lazy(text, loc, &|| Some(clock.today()))
+}
+
+fn parse_numeric_text_lazy(
+    text: &str,
+    loc: &crate::locale::Locale,
+    today: &dyn Fn() -> Option<chrono::NaiveDate>,
+) -> Option<f64> {
     loc.parse_number_invariant(text)
-        .or_else(|| parse_date_time_text_on(text, today))
+        .or_else(|| parse_date_time_text_lazy(text, today))
 }
 
 /// Parse en-US date and/or time text to an Excel (1900 date system) serial.
@@ -92,6 +119,23 @@ pub fn parse_date_time_text(text: &str) -> Option<f64> {
 
 /// [`parse_date_time_text`] with the ambient date for year-less forms (`None` rejects them).
 pub fn parse_date_time_text_on(text: &str, today: Option<chrono::NaiveDate>) -> Option<f64> {
+    parse_date_time_text_lazy(text, &|| today)
+}
+
+/// [`parse_date_time_text`] with the evaluation clock supplying the year for year-less forms
+/// (`DATEVALUE("1/2")` is January 2 of the current year). Read lazily — a full date never
+/// consults the clock.
+pub fn parse_date_time_text_with_clock(
+    text: &str,
+    clock: &dyn crate::timezone::ClockProvider,
+) -> Option<f64> {
+    parse_date_time_text_lazy(text, &|| Some(clock.today()))
+}
+
+fn parse_date_time_text_lazy(
+    text: &str,
+    today: &dyn Fn() -> Option<chrono::NaiveDate>,
+) -> Option<f64> {
     let text = text.trim();
     if text.is_empty() {
         return None;
@@ -169,7 +213,10 @@ fn make_date(year: i32, month: u32, day: u32) -> Option<chrono::NaiveDate> {
 /// `Jan 5, 2024`, `January 5 2024`; `1/2024` is the first of that month. With `today`, Excel's
 /// year-less forms `1/2` (m/d), `Jan 2`, `2-Jan` resolve in the current year; without it they
 /// are rejected (no ambient clock).
-fn parse_date_text(text: &str, today: Option<chrono::NaiveDate>) -> Option<chrono::NaiveDate> {
+fn parse_date_text(
+    text: &str,
+    today: &dyn Fn() -> Option<chrono::NaiveDate>,
+) -> Option<chrono::NaiveDate> {
     let parts: Vec<&str> = text
         .split(|c: char| c == '/' || c == '-' || c == ',' || c.is_whitespace())
         .filter(|p| !p.is_empty())
@@ -184,7 +231,7 @@ fn parse_date_text(text: &str, today: Option<chrono::NaiveDate>) -> Option<chron
             // m/yyyy → the first of the month
             return make_date(b.parse().ok()?, a.parse().ok()?, 1);
         }
-        let year = today?.year();
+        let year = today()?.year();
         if numeric_pair && a.len() <= 2 && b.len() <= 2 {
             // m/d in the current year
             return make_date(year, a.parse().ok()?, b.parse().ok()?);

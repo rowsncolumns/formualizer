@@ -23,7 +23,7 @@ fn coerce_to_serial(arg: &ArgumentHandle) -> Result<f64, ExcelError> {
     if let LiteralValue::Error(e) = v {
         return Err(e);
     }
-    crate::coercion::to_number_lenient(&v).map_err(|_| ExcelError::new_value())
+    crate::builtins::utils::coerce_num_for(arg, &v).map_err(|_| ExcelError::new_value())
 }
 
 fn coerce_to_int(arg: &ArgumentHandle) -> Result<i64, ExcelError> {
@@ -31,7 +31,7 @@ fn coerce_to_int(arg: &ArgumentHandle) -> Result<i64, ExcelError> {
     if let LiteralValue::Error(e) = v {
         return Err(e);
     }
-    crate::coercion::to_number_lenient(&v)
+    crate::builtins::utils::coerce_num_for(arg, &v)
         .map(|f| f.trunc() as i64)
         .map_err(|_| ExcelError::new_value())
 }

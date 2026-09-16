@@ -292,6 +292,16 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
         self.interp
     }
 
+    /// Excel's lenient text→number coercion for a value read from this argument, with the
+    /// evaluating interpreter's locale and clock: numbers / booleans / blanks as `to_number_strict`,
+    /// numeric text (`"1,000"`, `"$5"`, `"50%"`), date/time text (`"1/2/2024"`, `"6:00 PM"`) and
+    /// year-less date text (`"1/2"`, `"Jan 2"`) resolved in the clock's year — the same coercion
+    /// the operators and `VALUE()` apply. Host-registered functions use this so their text
+    /// arguments cannot drift from the builtins'.
+    pub fn lenient_number(&self, value: &LiteralValue) -> Result<f64, ExcelError> {
+        self.interp.lenient_number(value)
+    }
+
     pub fn value(&self) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         self.cached_value
             .get_or_init(|| self.compute_value())

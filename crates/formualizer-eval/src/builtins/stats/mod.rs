@@ -21,7 +21,7 @@
 
 mod forecast_ets;
 
-use super::super::builtins::utils::{ARG_RANGE_NUM_LENIENT_ONE, coerce_num};
+use super::super::builtins::utils::{ARG_RANGE_NUM_LENIENT_ONE, coerce_num, coerce_num_for};
 use crate::args::ArgSchema;
 use crate::function::Function;
 use crate::function_contract::FunctionDependencyContract;
@@ -68,7 +68,7 @@ fn collect_numeric_stats_with(
                     match cell {
                         LiteralValue::Error(e) => return Err(e),
                         other => {
-                            if let Ok(n) = coerce_num(&other) {
+                            if let Ok(n) = coerce_num_for(a, &other) {
                                 out.push(n);
                             }
                         }
@@ -92,7 +92,7 @@ fn collect_numeric_stats_with(
             let v = scalar_like_value(a)?;
             match v {
                 LiteralValue::Error(e) => return Err(e),
-                other => match coerce_num(&other) {
+                other => match coerce_num_for(a, &other) {
                     Ok(n) => out.push(n),
                     Err(_) if strict_direct_text && matches!(other, LiteralValue::Text(_)) => {
                         return Err(ExcelError::new_value()
@@ -8666,7 +8666,7 @@ fn collect_numeric_a(args: &[ArgumentHandle]) -> Result<Vec<f64>, ExcelError> {
             match v {
                 LiteralValue::Error(e) => return Err(e),
                 other => {
-                    if let Ok(n) = coerce_num(&other) {
+                    if let Ok(n) = coerce_num_for(a, &other) {
                         out.push(n);
                     }
                 }
