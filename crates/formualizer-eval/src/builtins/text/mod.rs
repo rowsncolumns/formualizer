@@ -3,6 +3,7 @@
 //! CONCAT, CONCATENATE, TEXTJOIN, SUBSTITUTE, REPLACE, FIND, SEARCH, EXACT, VALUE, TEXT (limited formats)
 //! CHAR, CODE, REPT, CLEAN, UNICHAR, UNICODE, TEXTBEFORE, TEXTAFTER, DOLLAR, FIXED
 //! TEXTSPLIT, VALUETOTEXT, ARRAYTOTEXT (array text functions)
+//! REGEXTEST, REGEXEXTRACT, REGEXREPLACE (Excel 2024 regex functions)
 
 mod array_text; // TEXTSPLIT, VALUETOTEXT, ARRAYTOTEXT
 mod byte; // FINDB, LEFTB, LENB, MIDB, REPLACEB, RIGHTB, SEARCHB
@@ -11,6 +12,7 @@ mod extended; // CLEAN, UNICHAR, UNICODE, TEXTBEFORE, TEXTAFTER, DOLLAR, FIXED
 mod find_search_exact; // FIND, SEARCH, EXACT
 mod len_left_right; // LEN, LEFT, RIGHT
 mod mid_sub_replace; // MID, SUBSTITUTE, REPLACE
+mod regex_fns; // REGEXTEST, REGEXEXTRACT, REGEXREPLACE
 mod trim_case_concat; // TRIM, UPPER, LOWER, PROPER, CONCAT, CONCATENATE, TEXTJOIN
 mod value_text; // VALUE, TEXT
 
@@ -24,6 +26,7 @@ pub use extended::*;
 pub use find_search_exact::*;
 pub use len_left_right::*;
 pub use mid_sub_replace::*;
+pub use regex_fns::*;
 pub use trim_case_concat::*;
 pub use value_text::*;
 
@@ -34,6 +37,7 @@ pub fn register_builtins() {
     extended::register_builtins();
     len_left_right::register_builtins();
     mid_sub_replace::register_builtins();
+    regex_fns::register_builtins();
     trim_case_concat::register_builtins();
     find_search_exact::register_builtins();
     value_text::register_builtins();

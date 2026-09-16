@@ -2998,6 +2998,37 @@ impl Function for NormSDistFn {
     }
 }
 
+/// Excel 2007 compatibility name `NORMSDIST(z)`: the standard normal *cumulative* distribution,
+/// i.e. `NORM.S.DIST(z, TRUE)` — the modern function's second argument is required, so a plain
+/// alias would reject the one-argument legacy call.
+#[derive(Debug)]
+pub struct NormSDistLegacyFn;
+impl Function for NormSDistLegacyFn {
+    func_caps!(PURE);
+    fn name(&self) -> &'static str {
+        "NORMSDIST"
+    }
+    fn min_args(&self) -> usize {
+        1
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        use std::sync::LazyLock;
+        static SCHEMA: LazyLock<Vec<ArgSchema>> =
+            LazyLock::new(|| vec![ArgSchema::number_lenient_scalar()]);
+        &SCHEMA[..]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        _ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        let z = coerce_num(&scalar_like_value(&args[0])?)?;
+        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
+            std_norm_cdf(z),
+        )))
+    }
+}
+
 /// Returns the z-score whose standard normal cumulative probability matches `probability`.
 ///
 /// This is the inverse of `NORM.S.DIST(z, TRUE)` and is commonly used for critical-value
@@ -3038,6 +3069,9 @@ impl Function for NormSInvFn {
     func_caps!(PURE);
     fn name(&self) -> &'static str {
         "NORM.S.INV"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["NORMSINV"]
     }
     fn min_args(&self) -> usize {
         1
@@ -3104,6 +3138,9 @@ impl Function for NormDistFn {
     func_caps!(PURE);
     fn name(&self) -> &'static str {
         "NORM.DIST"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["NORMDIST"]
     }
     fn min_args(&self) -> usize {
         4
@@ -3188,6 +3225,9 @@ impl Function for NormInvFn {
     func_caps!(PURE);
     fn name(&self) -> &'static str {
         "NORM.INV"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["NORMINV"]
     }
     fn min_args(&self) -> usize {
         3
@@ -10033,6 +10073,7 @@ pub fn register_builtins() {
     // Statistical distributions
     crate::function_registry::register_builtin(Arc::new(NormSDistFn));
     crate::function_registry::register_builtin(Arc::new(NormSInvFn));
+    crate::function_registry::register_builtin(Arc::new(NormSDistLegacyFn));
     crate::function_registry::register_builtin(Arc::new(NormDistFn));
     crate::function_registry::register_builtin(Arc::new(NormInvFn));
     crate::function_registry::register_builtin(Arc::new(LognormDistFn));
