@@ -297,7 +297,7 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 if let ASTNodeType::Literal(ref v) = node.node_type {
                     return Ok(crate::traits::CalcValue::Scalar(v.clone()));
                 }
-                self.interp.evaluate_ast(node)
+                self.interp.evaluate_union_argument(node)
             }
             ArgumentExpr::Arena {
                 id,
@@ -305,7 +305,7 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 sheet_registry,
             } => self
                 .interp
-                .evaluate_arena_ast(*id, data_store, sheet_registry),
+                .evaluate_union_argument_arena(*id, data_store, sheet_registry),
         }
     }
 
@@ -319,13 +319,13 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 if let ASTNodeType::Literal(ref v) = node.node_type {
                     return Ok(crate::traits::CalcValue::Scalar(v.clone()));
                 }
-                scoped.evaluate_ast(node)
+                scoped.evaluate_union_argument(node)
             }
             ArgumentExpr::Arena {
                 id,
                 data_store,
                 sheet_registry,
-            } => scoped.evaluate_arena_ast(*id, data_store, sheet_registry),
+            } => scoped.evaluate_union_argument_arena(*id, data_store, sheet_registry),
         }
     }
 
@@ -884,10 +884,8 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                         Ok(Box::new(it))
                     }
                     _ => {
-                        let v = self
-                            .interp
-                            .evaluate_arena_ast(*id, data_store, sheet_registry)?;
-                        Ok(Box::new(std::iter::once(v.into_literal())))
+                        let v = self.value()?.into_literal();
+                        Ok(Box::new(std::iter::once(v)))
                     }
                 }
             }
@@ -1128,6 +1126,12 @@ pub trait NamedRangeResolver: Send + Sync {
     /// instead of erroring `#REF!`; callers fall back to the values path on `None`.
     fn named_range_reference_definition(&self, _name: &str) -> Option<ReferenceType> {
         None
+    }
+
+    /// True when the name exists and is a named CONSTANT (`MyRate = 0.1`, `Label = "x"`) rather
+    /// than anything reference-shaped. `INDIRECT` of such a name is `#REF!` in Excel.
+    fn named_range_is_constant(&self, _name: &str) -> bool {
+        false
     }
 }
 pub trait TableResolver: Send + Sync {
@@ -1630,6 +1634,10 @@ pub trait FunctionContext<'ctx> {
     fn named_range_reference_definition(&self, _name: &str) -> Option<ReferenceType> {
         None
     }
+    /// See [`NamedRangeResolver::named_range_is_constant`]. Default `false`.
+    fn named_range_is_constant(&self, _name: &str) -> bool {
+        false
+    }
     fn timezone(&self) -> &crate::timezone::TimeZoneSpec;
     fn clock(&self) -> &dyn crate::timezone::ClockProvider;
     fn thread_pool(&self) -> Option<&std::sync::Arc<rayon::ThreadPool>>;
@@ -1769,6 +1777,10 @@ impl<'a> FunctionContext<'a> for DefaultFunctionContext<'a> {
 
     fn named_range_reference_definition(&self, name: &str) -> Option<ReferenceType> {
         self.base.named_range_reference_definition(name)
+    }
+
+    fn named_range_is_constant(&self, name: &str) -> bool {
+        self.base.named_range_is_constant(name)
     }
 
     fn current_sheet(&self) -> &str {

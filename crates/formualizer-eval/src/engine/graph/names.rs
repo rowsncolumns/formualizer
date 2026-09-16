@@ -310,6 +310,12 @@ impl DependencyGraph {
         }
     }
 
+    /// `Sheet9!Name` whose sheet does not exist — the qualifier, not the name, is what fails.
+    pub fn name_has_unknown_sheet_qualifier(&self, name: &str) -> bool {
+        split_sheet_qualified_name(name)
+            .is_some_and(|(sheet_name, _)| self.sheet_id(&sheet_name).is_none())
+    }
+
     /// Resolve a named range to its definition
     pub fn resolve_name(&self, name: &str, current_sheet: SheetId) -> Option<&NamedDefinition> {
         self.resolve_name_entry(name, current_sheet)

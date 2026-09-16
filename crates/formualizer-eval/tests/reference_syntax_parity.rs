@@ -119,6 +119,62 @@ fn intersection_is_the_shared_rectangle() {
 }
 
 #[test]
+fn a_defined_name_on_either_side_of_the_intersection() {
+    // The tokenizer must treat a bare NAME as reference-producing: `Rng B:B` intersects exactly
+    // like the mirrored `B:B Rng` (Excel accepts both orders).
+    let mut e = seeded();
+    let sheet = e.sheet_id("Sheet1").unwrap();
+    for name in ["Rng", "My_Data"] {
+        e.define_name(
+            name,
+            NamedDefinition::Range(range(sheet, 1, 1, 3, 3)),
+            NameScope::Workbook,
+        )
+        .unwrap();
+    }
+    assert_eq!(num(&eval(&mut e, "=SUM(Rng B:B)")), 60.0);
+    assert_eq!(num(&eval(&mut e, "=SUM(B:B Rng)")), 60.0);
+    assert_eq!(num(&eval(&mut e, "=SUM(Rng A1:B2)")), 33.0);
+    assert_eq!(num(&eval(&mut e, "=SUM(A1:B2 Rng)")), 33.0);
+    assert_eq!(num(&eval(&mut e, "=SUM(My_Data B:B)")), 60.0);
+    assert_eq!(num(&eval(&mut e, "=Rng B2:B2")), 20.0);
+    assert_eq!(num(&eval(&mut e, "=SUM(Rng 2:2)")), 222.0);
+    assert_eq!(num(&eval(&mut e, "=SUM(2:2 Rng)")), 222.0);
+    assert_eq!(num(&eval(&mut e, "=SUM(Rng Rng)")), 666.0);
+    assert_eq!(num(&eval(&mut e, "=SUM(Rng $B$1:$B$3)")), 60.0);
+    assert_eq!(num(&eval(&mut e, "=SUM(Rng (B:B))")), 60.0);
+    // An undefined name in that position is the name's own failure, not a parse error.
+    assert_eq!(
+        err_kind(&eval(&mut e, "=SUM(Nope B:B)")),
+        ExcelErrorKind::Name
+    );
+    assert_eq!(err_kind(&eval(&mut e, "=SUM A1")), ExcelErrorKind::Name);
+}
+
+#[test]
+fn union_outside_a_function_argument_is_value_error() {
+    // Excel accepts a multi-area reference only as a function argument.
+    let mut e = seeded();
+    assert_eq!(err_kind(&eval(&mut e, "=(A1,B1)")), ExcelErrorKind::Value);
+    assert_eq!(err_kind(&eval(&mut e, "=(A1,B1)+1")), ExcelErrorKind::Value);
+    assert_eq!(err_kind(&eval(&mut e, "=-(A1,B1)")), ExcelErrorKind::Value);
+    assert_eq!(
+        err_kind(&eval(&mut e, "=SUM((A1:A2,B1:B2)*2)")),
+        ExcelErrorKind::Value
+    );
+    assert_eq!(
+        err_kind(&eval(&mut e, "=SUM((A1:A2,B1:B2)+(A1,B1))")),
+        ExcelErrorKind::Value
+    );
+    // …while the argument forms keep working, including nested unions of three or more areas.
+    assert_eq!(num(&eval(&mut e, "=SUM((A1,B1))")), 11.0);
+    assert_eq!(num(&eval(&mut e, "=SUM((A1,B1,C1))")), 111.0);
+    assert_eq!(num(&eval(&mut e, "=COUNT((A1:A3,B1:B3,C1:C3))")), 9.0);
+    assert_eq!(num(&eval(&mut e, "=SUM((A1:A2,B1:B2))*2")), 66.0);
+    assert_eq!(num(&eval(&mut e, "=MAX((A1:A3,B1:B3),1000)")), 1000.0);
+}
+
+#[test]
 fn disjoint_intersection_is_null_error() {
     let mut e = seeded();
     assert_eq!(
@@ -254,6 +310,40 @@ fn indirect_false_still_resolves_defined_names() {
     assert_eq!(num(&eval(&mut e, r#"=SUM(INDIRECT("Data",FALSE))"#)), 6.0);
 }
 
+#[test]
+fn indirect_of_a_named_constant_is_ref_error() {
+    let mut e = seeded();
+    let sheet2 = e.sheet_id("Sheet2").unwrap();
+    e.define_name(
+        "Rate",
+        NamedDefinition::Literal(n(0.5)),
+        NameScope::Workbook,
+    )
+    .unwrap();
+    e.define_name(
+        "Rate2",
+        NamedDefinition::Literal(n(2.0)),
+        NameScope::Sheet(sheet2),
+    )
+    .unwrap();
+    // The names themselves evaluate…
+    assert_eq!(num(&eval(&mut e, "=Rate*2")), 1.0);
+    assert_eq!(num(&eval(&mut e, "=Sheet2!Rate2")), 2.0);
+    // …but INDIRECT needs a reference, and a constant is not one.
+    assert_eq!(
+        err_kind(&eval(&mut e, r#"=INDIRECT("Rate")"#)),
+        ExcelErrorKind::Ref
+    );
+    assert_eq!(
+        err_kind(&eval(&mut e, r#"=INDIRECT("Sheet2!Rate2")"#)),
+        ExcelErrorKind::Ref
+    );
+    assert_eq!(
+        err_kind(&eval(&mut e, r#"=INDIRECT("Rate",FALSE)"#)),
+        ExcelErrorKind::Ref
+    );
+}
+
 // ───────────────────────────────── reversed range corners (E-18) ────────────────────────────────
 
 #[test]
@@ -335,6 +425,15 @@ fn quoted_sheet_qualifier_and_qualified_workbook_name() {
     assert_eq!(
         err_kind(&eval(&mut e, "=Sheet2!Nope")),
         ExcelErrorKind::Name
+    );
+    // A qualifier naming a sheet that does not exist fails as a reference, not as a name.
+    assert_eq!(
+        err_kind(&eval(&mut e, "=Sheet9!Global")),
+        ExcelErrorKind::Ref
+    );
+    assert_eq!(
+        err_kind(&eval(&mut e, "='No Such Sheet'!Local")),
+        ExcelErrorKind::Ref
     );
 }
 

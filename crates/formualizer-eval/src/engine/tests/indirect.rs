@@ -223,10 +223,19 @@ fn indirect_supports_quoted_sheet_and_ranges() {
 fn indirect_supports_named_ranges_and_maps_missing_name_to_ref() {
     let mut engine = Engine::new(TestWorkbook::new(), EvalConfig::default());
 
+    // A name that refers to a CELL (a named constant is not a reference: INDIRECT of one is
+    // #REF! in Excel — see tests/reference_syntax_parity.rs).
+    engine
+        .set_cell_value("Sheet1", 5, 5, LiteralValue::Number(77.0))
+        .unwrap();
+    let sheet = engine.sheet_id("Sheet1").unwrap();
     engine
         .define_name(
             "MyValue",
-            NamedDefinition::Literal(LiteralValue::Number(77.0)),
+            NamedDefinition::Cell(crate::reference::CellRef::new(
+                sheet,
+                crate::reference::Coord::from_excel(5, 5, true, true),
+            )),
             NameScope::Workbook,
         )
         .unwrap();
@@ -260,9 +269,16 @@ fn indirect_a1_false_resolves_named_range() {
     let mut engine = Engine::new(TestWorkbook::new(), EvalConfig::default());
 
     engine
+        .set_cell_value("Sheet1", 5, 5, LiteralValue::Number(77.0))
+        .unwrap();
+    let sheet = engine.sheet_id("Sheet1").unwrap();
+    engine
         .define_name(
             "MyValue",
-            NamedDefinition::Literal(LiteralValue::Number(77.0)),
+            NamedDefinition::Cell(crate::reference::CellRef::new(
+                sheet,
+                crate::reference::Coord::from_excel(5, 5, true, true),
+            )),
             NameScope::Workbook,
         )
         .unwrap();

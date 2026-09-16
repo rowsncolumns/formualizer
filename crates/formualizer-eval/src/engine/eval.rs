@@ -22717,6 +22717,13 @@ where
             _ => None,
         }
     }
+
+    fn named_range_is_constant(&self, name: &str) -> bool {
+        use crate::engine::named_range::NamedDefinition;
+        self.graph
+            .resolve_name_entry(name, self.graph.default_sheet_id())
+            .is_some_and(|entry| matches!(entry.definition, NamedDefinition::Literal(_)))
+    }
 }
 
 impl<R> crate::traits::TableResolver for Engine<R>
@@ -23559,6 +23566,12 @@ where
                     ));
                 }
 
+                // `Sheet9!Name` with no sheet `Sheet9`: the qualifier is what fails, and Excel
+                // reports that as `#REF!` rather than `#NAME?`.
+                if self.graph.name_has_unknown_sheet_qualifier(name) {
+                    return Err(ExcelError::new(ExcelErrorKind::Ref)
+                        .with_message(format!("Unknown sheet in name reference: {name}")));
+                }
                 let data = self.resolver.resolve_named_range_reference(name)?;
                 Ok(RangeView::from_owned_rows(data, self.config.date_system))
             }
