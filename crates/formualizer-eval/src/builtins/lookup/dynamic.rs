@@ -3244,7 +3244,11 @@ impl Function for TakeFn {
             })
         };
         // `TAKE(rng,,2)`: a skipped rows slot keeps every row; a skipped cols slot keeps every column.
-        let take_rows = if args[1].is_skipped() { height } else { num(&args[1])? };
+        let take_rows = if args[1].is_skipped() {
+            height
+        } else {
+            num(&args[1])?
+        };
         let take_cols = if args.len() >= 3 && !args[2].is_skipped() {
             Some(num(&args[2])?)
         } else {
@@ -3429,7 +3433,11 @@ impl Function for DropFn {
             })
         };
         // `DROP(rng,,-2)`: a skipped rows slot drops nothing.
-        let drop_rows = if args[1].is_skipped() { 0 } else { num(&args[1])? };
+        let drop_rows = if args[1].is_skipped() {
+            0
+        } else {
+            num(&args[1])?
+        };
         let drop_cols = if args.len() >= 3 && !args[2].is_skipped() {
             Some(num(&args[2])?)
         } else {

@@ -52,8 +52,7 @@ fn binary_search_match(slice: &[LiteralValue], needle: &LiteralValue, mode: i32)
                 if c == 0 {
                     return Some(i);
                 }
-                if c > 0
-                    && best.is_none_or(|b| cmp_for_lookup(v, &slice[b]).is_some_and(|o| o < 0))
+                if c > 0 && best.is_none_or(|b| cmp_for_lookup(v, &slice[b]).is_some_and(|o| o < 0))
                 {
                     best = Some(i);
                 }
