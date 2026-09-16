@@ -220,7 +220,10 @@ pub fn validate_and_prepare<'a, 'b>(
             }
         };
 
-        // By-ref argument: require a reference (AST literal or function-returned)
+        // By-ref argument: prefer a reference (AST literal or function-returned). Range/array
+        // shaped by-ref slots (`FILTER`'s include, `SORT`/`UNIQUE`'s array, …) also accept a
+        // computed array such as `B1:B4>0` or a nested `FILTER(...)` — those fall through to the
+        // shape handling below instead of failing the whole call with `#REF!`.
         if spec.by_ref {
             match arg.as_reference_or_eval() {
                 Ok(r) => {
@@ -230,7 +233,7 @@ pub fn validate_and_prepare<'a, 'b>(
                 Err(e) => {
                     if options.warn_only {
                         continue;
-                    } else {
+                    } else if !matches!(spec.shape, ShapeKind::Range | ShapeKind::Array) {
                         return Err(e);
                     }
                 }

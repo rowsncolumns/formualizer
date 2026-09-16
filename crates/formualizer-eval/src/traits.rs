@@ -549,11 +549,16 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                     )
                 }
                 ASTNodeType::Function { .. } | ASTNodeType::BinaryOp { .. } => {
-                    let reference = self.reference_for_eval()?;
-                    self.interp
-                        .context
-                        .resolve_range_view(&reference, self.interp.current_sheet())
-                        .map(|v| v.with_cancel_token(self.interp.context.cancellation_token()))
+                    match self.reference_for_eval() {
+                        Ok(reference) => self
+                            .interp
+                            .context
+                            .resolve_range_view(&reference, self.interp.current_sheet())
+                            .map(|v| v.with_cancel_token(self.interp.context.cancellation_token())),
+                        // Not a reference-producing expression (e.g. `B1:B4>0`, `FILTER(...)`):
+                        // materialize its value as an owned view instead of failing with #REF!.
+                        Err(_) => self.value_as_range_view(),
+                    }
                 }
                 _ => Err(ExcelError::new(ExcelErrorKind::Ref)
                     .with_message("Argument cannot be interpreted as a range.")),
@@ -568,14 +573,25 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 })?;
 
                 match node {
-                    crate::engine::arena::AstNodeData::Reference { .. }
-                    | crate::engine::arena::AstNodeData::Function { .. }
-                    | crate::engine::arena::AstNodeData::BinaryOp { .. } => {
+                    crate::engine::arena::AstNodeData::Reference { .. } => {
                         let reference = self.reference_for_eval()?;
                         self.interp
                             .context
                             .resolve_range_view(&reference, self.interp.current_sheet())
                             .map(|v| v.with_cancel_token(self.interp.context.cancellation_token()))
+                    }
+                    crate::engine::arena::AstNodeData::Function { .. }
+                    | crate::engine::arena::AstNodeData::BinaryOp { .. } => {
+                        match self.reference_for_eval() {
+                            Ok(reference) => self
+                                .interp
+                                .context
+                                .resolve_range_view(&reference, self.interp.current_sheet())
+                                .map(|v| {
+                                    v.with_cancel_token(self.interp.context.cancellation_token())
+                                }),
+                            Err(_) => self.value_as_range_view(),
+                        }
                     }
                     crate::engine::arena::AstNodeData::Literal(vref) => {
                         match data_store.retrieve_value(*vref) {
@@ -624,6 +640,27 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 }
             }
         }
+    }
+
+    /// Evaluate this argument and expose the result as a `RangeView`: computed arrays (`B1:B4>0`,
+    /// `FILTER(...)`) become owned views and scalars become 1×1 views. Scalar errors propagate.
+    fn value_as_range_view(&self) -> Result<RangeView<'b>, ExcelError> {
+        let ds = self.interp.context.date_system();
+        let token = self.interp.context.cancellation_token();
+        Ok(match self.value()? {
+            crate::traits::CalcValue::Range(rv) => rv,
+            crate::traits::CalcValue::Scalar(LiteralValue::Array(rows)) => {
+                RangeView::from_owned_rows(rows, ds).with_cancel_token(token)
+            }
+            crate::traits::CalcValue::Scalar(LiteralValue::Error(e)) => return Err(e),
+            crate::traits::CalcValue::Scalar(v) => {
+                RangeView::from_owned_rows(vec![vec![v]], ds).with_cancel_token(token)
+            }
+            crate::traits::CalcValue::Callable(_) => {
+                return Err(ExcelError::new(ExcelErrorKind::Calc)
+                    .with_message("LAMBDA value must be invoked"));
+            }
+        })
     }
 
     pub fn value_or_range(&self) -> Result<EvaluatedArg<'_>, ExcelError> {

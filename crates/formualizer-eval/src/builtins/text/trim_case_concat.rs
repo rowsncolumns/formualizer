@@ -15,6 +15,28 @@ fn scalar_like_value(arg: &ArgumentHandle<'_, '_>) -> Result<LiteralValue, Excel
     })
 }
 
+/// Every value an argument contributes, flattening ranges and arrays in row-major order so
+/// `TEXTJOIN(",",TRUE,A1:A3)` joins all three cells rather than `A1` alone.
+fn flattened_values(arg: &ArgumentHandle<'_, '_>) -> Result<Vec<LiteralValue>, ExcelError> {
+    Ok(match arg.value()? {
+        crate::traits::CalcValue::Scalar(LiteralValue::Array(rows)) => {
+            rows.into_iter().flatten().collect()
+        }
+        crate::traits::CalcValue::Scalar(v) => vec![v],
+        crate::traits::CalcValue::Range(rv) => {
+            let mut out = Vec::new();
+            rv.for_each_cell(&mut |v| {
+                out.push(v.clone());
+                Ok(())
+            })?;
+            out
+        }
+        crate::traits::CalcValue::Callable(_) => vec![LiteralValue::Error(
+            ExcelError::new(ExcelErrorKind::Calc).with_message("LAMBDA value must be invoked"),
+        )],
+    })
+}
+
 fn to_text<'a, 'b>(a: &ArgumentHandle<'a, 'b>) -> Result<String, ExcelError> {
     let v = scalar_like_value(a)?;
     Ok(match v {
@@ -553,34 +575,42 @@ impl Function for TextJoinFn {
             _ => false,
         };
 
-        // Collect text values
+        // Collect text values — ranges/arrays contribute every cell, not just their top-left.
         let mut parts = Vec::new();
         for arg in args.iter().skip(2) {
-            match scalar_like_value(arg)? {
-                LiteralValue::Error(e) => {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                }
-                LiteralValue::Empty => {
-                    if !ignore_empty {
-                        parts.push(String::new());
+            for v in flattened_values(arg)? {
+                match v {
+                    LiteralValue::Error(e) => {
+                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
                     }
-                }
-                v => {
-                    let s = match v {
-                        LiteralValue::Text(t) => t,
-                        LiteralValue::Boolean(b) => {
-                            if b {
-                                "TRUE".to_string()
-                            } else {
-                                "FALSE".to_string()
-                            }
+                    LiteralValue::Empty => {
+                        if !ignore_empty {
+                            parts.push(String::new());
                         }
-                        LiteralValue::Int(i) => i.to_string(),
-                        LiteralValue::Number(f) => f.to_string(),
-                        _ => v.to_string(),
-                    };
-                    if !ignore_empty || !s.is_empty() {
-                        parts.push(s);
+                    }
+                    v => {
+                        let s = match v {
+                            LiteralValue::Text(t) => t,
+                            LiteralValue::Boolean(b) => {
+                                if b {
+                                    "TRUE".to_string()
+                                } else {
+                                    "FALSE".to_string()
+                                }
+                            }
+                            LiteralValue::Int(i) => i.to_string(),
+                            LiteralValue::Number(f) => {
+                                let s = f.to_string();
+                                match s.strip_suffix(".0") {
+                                    Some(trimmed) => trimmed.to_string(),
+                                    None => s,
+                                }
+                            }
+                            _ => v.to_string(),
+                        };
+                        if !ignore_empty || !s.is_empty() {
+                            parts.push(s);
+                        }
                     }
                 }
             }
