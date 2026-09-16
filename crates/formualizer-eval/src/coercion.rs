@@ -219,11 +219,59 @@ pub fn to_logical(value: &LiteralValue) -> Result<bool, ExcelError> {
     }
 }
 
+/// Excel carries 15 significant decimal digits: `ROUND`, comparisons and
+/// number→text all act on that decimal view of the double rather than on its
+/// full binary expansion (`0.1+0.2` compares equal to `0.3`, `1.005` rounds to
+/// `1.01`). Returns the nearest double to the 15-digit decimal.
+pub fn to_excel_precision(n: f64) -> f64 {
+    if n == 0.0 || !n.is_finite() {
+        return n;
+    }
+    format!("{n:.14e}").parse().unwrap_or(n)
+}
+
+/// A number as Excel's General format spells it in text (`&`, `LEN`, `TEXT`
+/// coercions): at most 15 significant digits, no trailing zeros, scientific
+/// notation once the exponent leaves `-5 < exp < 15` (`1E+15`, `1.23E-05`).
+pub fn number_to_text(n: f64) -> String {
+    if n == 0.0 {
+        return "0".to_string();
+    }
+    if !n.is_finite() {
+        return n.to_string();
+    }
+    let sci = format!("{:.14e}", n.abs());
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let digits = digits.trim_end_matches('0');
+    let digits = if digits.is_empty() { "0" } else { digits };
+    let body = if !(-4..15).contains(&exp) {
+        let mut m = digits[..1].to_string();
+        if digits.len() > 1 {
+            m.push('.');
+            m.push_str(&digits[1..]);
+        }
+        let sign = if exp < 0 { '-' } else { '+' };
+        format!("{m}E{sign}{:02}", exp.abs())
+    } else if exp >= 0 {
+        let int_len = exp as usize + 1;
+        if digits.len() <= int_len {
+            format!("{digits}{}", "0".repeat(int_len - digits.len()))
+        } else {
+            format!("{}.{}", &digits[..int_len], &digits[int_len..])
+        }
+    } else {
+        format!("0.{}{digits}", "0".repeat((-exp - 1) as usize))
+    };
+    if n < 0.0 { format!("-{body}") } else { body }
+}
+
 /// Invariant textification for comparisons/concatenation.
 pub fn to_text_invariant(value: &LiteralValue) -> String {
     match value {
         LiteralValue::Text(s) => s.clone(),
-        LiteralValue::Number(n) => n.to_string(),
+        LiteralValue::Number(n) => number_to_text(*n),
         LiteralValue::Int(i) => i.to_string(),
         LiteralValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.into(),
         LiteralValue::Error(e) => e.to_string(),
@@ -234,7 +282,7 @@ pub fn to_text_invariant(value: &LiteralValue) -> String {
         LiteralValue::Date(_)
         | LiteralValue::DateTime(_)
         | LiteralValue::Time(_)
-        | LiteralValue::Duration(_) => value.as_serial_number().unwrap_or(0.0).to_string(),
+        | LiteralValue::Duration(_) => number_to_text(value.as_serial_number().unwrap_or(0.0)),
         other => format!("{other:?}"),
     }
 }
@@ -259,6 +307,36 @@ pub fn to_datetime_serial(value: &LiteralValue) -> Result<f64, ExcelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excel_precision_is_fifteen_significant_digits() {
+        assert_eq!(to_excel_precision(0.1 + 0.2), 0.3);
+        assert_eq!(to_excel_precision(1.005 * 100.0), 100.5);
+        assert_eq!(to_excel_precision(0.0), 0.0);
+        assert_eq!(to_excel_precision(-2.5), -2.5);
+        assert_eq!(
+            to_excel_precision(123456789012345680.0),
+            123456789012346000.0
+        );
+    }
+
+    #[test]
+    fn number_to_text_matches_excel_general() {
+        assert_eq!(number_to_text(1.0 / 3.0), "0.333333333333333");
+        assert_eq!(number_to_text(0.1 + 0.2), "0.3");
+        assert_eq!(number_to_text(1.0), "1");
+        assert_eq!(number_to_text(-1.5), "-1.5");
+        assert_eq!(number_to_text(0.0), "0");
+        assert_eq!(number_to_text(1234.5), "1234.5");
+        assert_eq!(number_to_text(100000000000000.0), "100000000000000");
+        assert_eq!(number_to_text(1e15), "1E+15");
+        assert_eq!(number_to_text(123456789012345678.0), "1.23456789012346E+17");
+        assert_eq!(number_to_text(0.0001), "0.0001");
+        assert_eq!(number_to_text(0.00001), "1E-05");
+        assert_eq!(number_to_text(0.0000123), "1.23E-05");
+        assert_eq!(number_to_text(-0.000000000123), "-1.23E-10");
+        assert_eq!(number_to_text(999999999999999.9), "1E+15");
+    }
 
     #[test]
     fn number_lenient_parses_text_and_booleans() {

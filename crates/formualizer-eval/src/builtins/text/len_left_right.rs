@@ -81,6 +81,7 @@ impl Function for LenFn {
             LiteralValue::Error(e) => {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
             }
+            LiteralValue::Number(n) => crate::coercion::number_to_text(n).chars().count() as i64,
             other => other.to_string().chars().count() as i64,
         };
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(count)))
