@@ -434,7 +434,7 @@ pub struct IfFn;
 /// # Remarks
 /// - Condition coercion: booleans are used directly, numbers use `0` as FALSE and non-zero as TRUE.
 /// - A blank condition is treated as FALSE.
-/// - Text or other non-numeric/non-boolean conditions return `#VALUE!`.
+/// - Text or other non-numeric/non-boolean conditions return `#VALUE!`; an error condition propagates unchanged.
 /// - With only two arguments, the FALSE branch defaults to logical `FALSE`.
 ///
 /// # Examples
@@ -537,8 +537,8 @@ fn if_truthy(v: &LiteralValue) -> Result<bool, ExcelError> {
         LiteralValue::Text(_) => crate::coercion::to_logical(v).map_err(|_| {
             ExcelError::new_value().with_message("IF condition must be boolean or number")
         }),
-        // An error condition surfaces as #VALUE! (the engine's documented
-        // contract, pinned by the SCC runtime oracle for settled #CIRC reads).
+        // An error condition propagates as itself (`IF(NA(),1,2)` is #N/A), as in Excel.
+        LiteralValue::Error(e) => Err(e.clone()),
         _ => Err(ExcelError::new_value().with_message("IF condition must be boolean or number")),
     }
 }

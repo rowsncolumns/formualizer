@@ -14,6 +14,8 @@ fn eval(formula: &str) -> LiteralValue {
     let mut e = Engine::new(TestWorkbook::new(), EvalConfig::default());
     e.set_cell_value("Sheet1", 1, 1, LiteralValue::Number(1.0 / 3.0))
         .unwrap();
+    e.set_cell_value("Sheet1", 2, 1, LiteralValue::Number(0.5))
+        .unwrap();
     e.set_cell_formula("Sheet1", 1, 5, parse(formula).unwrap())
         .unwrap();
     e.evaluate_all().unwrap();
@@ -126,4 +128,57 @@ fn rept_substitute_fixed_edge_cases_stay_excel_aligned() {
     assert_eq!(eval("=FIXED(1234.567,1)"), text("1,234.6"));
     assert_eq!(eval("=FIXED(1234.567,1,TRUE)"), text("1234.6"));
     assert_eq!(eval("=FIXED(-1234.567)"), text("-1,234.57"));
+}
+
+#[test]
+fn value_and_array_to_text_spell_numbers_at_fifteen_digits() {
+    // Fixup for spreadsheet#546 U17a review: VALUETOTEXT / ARRAYTOTEXT go through the same
+    // 15-significant-digit General conversion as `&` and LEN, in both formats.
+    assert_eq!(eval("=VALUETOTEXT(1/3)"), text("0.333333333333333"));
+    assert_eq!(eval("=VALUETOTEXT(A1,1)"), text("0.333333333333333"));
+    assert_eq!(eval("=ARRAYTOTEXT({0.5,1234.5}&\"\")"), text("0.5, 1234.5"));
+    assert_eq!(eval("=ARRAYTOTEXT(A1:A2)"), text("0.333333333333333, 0.5"));
+    assert_eq!(
+        eval("=ARRAYTOTEXT(A1:A2,1)"),
+        text("{0.333333333333333;0.5}")
+    );
+    assert_eq!(eval("=CONCAT(A1:A2)"), text("0.3333333333333330.5"));
+    assert_eq!(
+        eval("=CONCAT(\"a\",A1:A2,TRUE)"),
+        text("a0.3333333333333330.5TRUE")
+    );
+    assert_eq!(eval("=CONCAT({1,2;3,4})"), text("1234"));
+    assert_number("=LEN(CONCAT(A1:A2))", 20.0);
+    assert_eq!(
+        eval("=TEXTJOIN(\",\",TRUE,A1:A2)"),
+        text("0.333333333333333,0.5")
+    );
+}
+
+#[test]
+fn exact_sixteen_digit_ties_round_away_from_zero_like_excel() {
+    assert_eq!(eval("=1234567890123445&\"\""), text("1.23456789012345E+15"));
+    assert_eq!(eval("=123456789012344.5&\"\""), text("123456789012345"));
+    assert_eq!(
+        eval("=-1234567890123445&\"\""),
+        text("-1.23456789012345E+15")
+    );
+    assert_number("=LEN(123456789012344.5&\"\")", 15.0);
+}
+
+#[test]
+fn fixed_caps_decimals_at_127() {
+    assert_error("=FIXED(1,128)", ExcelErrorKind::Value);
+    assert_error("=FIXED(1,1000)", ExcelErrorKind::Value);
+    assert_number("=LEN(FIXED(1,127))", 129.0);
+    assert_eq!(eval("=FIXED(1,127.9)"), eval("=FIXED(1,127)"));
+}
+
+#[test]
+fn if_propagates_an_error_condition() {
+    // B-32: Excel returns the condition's own error, not #VALUE!.
+    assert_error("=IF(NA(),1,2)", ExcelErrorKind::Na);
+    assert_error("=IF(1/0,1,2)", ExcelErrorKind::Div);
+    assert_error("=IF(\"abc\",1,2)", ExcelErrorKind::Value);
+    assert_number("=IF(TRUE,1,2)", 1.0);
 }
