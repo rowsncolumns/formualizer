@@ -332,7 +332,11 @@ fn excel_compare(op: &str, l: &OVal, r: &OVal) -> OVal {
         if matches!(l, OVal::Bool(_)) { 3.0 } else { 1.0 },
         if matches!(r, OVal::Bool(_)) { 3.0 } else { 1.0 },
     );
-    let (a, b) = if ra == rb { (as_num(&l), as_num(&r)) } else { (ra, rb) };
+    let (a, b) = if ra == rb {
+        (as_num(&l), as_num(&r))
+    } else {
+        (ra, rb)
+    };
     match op {
         ">" => OVal::Bool(a > b),
         "<" => OVal::Bool(a < b),
