@@ -12,7 +12,7 @@ fn text_of(v: &LiteralValue) -> Result<std::borrow::Cow<'_, str>, ExcelError> {
         LiteralValue::Empty => Cow::Borrowed(""),
         LiteralValue::Boolean(b) => Cow::Borrowed(if *b { "TRUE" } else { "FALSE" }),
         LiteralValue::Int(i) => Cow::Owned(i.to_string()),
-        LiteralValue::Number(f) => Cow::Owned(crate::coercion::number_to_text(*f)),
+        LiteralValue::Number(f) => Cow::Owned(formualizer_common::number_to_excel_text(*f)),
         LiteralValue::Error(e) => return Err(e.clone()),
         other => Cow::Owned(other.to_string()),
     })

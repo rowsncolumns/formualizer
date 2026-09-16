@@ -24,7 +24,7 @@ fn coerce_text(v: &LiteralValue) -> String {
         LiteralValue::Empty => String::new(),
         LiteralValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
         LiteralValue::Int(i) => i.to_string(),
-        LiteralValue::Number(f) => crate::coercion::number_to_text(*f),
+        LiteralValue::Number(f) => formualizer_common::number_to_excel_text(*f),
         other => other.to_string(),
     }
 }

@@ -28,7 +28,7 @@ fn arg_text(arg: &ArgumentHandle<'_, '_>) -> Result<String, ExcelError> {
         LiteralValue::Empty => String::new(),
         LiteralValue::Boolean(b) => if b { "TRUE" } else { "FALSE" }.to_string(),
         LiteralValue::Int(i) => i.to_string(),
-        LiteralValue::Number(n) => crate::coercion::number_to_text(n),
+        LiteralValue::Number(n) => formualizer_common::number_to_excel_text(n),
         LiteralValue::Error(e) => return Err(e),
         other => other.to_string(),
     })

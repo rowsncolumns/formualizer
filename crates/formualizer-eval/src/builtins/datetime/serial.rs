@@ -1,6 +1,6 @@
 //! Excel serial date system with 1900 leap year bug compatibility
 
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use formualizer_common::ExcelError;
 
 use crate::engine::DateSystem;
@@ -53,6 +53,54 @@ pub fn serial_to_date(serial: f64) -> Result<NaiveDate, ExcelError> {
         .ok_or_else(ExcelError::new_num)
 }
 
+/// Excel's calendar parts (year, month, day) for a 1900-system serial.
+///
+/// Two serials have no real calendar date and are reported the way Excel does:
+/// 0 is "January 0, 1900" (`YEAR` 1900, `MONTH` 1, `DAY` 0) and 60 is the
+/// phantom 1900-02-29 of the leap-year bug (`DAY` 29). `serial_to_date` has to
+/// collapse both onto a real `NaiveDate`, so `YEAR`/`MONTH`/`DAY` read from here.
+pub fn serial_to_ymd(serial: f64) -> Result<(i32, u32, u32), ExcelError> {
+    let serial_int = serial.trunc();
+    if serial_int < 0.0 {
+        return Err(ExcelError::new_num());
+    }
+    match serial_int as i64 {
+        0 => Ok((1900, 1, 0)),
+        60 => Ok((1900, 2, 29)),
+        _ => {
+            let date = serial_to_date(serial)?;
+            Ok((date.year(), date.month(), date.day()))
+        }
+    }
+}
+
+/// Serial for `DATE(year, month, day)` in the given date system.
+///
+/// Excel resolves the (overflowing) month first and then adds the day offset to
+/// that month's first serial, so in the 1900 system the count walks across the
+/// phantom 1900-02-29: `DATE(1900,2,29)` = 60, `DATE(1900,3,1)` = 61,
+/// `DATE(1900,1,0)` = 0. Building a `NaiveDate` first would skip the phantom
+/// day and yield 61 for both. Results outside `0..=DATE(9999,12,31)` are `#NUM!`.
+pub fn date_parts_to_serial_for(
+    system: DateSystem,
+    year: i32,
+    month: i32,
+    day: i32,
+) -> Result<f64, ExcelError> {
+    let total_months = i64::from(year) * 12 + i64::from(month) - 1;
+    let normalized_year =
+        i32::try_from(total_months.div_euclid(12)).map_err(|_| ExcelError::new_num())?;
+    let normalized_month = (total_months.rem_euclid(12) + 1) as u32;
+    let month_start = NaiveDate::from_ymd_opt(normalized_year, normalized_month, 1)
+        .ok_or_else(ExcelError::new_num)?;
+    let serial = date_to_serial_for(system, &month_start) + (i64::from(day) - 1) as f64;
+    let max_serial = date_to_serial_for(system, &EXCEL_MAX_DATE);
+    if serial < 0.0 || serial > max_serial {
+        return Err(ExcelError::new_num());
+    }
+    Ok(serial)
+}
+
 /// Convert date to Excel serial number
 /// Handles the 1900 leap year bug
 pub fn date_to_serial(date: &NaiveDate) -> f64 {
@@ -94,6 +142,9 @@ pub fn datetime_to_serial(datetime: &NaiveDateTime) -> f64 {
 // ───────── Date-system aware variants (1900 vs 1904) ─────────
 
 const EXCEL_1904_EPOCH: NaiveDate = NaiveDate::from_ymd_opt(1904, 1, 1).unwrap();
+
+/// Last date Excel can represent (serial 2958465 in the 1900 system).
+const EXCEL_MAX_DATE: NaiveDate = NaiveDate::from_ymd_opt(9999, 12, 31).unwrap();
 
 /// Convert a date to Excel serial according to the provided date system.
 pub fn date_to_serial_for(system: DateSystem, date: &NaiveDate) -> f64 {
@@ -210,6 +261,45 @@ mod tests {
         // 1900-03-01 = Serial 61 (accounting for leap year bug)
         let date = NaiveDate::from_ymd_opt(1900, 3, 1).unwrap();
         assert_eq!(date_to_serial(&date), 61.0);
+    }
+
+    #[test]
+    fn test_serial_to_ymd_excel_quirks() {
+        assert_eq!(serial_to_ymd(0.0).unwrap(), (1900, 1, 0));
+        assert_eq!(serial_to_ymd(1.0).unwrap(), (1900, 1, 1));
+        assert_eq!(serial_to_ymd(59.0).unwrap(), (1900, 2, 28));
+        assert_eq!(serial_to_ymd(60.0).unwrap(), (1900, 2, 29));
+        assert_eq!(serial_to_ymd(60.75).unwrap(), (1900, 2, 29));
+        assert_eq!(serial_to_ymd(61.0).unwrap(), (1900, 3, 1));
+        assert_eq!(serial_to_ymd(45292.0).unwrap(), (2024, 1, 1));
+        assert!(serial_to_ymd(-1.0).is_err());
+    }
+
+    #[test]
+    fn test_date_parts_to_serial_walks_over_phantom_leap_day() {
+        let s = |y, m, d| date_parts_to_serial_for(DateSystem::Excel1900, y, m, d);
+        assert_eq!(s(1900, 1, 1).unwrap(), 1.0);
+        assert_eq!(s(1900, 2, 28).unwrap(), 59.0);
+        assert_eq!(s(1900, 2, 29).unwrap(), 60.0);
+        assert_eq!(s(1900, 3, 1).unwrap(), 61.0);
+        assert_eq!(s(1900, 1, 60).unwrap(), 60.0);
+        assert_eq!(s(1900, 3, 0).unwrap(), 60.0);
+        assert_eq!(s(1900, 1, 0).unwrap(), 0.0);
+        assert!(s(1900, 1, -1).is_err());
+        assert_eq!(s(2024, 2, 30).unwrap(), 45352.0);
+        assert_eq!(s(2024, 13, 1).unwrap(), 45658.0);
+        assert_eq!(s(2024, 0, 1).unwrap(), 45261.0);
+        assert_eq!(s(9999, 12, 31).unwrap(), 2958465.0);
+        assert!(s(9999, 12, 32).is_err());
+        assert!(s(10000, 1, 1).is_err());
+        assert!(s(-1, 1, 1).is_err());
+        // 1904 system: linear from 1904-01-01, no phantom day, pre-epoch is #NUM!
+        let s4 = |y, m, d| date_parts_to_serial_for(DateSystem::Excel1904, y, m, d);
+        assert_eq!(s4(1904, 1, 1).unwrap(), 0.0);
+        assert_eq!(s4(1904, 3, 1).unwrap(), 60.0);
+        assert_eq!(s4(2024, 1, 1).unwrap(), 45292.0 - 1462.0);
+        assert!(s4(1903, 12, 31).is_err());
+        assert_eq!(s4(9999, 12, 31).unwrap(), 2958465.0 - 1462.0);
     }
 
     #[test]

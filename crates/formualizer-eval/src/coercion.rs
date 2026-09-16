@@ -234,44 +234,15 @@ pub fn to_excel_precision(n: f64) -> f64 {
 /// coercions): at most 15 significant digits, no trailing zeros, scientific
 /// notation once the exponent leaves `-5 < exp < 15` (`1E+15`, `1.23E-05`).
 pub fn number_to_text(n: f64) -> String {
-    if n == 0.0 {
-        return "0".to_string();
-    }
-    if !n.is_finite() {
-        return n.to_string();
-    }
-    let sci = format!("{:.14e}", n.abs());
-    let (mantissa, exp) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
-    let exp: i32 = exp.parse().unwrap_or(0);
-    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
-    let digits = digits.trim_end_matches('0');
-    let digits = if digits.is_empty() { "0" } else { digits };
-    let body = if !(-4..15).contains(&exp) {
-        let mut m = digits[..1].to_string();
-        if digits.len() > 1 {
-            m.push('.');
-            m.push_str(&digits[1..]);
-        }
-        let sign = if exp < 0 { '-' } else { '+' };
-        format!("{m}E{sign}{:02}", exp.abs())
-    } else if exp >= 0 {
-        let int_len = exp as usize + 1;
-        if digits.len() <= int_len {
-            format!("{digits}{}", "0".repeat(int_len - digits.len()))
-        } else {
-            format!("{}.{}", &digits[..int_len], &digits[int_len..])
-        }
-    } else {
-        format!("0.{}{digits}", "0".repeat((-exp - 1) as usize))
-    };
-    if n < 0.0 { format!("-{body}") } else { body }
+    // Single source of truth for Excel's 15-significant-digit General text form.
+    formualizer_common::number_to_excel_text(n)
 }
 
 /// Invariant textification for comparisons/concatenation.
 pub fn to_text_invariant(value: &LiteralValue) -> String {
     match value {
         LiteralValue::Text(s) => s.clone(),
-        LiteralValue::Number(n) => number_to_text(*n),
+        LiteralValue::Number(n) => formualizer_common::number_to_excel_text(*n),
         LiteralValue::Int(i) => i.to_string(),
         LiteralValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.into(),
         LiteralValue::Error(e) => e.to_string(),
@@ -282,7 +253,9 @@ pub fn to_text_invariant(value: &LiteralValue) -> String {
         LiteralValue::Date(_)
         | LiteralValue::DateTime(_)
         | LiteralValue::Time(_)
-        | LiteralValue::Duration(_) => number_to_text(value.as_serial_number().unwrap_or(0.0)),
+        | LiteralValue::Duration(_) => {
+            formualizer_common::number_to_excel_text(value.as_serial_number().unwrap_or(0.0))
+        }
         other => format!("{other:?}"),
     }
 }

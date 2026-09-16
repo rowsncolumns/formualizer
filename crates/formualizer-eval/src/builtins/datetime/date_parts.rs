@@ -1,6 +1,6 @@
 //! Date and time component extraction functions
 
-use super::serial::{serial_to_date, serial_to_datetime};
+use super::serial::{serial_to_date, serial_to_datetime, serial_to_ymd};
 use crate::args::ArgSchema;
 use crate::function::Function;
 use crate::traits::{ArgumentHandle, FunctionContext};
@@ -485,7 +485,7 @@ impl Function for IsoWeekNumFn {
 ///
 /// # Remarks
 /// - Fractional time is ignored; only the integer date portion is used.
-/// - Input serials are interpreted with Excel 1900 date semantics.
+/// - Input serials are interpreted with Excel 1900 date semantics; serial 0 ("January 0, 1900") is 1900.
 /// - Results are Gregorian calendar years.
 ///
 /// # Examples
@@ -547,9 +547,9 @@ impl Function for YearFn {
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         let serial = coerce_to_serial(&args[0])?;
-        let date = serial_to_date(serial)?;
+        let (year, _, _) = serial_to_ymd(serial)?;
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(
-            date.year() as i64,
+            i64::from(year),
         )))
     }
 }
@@ -620,9 +620,9 @@ impl Function for MonthFn {
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         let serial = coerce_to_serial(&args[0])?;
-        let date = serial_to_date(serial)?;
+        let (_, month, _) = serial_to_ymd(serial)?;
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(
-            date.month() as i64,
+            i64::from(month),
         )))
     }
 }
@@ -631,7 +631,8 @@ impl Function for MonthFn {
 ///
 /// # Remarks
 /// - Fractional time is ignored; only the integer serial portion is used.
-/// - Serials are interpreted with Excel 1900 date semantics.
+/// - Serials are interpreted with Excel 1900 date semantics: serial 60 is the phantom
+///   1900-02-29 (`29`) and serial 0 is "January 0, 1900" (`0`).
 /// - Output is the day within the month, not day-of-year.
 ///
 /// # Examples
@@ -693,9 +694,9 @@ impl Function for DayFn {
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         let serial = coerce_to_serial(&args[0])?;
-        let date = serial_to_date(serial)?;
+        let (_, _, day) = serial_to_ymd(serial)?;
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(
-            date.day() as i64,
+            i64::from(day),
         )))
     }
 }

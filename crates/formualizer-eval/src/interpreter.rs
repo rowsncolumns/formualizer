@@ -643,8 +643,12 @@ impl<'a> Interpreter<'a> {
                     return callable.invoke(self, &eval_args);
                 }
 
-                Err(ExcelError::new(ExcelErrorKind::Name)
-                    .with_message(format!("Unknown function: {name}")))
+                // Same contract as `eval_function_to_calc`: an unknown function is a
+                // `#NAME?` value that IS*/IFERROR can catch, not a hard failure.
+                Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                    ExcelError::new(ExcelErrorKind::Name)
+                        .with_message(format!("Unknown function: {name}")),
+                )))
             }
         }
     }
@@ -903,10 +907,21 @@ impl<'a> Interpreter<'a> {
 
         let lowered = self.lower_structured_table_ref(reference, self.current_sheet)?;
         let target = lowered.as_ref().unwrap_or(reference);
-        let view = self
-            .context
-            .resolve_range_view(target, self.current_sheet)?
-            .with_cancel_token(self.context.cancellation_token());
+        let view = match self.context.resolve_range_view(target, self.current_sheet) {
+            Ok(view) => view,
+            // A defined name that does not resolve is Excel's `#NAME?` *value*, not a
+            // failure of the formula: `=ISERROR(FOO)` is TRUE, `=IFERROR(FOO,1)` is 1 and
+            // `=ERROR.TYPE(FOO)` is 5. Surfacing it as `Err` would bypass every
+            // argument-level handler. Cancellation is the one genuine abort.
+            Err(e)
+                if matches!(target, ReferenceType::NamedRange(_))
+                    && e.kind != ExcelErrorKind::Cancelled =>
+            {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+            }
+            Err(e) => return Err(e),
+        };
+        let view = view.with_cancel_token(self.context.cancellation_token());
         Ok(crate::traits::CalcValue::Range(view))
     }
 

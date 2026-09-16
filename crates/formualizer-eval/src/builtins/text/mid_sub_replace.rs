@@ -311,7 +311,7 @@ fn to_text<'a, 'b>(arg: &ArgumentHandle<'a, 'b>) -> Result<String, ExcelError> {
                 "FALSE".into()
             }
         }
-        LiteralValue::Number(f) => crate::coercion::number_to_text(f),
+        LiteralValue::Number(f) => formualizer_common::number_to_excel_text(f),
         LiteralValue::Int(i) => i.to_string(),
         LiteralValue::Error(e) => return Err(e),
         other => other.to_string(),
