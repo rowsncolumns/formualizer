@@ -1151,16 +1151,16 @@ impl Display for ReferenceType {
 /// Render the `Sheet1:SheetN` portion of a 3D reference. Either side may
 /// require quoting independently; quoting one side does not force the other
 /// to be quoted, matching Excel's behaviour.
+/// Excel writes a 3-D sheet span with ONE pair of quotes around the whole
+/// span (`'Sheet 1:Sheet 3'!A1`), never one per endpoint. A colon cannot
+/// appear inside a sheet name, so the quoted form is unambiguous.
 fn format_3d_sheet_prefix(first: &str, last: &str) -> String {
-    let format_one = |name: &str| -> String {
-        if sheet_name_needs_quoting(name) {
-            let escaped = name.replace('\'', "''");
-            format!("'{escaped}'")
-        } else {
-            name.to_string()
-        }
-    };
-    format!("{}:{}", format_one(first), format_one(last))
+    if sheet_name_needs_quoting(first) || sheet_name_needs_quoting(last) {
+        let escape = |name: &str| name.replace('\'', "''");
+        format!("'{}:{}'", escape(first), escape(last))
+    } else {
+        format!("{first}:{last}")
+    }
 }
 
 impl TryFrom<&str> for ReferenceType {
@@ -1240,9 +1240,31 @@ impl ReferenceType {
             // `!` separator (e.g. external book tokens such as `[1]Sheet!A1`).
             return Self::extract_sheet_spec_fallback(reference);
         };
-        let _ = first_quoted;
-
         let bytes = reference.as_bytes();
+
+        // Quoted 3D form: `'Sheet 1:Sheet 3'!A1`. Excel forbids `:` inside a
+        // sheet name, so a colon in a quoted segment always separates the two
+        // endpoints of a sheet span (each endpoint may itself contain spaces).
+        // External-workbook tokens (`'[Book.xlsx]Sheet1'`, `'C:\\path\\[Book]Sheet'`)
+        // also carry colons inside the quotes; their brackets keep them out.
+        if first_quoted
+            && after_first < bytes.len()
+            && bytes[after_first] == b'!'
+            && !first_name.contains('[')
+            && !first_name.contains(']')
+            && let Some((first, last)) = first_name.split_once(':')
+            && !first.is_empty()
+            && !last.is_empty()
+        {
+            let ref_part = reference[after_first + 1..].to_string();
+            return (
+                SheetSpec::Range {
+                    first: first.to_string(),
+                    last: last.to_string(),
+                },
+                ref_part,
+            );
+        }
 
         // 3D form: Name1:Name2!...
         if after_first < bytes.len() && bytes[after_first] == b':' {

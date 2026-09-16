@@ -311,10 +311,45 @@ where
                     flags |= F_HAS_TABLES;
                     per_tables.push(tref.name);
                 }
-                // 3D refs are parsed but not yet planned. They neither create
-                // dependencies nor participate in the cell/range plan; the
-                // evaluator will surface #N/IMPL! when one is encountered.
-                ReferenceType::Cell3D { .. } | ReferenceType::Range3D { .. } => {}
+                // A 3-D reference is one rectangle repeated on every sheet
+                // between its two endpoints (tab order, inclusive): plan one
+                // range key per spanned sheet so an edit on any of them
+                // re-fires the formula. An endpoint that is not a sheet
+                // yields no plan entry; evaluation reports #REF! instead.
+                ReferenceType::Cell3D {
+                    sheet_first,
+                    sheet_last,
+                    row,
+                    col,
+                    ..
+                } => {
+                    if let Some(span) = sheet_reg.active_span_ids(&sheet_first, &sheet_last) {
+                        for dep_sheet in span {
+                            per_ranges.push(RangeKey::Rect {
+                                sheet: dep_sheet,
+                                start: AbsCoord::from_excel(row, col),
+                                end: AbsCoord::from_excel(row, col),
+                            });
+                        }
+                    }
+                }
+                ReferenceType::Range3D {
+                    sheet_first,
+                    sheet_last,
+                    start_row,
+                    start_col,
+                    end_row,
+                    end_col,
+                    ..
+                } => {
+                    if let Some(span) = sheet_reg.active_span_ids(&sheet_first, &sheet_last) {
+                        for dep_sheet in span {
+                            per_ranges.push(range_key_for_bounds(
+                                dep_sheet, start_row, start_col, end_row, end_col,
+                            ));
+                        }
+                    }
+                }
             }
         }
 
@@ -473,7 +508,45 @@ where
                     flags |= F_HAS_TABLES;
                     per_tables.push(tref.name);
                 }
-                ReferenceType::Cell3D { .. } | ReferenceType::Range3D { .. } => {}
+                // A 3-D reference is one rectangle repeated on every sheet
+                // between its two endpoints (tab order, inclusive): plan one
+                // range key per spanned sheet so an edit on any of them
+                // re-fires the formula. An endpoint that is not a sheet
+                // yields no plan entry; evaluation reports #REF! instead.
+                ReferenceType::Cell3D {
+                    sheet_first,
+                    sheet_last,
+                    row,
+                    col,
+                    ..
+                } => {
+                    if let Some(span) = sheet_reg.active_span_ids(&sheet_first, &sheet_last) {
+                        for dep_sheet in span {
+                            per_ranges.push(RangeKey::Rect {
+                                sheet: dep_sheet,
+                                start: AbsCoord::from_excel(row, col),
+                                end: AbsCoord::from_excel(row, col),
+                            });
+                        }
+                    }
+                }
+                ReferenceType::Range3D {
+                    sheet_first,
+                    sheet_last,
+                    start_row,
+                    start_col,
+                    end_row,
+                    end_col,
+                    ..
+                } => {
+                    if let Some(span) = sheet_reg.active_span_ids(&sheet_first, &sheet_last) {
+                        for dep_sheet in span {
+                            per_ranges.push(range_key_for_bounds(
+                                dep_sheet, start_row, start_col, end_row, end_col,
+                            ));
+                        }
+                    }
+                }
             }
         }
 
@@ -551,5 +624,35 @@ mod tests {
         assert_eq!(arena_plan.per_formula_names, tree_plan.per_formula_names);
         assert_eq!(arena_plan.per_formula_tables, tree_plan.per_formula_tables);
         assert_eq!(arena_plan.per_formula_flags, tree_plan.per_formula_flags);
+    }
+}
+
+/// The plan key for a (possibly open) rectangle on `sheet`, mirroring the
+/// `ReferenceType::Range` arm above: bounded → `Rect`, whole column/row →
+/// `WholeCol`/`WholeRow`, anything else → `OpenRect`.
+fn range_key_for_bounds(
+    sheet: SheetId,
+    start_row: Option<u32>,
+    start_col: Option<u32>,
+    end_row: Option<u32>,
+    end_col: Option<u32>,
+) -> RangeKey {
+    match (start_row, start_col, end_row, end_col) {
+        (Some(sr), Some(sc), Some(er), Some(ec)) => RangeKey::Rect {
+            sheet,
+            start: AbsCoord::from_excel(sr, sc),
+            end: AbsCoord::from_excel(er, ec),
+        },
+        (None, Some(c), None, Some(ec)) if c == ec => RangeKey::WholeCol { sheet, col: c },
+        (Some(r), None, Some(er), None) if r == er => RangeKey::WholeRow { sheet, row: r },
+        _ => RangeKey::OpenRect {
+            sheet,
+            start: start_row
+                .zip(start_col)
+                .map(|(r, c)| AbsCoord::from_excel(r, c)),
+            end: end_row
+                .zip(end_col)
+                .map(|(r, c)| AbsCoord::from_excel(r, c)),
+        },
     }
 }

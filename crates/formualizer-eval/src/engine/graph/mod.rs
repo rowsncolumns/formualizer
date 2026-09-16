@@ -1359,6 +1359,13 @@ impl DependencyGraph {
         &self.sheet_reg
     }
 
+    /// Move a sheet to `new_position` in the tab order (0-based, clamped).
+    /// Ids and names are untouched; only position-derived results change
+    /// (`SHEET()`, 3-D reference spans).
+    pub fn move_sheet(&mut self, id: SheetId, new_position: usize) -> Result<(), ExcelError> {
+        self.sheet_reg.move_sheet(id, new_position)
+    }
+
     pub(crate) fn data_store(&self) -> &DataStore {
         &self.data_store
     }

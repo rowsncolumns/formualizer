@@ -24,6 +24,11 @@ pub struct SheetRegistry {
     /// `remove`/`rename` re-pointing a shared folded key at a surviving sheet.
     id_by_folded: HashMap<String, SheetId>,
     name_by_id: Vec<String>,
+    /// Active sheet ids in TAB order. Ids are minted in insertion order, but
+    /// a host can move tabs (`move_sheet`), and Excel's sheet-position
+    /// semantics — `SHEET()`, and the span a 3-D reference
+    /// `Sheet1:Sheet3!A1` covers — follow the tab order, not the id order.
+    tab_order: Vec<SheetId>,
 }
 
 impl SheetRegistry {
@@ -42,7 +47,9 @@ impl SheetRegistry {
             .name_by_id
             .iter()
             .enumerate()
-            .find(|(id, name)| *id as SheetId != vacated_id && !name.is_empty() && fold(name) == folded)
+            .find(|(id, name)| {
+                *id as SheetId != vacated_id && !name.is_empty() && fold(name) == folded
+            })
             .map(|(id, _)| id as SheetId);
         match survivor {
             Some(id) => {
@@ -69,7 +76,40 @@ impl SheetRegistry {
         self.name_by_id.push(name.to_string());
         self.id_by_name.insert(name.to_string(), id);
         self.id_by_folded.entry(fold(name)).or_insert(id);
+        self.tab_order.push(id);
         id
+    }
+
+    /// Move an active sheet to `new_position` (0-based index among the
+    /// active sheets, clamped to the end). Only the tab order changes: ids,
+    /// names and every reference keep resolving as before.
+    pub fn move_sheet(
+        &mut self,
+        id: SheetId,
+        new_position: usize,
+    ) -> Result<(), formualizer_common::ExcelError> {
+        use formualizer_common::{ExcelError, ExcelErrorKind};
+        let Some(pos) = self.tab_order.iter().position(|&s| s == id) else {
+            return Err(
+                ExcelError::new(ExcelErrorKind::Value).with_message("Sheet ID does not exist")
+            );
+        };
+        let id = self.tab_order.remove(pos);
+        let at = new_position.min(self.tab_order.len());
+        self.tab_order.insert(at, id);
+        Ok(())
+    }
+
+    /// Active sheet ids, in tab order, between `first` and `last` inclusive —
+    /// the sheets a 3-D reference `first:last!A1` spans. Excel spans the
+    /// tabs between the two endpoints regardless of which one is written
+    /// first, so `Sheet3:Sheet1!A1` equals `Sheet1:Sheet3!A1`. `None` when
+    /// either endpoint is not an active sheet.
+    pub fn active_span_ids(&self, first: &str, last: &str) -> Option<Vec<SheetId>> {
+        let a = self.active_position(first)? - 1;
+        let b = self.active_position(last)? - 1;
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        Some(self.tab_order[lo..=hi].to_vec())
     }
 
     pub fn name(&self, id: SheetId) -> &str {
@@ -101,6 +141,9 @@ impl SheetRegistry {
         if idx >= self.name_by_id.len() || self.name_by_id[idx].is_empty() {
             return None;
         }
+        if let Some(pos) = self.tab_order.iter().position(|&s| s == id) {
+            return Some(pos + 1);
+        }
         Some(
             self.name_by_id
                 .iter()
@@ -123,14 +166,25 @@ impl SheetRegistry {
         Some(a.abs_diff(b) + 1)
     }
 
-    /// Get all sheet IDs and names (excluding removed sheets)
+    /// Get all sheet IDs and names (excluding removed sheets), in tab order.
     pub fn all_sheets(&self) -> Vec<(SheetId, String)> {
-        self.name_by_id
+        let mut out: Vec<(SheetId, String)> = self
+            .tab_order
             .iter()
-            .enumerate()
-            .filter(|(_, name)| !name.is_empty())
-            .map(|(id, name)| (id as SheetId, name.clone()))
-            .collect()
+            .filter_map(|&id| {
+                let name = self.name_by_id.get(id as usize)?;
+                (!name.is_empty()).then(|| (id, name.clone()))
+            })
+            .collect();
+        // Sheets registered without going through `id_for` (test fixtures
+        // push into `name_by_id` directly) keep their id-order position.
+        for (id, name) in self.name_by_id.iter().enumerate() {
+            let id = id as SheetId;
+            if !name.is_empty() && !self.tab_order.contains(&id) {
+                out.push((id, name.clone()));
+            }
+        }
+        out
     }
 
     /// Remove a sheet from the registry
@@ -157,6 +211,7 @@ impl SheetRegistry {
 
         // Mark as removed in name_by_id (we can't actually remove it to preserve IDs)
         self.name_by_id[id as usize] = String::new();
+        self.tab_order.retain(|&s| s != id);
 
         self.repoint_folded(&fold(&name), id);
 
@@ -213,12 +268,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn span_follows_tab_order_and_ignores_endpoint_order() {
+        let mut reg = SheetRegistry::new();
+        let s1 = reg.id_for("S1");
+        let s2 = reg.id_for("S2");
+        let s3 = reg.id_for("S3");
+        assert_eq!(reg.active_span_ids("S1", "S3"), Some(vec![s1, s2, s3]));
+        assert_eq!(reg.active_span_ids("S3", "S1"), Some(vec![s1, s2, s3]));
+        assert_eq!(reg.active_span_ids("S1", "S1"), Some(vec![s1]));
+        assert_eq!(reg.active_span_ids("S1", "Nope"), None);
+
+        // Move S3 to the front: S3, S1, S2 — the S1:S2 span no longer
+        // includes S3, and SHEET()-style positions follow the tabs.
+        reg.move_sheet(s3, 0).unwrap();
+        assert_eq!(reg.active_position("S3"), Some(1));
+        assert_eq!(reg.active_position("S1"), Some(2));
+        assert_eq!(reg.active_span_ids("S1", "S2"), Some(vec![s1, s2]));
+        assert_eq!(reg.active_span_ids("S3", "S1"), Some(vec![s3, s1]));
+        assert_eq!(
+            reg.all_sheets()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec![s3, s1, s2]
+        );
+
+        reg.remove(s1).unwrap();
+        assert_eq!(reg.active_span_ids("S3", "S2"), Some(vec![s3, s2]));
+        assert!(reg.move_sheet(s1, 0).is_err());
+    }
+
+    #[test]
     fn lookup_is_case_insensitive_with_exact_priority() {
         let mut reg = SheetRegistry::new();
         let data = reg.id_for("Data");
         assert_eq!(reg.get_id("data"), Some(data));
         assert_eq!(reg.get_id("DATA"), Some(data));
-        assert_eq!(reg.id_for("dAtA"), data, "id_for resolves instead of minting a phantom");
+        assert_eq!(
+            reg.id_for("dAtA"),
+            data,
+            "id_for resolves instead of minting a phantom"
+        );
         assert_eq!(reg.active_len(), 1);
 
         // A pre-existing case-variant pair keeps exact-spelling resolution.
@@ -236,7 +326,11 @@ mod tests {
         reg.name_by_id.push("DATA".to_string());
         reg.id_by_name.insert("DATA".to_string(), 1);
         reg.remove(a).unwrap();
-        assert_eq!(reg.get_id("data"), Some(1), "folded key re-points at the survivor");
+        assert_eq!(
+            reg.get_id("data"),
+            Some(1),
+            "folded key re-points at the survivor"
+        );
         reg.remove(1).unwrap();
         assert_eq!(reg.get_id("data"), None);
     }
