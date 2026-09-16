@@ -22241,7 +22241,7 @@ impl ShimSpillManager {
                 .saturating_add(shape.cols)
                 .saturating_sub(1),
         };
-        if self.blocked_by_host(&region, anchor_cell) {
+        if self.blocked_by_host(&region) {
             return Err(ExcelError::new(ExcelErrorKind::Spill).with_message("BlockedByHostRegion"));
         }
         match self.region_locks.reserve(region, owner) {
@@ -22268,25 +22268,25 @@ impl ShimSpillManager {
         }
     }
 
-    /// Does `region` reach a host-declared blocker in any cell other than the anchor's own?
-    /// (The anchor may itself be a blocked cell — a merged cell holding the formula — a 1×1
-    /// result there is not a spill.)
-    fn blocked_by_host(&self, region: &crate::engine::spill::Region, anchor_cell: CellRef) -> bool {
+    /// Does `region` reach a host-declared blocker? Excel's rule is that NO cell of a spill range
+    /// may be merged — the anchor included ("Spill range has merged cell"), so a merged cell
+    /// holding `=SEQUENCE(3)` is `#SPILL!`. Only a 1×1 result is exempt: it never spills, so a
+    /// merged cell holding it is an ordinary formula cell.
+    fn blocked_by_host(&self, region: &crate::engine::spill::Region) -> bool {
         let Some(blockers) = self.blockers.get(&region.sheet_id) else {
             return false;
         };
-        let (anchor_row, anchor_col) = (anchor_cell.coord.row(), anchor_cell.coord.col());
+        let single_cell =
+            region.row_start == region.row_end && region.col_start == region.col_end;
+        if single_cell {
+            return false;
+        }
         blockers.iter().any(|b| {
             let row_start = region.row_start.max(b.row_start);
             let row_end = region.row_end.min(b.row_end);
             let col_start = region.col_start.max(b.col_start);
             let col_end = region.col_end.min(b.col_end);
-            let overlaps = row_start <= row_end && col_start <= col_end;
-            let only_anchor = row_start == row_end
-                && col_start == col_end
-                && row_start == anchor_row
-                && col_start == anchor_col;
-            overlaps && !only_anchor
+            row_start <= row_end && col_start <= col_end
         })
     }
 
