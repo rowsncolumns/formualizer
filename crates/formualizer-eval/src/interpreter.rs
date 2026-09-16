@@ -18,6 +18,9 @@ use crate::formula_plane::template_canonical::LiteralSlotId;
 pub enum LocalBinding {
     Value(LiteralValue),
     Callable(Arc<dyn crate::traits::CustomCallable>),
+    /// An optional `LAMBDA` parameter (`[name]`) the caller did not supply.
+    /// `ISOMITTED(name)` reports it; reading it as a value is `#VALUE!`.
+    Omitted,
 }
 
 #[derive(Clone, Default)]
@@ -179,7 +182,7 @@ impl<'a> Interpreter<'a> {
         )?))
     }
 
-    fn resolve_local_reference(
+    pub(crate) fn resolve_local_reference(
         &self,
         reference: &ReferenceType,
     ) -> Option<crate::traits::CalcValue<'a>> {
@@ -193,6 +196,10 @@ impl<'a> Interpreter<'a> {
         match self.local_env.lookup(name)? {
             LocalBinding::Value(v) => Some(crate::traits::CalcValue::Scalar(v)),
             LocalBinding::Callable(c) => Some(crate::traits::CalcValue::Callable(c)),
+            LocalBinding::Omitted => Some(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new(ExcelErrorKind::Value)
+                    .with_message(format!("LAMBDA parameter {name} was omitted")),
+            ))),
         }
     }
 
@@ -202,7 +209,7 @@ impl<'a> Interpreter<'a> {
         }
         match self.local_env.lookup(name)? {
             LocalBinding::Callable(c) => Some(c),
-            LocalBinding::Value(_) => None,
+            LocalBinding::Value(_) | LocalBinding::Omitted => None,
         }
     }
 
@@ -564,13 +571,9 @@ impl<'a> Interpreter<'a> {
                     "^" => self
                         .power(left, right)
                         .map(crate::traits::CalcValue::Scalar),
-                    "&" => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(
-                        format!(
-                            "{}{}",
-                            crate::coercion::to_text_invariant(&left),
-                            crate::coercion::to_text_invariant(&right)
-                        ),
-                    ))),
+                    "&" => self
+                        .concat(left, right)
+                        .map(crate::traits::CalcValue::Scalar),
                     _ => Err(ExcelError::new(ExcelErrorKind::NImpl)
                         .with_message(format!("Binary op '{op}'"))),
                 }
@@ -775,8 +778,7 @@ impl<'a> Interpreter<'a> {
                 .eval_binary(op, left, right)
                 .map(crate::traits::CalcValue::Scalar),
             ASTNodeType::Function { name, args } => self.eval_function_to_calc(name, args),
-            ASTNodeType::Call { .. } => Err(ExcelError::new(ExcelErrorKind::NImpl)
-                .with_message("Immediate-invocation calls are not yet supported")),
+            ASTNodeType::Call { callee, args } => self.eval_call_to_calc(callee, args),
             ASTNodeType::Array(rows) => self.eval_array_literal_to_calc(rows),
         }
     }
@@ -839,8 +841,7 @@ impl<'a> Interpreter<'a> {
                 }
                 self.eval_function_to_calc(name, args)
             }
-            ASTNodeType::Call { .. } => Err(ExcelError::new(ExcelErrorKind::NImpl)
-                .with_message("Immediate-invocation calls are not yet supported")),
+            ASTNodeType::Call { callee, args } => self.eval_call_to_calc(callee, args),
             ASTNodeType::Array(rows) => self.eval_array_literal_to_calc(rows),
         }
     }
@@ -1152,11 +1153,7 @@ impl<'a> Interpreter<'a> {
             "*" => self.numeric_binary(l_val, r_val, |a, b| a * b),
             "/" => self.divide(l_val, r_val),
             "^" => self.power(l_val, r_val),
-            "&" => Ok(LiteralValue::Text(format!(
-                "{}{}",
-                crate::coercion::to_text_invariant(&l_val),
-                crate::coercion::to_text_invariant(&r_val)
-            ))),
+            "&" => self.concat(l_val, r_val),
             ":" => {
                 // Compute a combined reference; in value context return #REF! for now.
                 let lref = self.evaluate_ast_as_reference(left)?;
@@ -1258,6 +1255,33 @@ impl<'a> Interpreter<'a> {
     }
 
     /* ===================  function calls  =================== */
+    /// Immediate invocation of a callable expression: `LAMBDA(x,x*2)(3)` or
+    /// `LET(f,LAMBDA(x,x+1),f)(41)`. The callee must evaluate to a `LAMBDA`
+    /// value; arguments are evaluated eagerly (ranges arrive as arrays).
+    pub(crate) fn eval_call_to_calc(
+        &self,
+        callee: &ASTNode,
+        args: &[ASTNode],
+    ) -> Result<crate::traits::CalcValue<'a>, ExcelError> {
+        let callable = match self.evaluate_ast(callee)? {
+            crate::traits::CalcValue::Callable(c) => c,
+            crate::traits::CalcValue::Scalar(LiteralValue::Error(e)) => {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+            }
+            _ => {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                    ExcelError::new(ExcelErrorKind::Value)
+                        .with_message("Only a LAMBDA value can be invoked"),
+                )));
+            }
+        };
+        let mut eval_args = Vec::with_capacity(args.len());
+        for arg in args {
+            eval_args.push(self.evaluate_ast(arg)?.into_literal());
+        }
+        callable.invoke(self, &eval_args)
+    }
+
     fn eval_function_to_calc(
         &self,
         name: &str,
@@ -1344,6 +1368,24 @@ impl<'a> Interpreter<'a> {
         })
     }
 
+    /// `&` lifts over arrays element-wise (`A1:A3&"x"` spills `10x,20x,30x`) and
+    /// propagates an error operand instead of concatenating its text.
+    fn concat(&self, left: LiteralValue, right: LiteralValue) -> Result<LiteralValue, ExcelError> {
+        self.broadcast_apply(left, right, |l, r| {
+            if let LiteralValue::Error(e) = l {
+                return Ok(LiteralValue::Error(e));
+            }
+            if let LiteralValue::Error(e) = r {
+                return Ok(LiteralValue::Error(e));
+            }
+            Ok(LiteralValue::Text(format!(
+                "{}{}",
+                crate::coercion::to_text_invariant(&l),
+                crate::coercion::to_text_invariant(&r)
+            )))
+        })
+    }
+
     fn divide(&self, left: LiteralValue, right: LiteralValue) -> Result<LiteralValue, ExcelError> {
         self.broadcast_apply(left, right, |l, r| {
             let ln = crate::coercion::to_number_lenient_with_locale(&l, &self.context.locale());
@@ -1410,13 +1452,21 @@ impl<'a> Interpreter<'a> {
     where
         F: Fn(LiteralValue, LiteralValue) -> Result<LiteralValue, ExcelError> + Copy,
     {
-        // Use strict broadcasting across dimensions
+        // Excel operator broadcasting: a dimension of 1 stretches; when both operands
+        // are wider than 1 the result takes the larger extent and the cells the shorter
+        // operand does not reach evaluate to #N/A (`{1;2;3}+{1;2}` → `{2;4;#N/A}`).
         let l_shape = (l.len(), l.first().map(|r| r.len()).unwrap_or(0));
         let r_shape = (r.len(), r.first().map(|r| r.len()).unwrap_or(0));
-        let target = match broadcast_shape(&[l_shape, r_shape]) {
-            Ok(s) => s,
-            Err(e) => return Ok(LiteralValue::Error(e)),
+        let dim = |a: usize, b: usize| {
+            if a == 1 {
+                b
+            } else if b == 1 {
+                a
+            } else {
+                a.max(b)
+            }
         };
+        let target = (dim(l_shape.0, r_shape.0), dim(l_shape.1, r_shape.1));
 
         let mut out = Vec::with_capacity(target.0);
         for i in 0..target.0 {
@@ -1424,16 +1474,16 @@ impl<'a> Interpreter<'a> {
             for j in 0..target.1 {
                 let (li, lj) = project_index((i, j), l_shape);
                 let (ri, rj) = project_index((i, j), r_shape);
-                let lv = l
-                    .get(li)
-                    .and_then(|r| r.get(lj))
-                    .cloned()
-                    .unwrap_or(LiteralValue::Empty);
-                let rv = r
-                    .get(ri)
-                    .and_then(|r| r.get(rj))
-                    .cloned()
-                    .unwrap_or(LiteralValue::Empty);
+                let (lv, rv) = match (
+                    l.get(li).and_then(|r| r.get(lj)),
+                    r.get(ri).and_then(|r| r.get(rj)),
+                ) {
+                    (Some(lv), Some(rv)) => (lv.clone(), rv.clone()),
+                    _ => {
+                        row.push(LiteralValue::Error(ExcelError::new(ExcelErrorKind::Na)));
+                        continue;
+                    }
+                };
                 row.push(match f(lv, rv) {
                     Ok(v) => v,
                     Err(e) => LiteralValue::Error(e),
@@ -1542,23 +1592,49 @@ impl<'a> Interpreter<'a> {
             (Array(arr), v) => self.broadcast_apply(Array(arr), v, |a, b| self.compare(op, a, b)),
             (v, Array(arr)) => self.broadcast_apply(v, Array(arr), |a, b| self.compare(op, a, b)),
             (l, r) => {
-                let res = match (l, r) {
-                    (Number(a), Number(b)) => self.cmp_f64(a, b, op),
-                    (Int(a), Number(b)) => self.cmp_f64(a as f64, b, op),
-                    (Number(a), Int(b)) => self.cmp_f64(a, b as f64, op),
-                    (Boolean(a), Boolean(b)) => {
-                        self.cmp_f64(if a { 1.0 } else { 0.0 }, if b { 1.0 } else { 0.0 }, op)
+                // Excel never coerces across types in a comparison: a blank
+                // takes the counterpart's type (0 / "" / FALSE), same-type
+                // values compare by value, and mixed types compare by rank
+                // (numbers < text < booleans) so `="1"=1` and `=TRUE=1` are
+                // FALSE while `=TRUE>"z"` and `="a">1` are TRUE.
+                let (l, r) = match (l, r) {
+                    (Empty, Empty) => (Int(0), Int(0)),
+                    (Empty, r) => (Self::blank_as(&r), r),
+                    (l, Empty) => {
+                        let blank = Self::blank_as(&l);
+                        (l, blank)
                     }
-                    (Text(a), Text(b)) => self.cmp_text(&a, &b, op),
-                    (a, b) => {
-                        // fallback to numeric coercion or text compare
+                    pair => pair,
+                };
+                let res = match (Self::compare_rank(&l), Self::compare_rank(&r)) {
+                    (Some(1), Some(1)) => {
+                        let a = crate::coercion::to_number_strict(&l)?;
+                        let b = crate::coercion::to_number_strict(&r)?;
+                        self.cmp_f64(a, b, op)
+                    }
+                    (Some(2), Some(2)) => match (&l, &r) {
+                        (Text(a), Text(b)) => self.cmp_text(a, b, op),
+                        _ => unreachable!(),
+                    },
+                    (Some(3), Some(3)) => match (&l, &r) {
+                        (Boolean(a), Boolean(b)) => self.cmp_f64(
+                            if *a { 1.0 } else { 0.0 },
+                            if *b { 1.0 } else { 0.0 },
+                            op,
+                        ),
+                        _ => unreachable!(),
+                    },
+                    (Some(ra), Some(rb)) => self.cmp_f64(ra as f64, rb as f64, op),
+                    _ => {
+                        // Pending / other placeholders: keep the lenient
+                        // numeric-then-text fallback.
                         let an = crate::coercion::to_number_lenient_with_locale(
-                            &a,
+                            &l,
                             &self.context.locale(),
                         )
                         .ok();
                         let bn = crate::coercion::to_number_lenient_with_locale(
-                            &b,
+                            &r,
                             &self.context.locale(),
                         )
                         .ok();
@@ -1566,8 +1642,8 @@ impl<'a> Interpreter<'a> {
                             self.cmp_f64(a, b, op)
                         } else {
                             self.cmp_text(
-                                &crate::coercion::to_text_invariant(&a),
-                                &crate::coercion::to_text_invariant(&b),
+                                &crate::coercion::to_text_invariant(&l),
+                                &crate::coercion::to_text_invariant(&r),
                                 op,
                             )
                         }
@@ -1575,6 +1651,29 @@ impl<'a> Interpreter<'a> {
                 };
                 Ok(LiteralValue::Boolean(res))
             }
+        }
+    }
+
+    /// Excel's comparison type rank: numbers (incl. date/time serials) 1,
+    /// text 2, booleans 3. `None` for values that have no Excel rank.
+    fn compare_rank(v: &LiteralValue) -> Option<u8> {
+        use LiteralValue::*;
+        match v {
+            Int(_) | Number(_) | Date(_) | DateTime(_) | Time(_) | Duration(_) => Some(1),
+            Text(_) => Some(2),
+            Boolean(_) => Some(3),
+            _ => None,
+        }
+    }
+
+    /// The value a blank cell compares as against `counterpart` (Excel: 0
+    /// against numbers, "" against text, FALSE against booleans).
+    fn blank_as(counterpart: &LiteralValue) -> LiteralValue {
+        use LiteralValue::*;
+        match counterpart {
+            Text(_) => Text(String::new()),
+            Boolean(_) => Boolean(false),
+            _ => Int(0),
         }
     }
 

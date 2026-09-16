@@ -279,6 +279,12 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
         }
     }
 
+    /// The interpreter this argument is evaluated against (used to build synthetic
+    /// per-element handles when an `ELEMENTWISE` function lifts over an array argument).
+    pub(crate) fn interp(&self) -> &'a Interpreter<'b> {
+        self.interp
+    }
+
     pub fn value(&self) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         self.cached_value
             .get_or_init(|| self.compute_value())
@@ -530,6 +536,9 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
             ArgumentExpr::Ast(node) => match &node.node_type {
                 ASTNodeType::Reference { reference, .. } => {
                     let reference = self.interp.reference_for_current_offset(reference)?;
+                    if let Some(view) = self.local_range_view(&reference)? {
+                        return Ok(view);
+                    }
                     self.interp
                         .context
                         .resolve_range_view(&reference, self.interp.current_sheet())
@@ -554,15 +563,18 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                             .with_cancel_token(self.interp.context.cancellation_token()),
                     )
                 }
-                ASTNodeType::Function { .. } | ASTNodeType::BinaryOp { .. } => {
+                ASTNodeType::Function { .. }
+                | ASTNodeType::BinaryOp { .. }
+                | ASTNodeType::UnaryOp { .. } => {
                     match self.reference_for_eval() {
                         Ok(reference) => self
                             .interp
                             .context
                             .resolve_range_view(&reference, self.interp.current_sheet())
                             .map(|v| v.with_cancel_token(self.interp.context.cancellation_token())),
-                        // Not a reference-producing expression (e.g. `B1:B4>0`, `FILTER(...)`):
-                        // materialize its value as an owned view instead of failing with #REF!.
+                        // Not a reference-producing expression (e.g. `B1:B4>0`, `FILTER(...)`,
+                        // `--(A1:A3>1)`): materialize its value as an owned view instead of
+                        // failing with #REF!.
                         Err(_) => self.value_as_range_view(),
                     }
                 }
@@ -581,13 +593,17 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 match node {
                     crate::engine::arena::AstNodeData::Reference { .. } => {
                         let reference = self.reference_for_eval()?;
+                        if let Some(view) = self.local_range_view(&reference)? {
+                            return Ok(view);
+                        }
                         self.interp
                             .context
                             .resolve_range_view(&reference, self.interp.current_sheet())
                             .map(|v| v.with_cancel_token(self.interp.context.cancellation_token()))
                     }
                     crate::engine::arena::AstNodeData::Function { .. }
-                    | crate::engine::arena::AstNodeData::BinaryOp { .. } => {
+                    | crate::engine::arena::AstNodeData::BinaryOp { .. }
+                    | crate::engine::arena::AstNodeData::UnaryOp { .. } => {
                         match self.reference_for_eval() {
                             Ok(reference) => self
                                 .interp
@@ -673,6 +689,45 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
             },
         };
         self.interp.resolve_local_name(&name)
+    }
+
+    /// A `LET` / `LAMBDA` local bound to an array (`LET(a,F1:F3,SUM(a))`,
+    /// `BYROW(rng,LAMBDA(r,SUM(r)))`) is not a workbook name: expose the bound
+    /// value as an owned view instead of asking the workbook to resolve it.
+    fn local_range_view(
+        &self,
+        reference: &ReferenceType,
+    ) -> Result<Option<RangeView<'b>>, ExcelError> {
+        let Some(local) = self.interp.resolve_local_reference(reference) else {
+            return Ok(None);
+        };
+        let ds = self.interp.context.date_system();
+        let token = self.interp.context.cancellation_token();
+        Ok(Some(match local {
+            crate::traits::CalcValue::Range(rv) => rv,
+            crate::traits::CalcValue::Scalar(LiteralValue::Array(rows)) => {
+                RangeView::from_owned_rows(rows, ds).with_cancel_token(token)
+            }
+            crate::traits::CalcValue::Scalar(LiteralValue::Error(e)) => return Err(e),
+            crate::traits::CalcValue::Scalar(v) => {
+                RangeView::from_owned_rows(vec![vec![v]], ds).with_cancel_token(token)
+            }
+            crate::traits::CalcValue::Callable(_) => {
+                return Err(ExcelError::new(ExcelErrorKind::Calc)
+                    .with_message("LAMBDA value must be invoked"));
+            }
+        }))
+    }
+
+    /// Invoke a `LAMBDA` value from inside a function body (`MAP`, `REDUCE`,
+    /// immediate calls): the closure needs the interpreter this argument was
+    /// created under so its captured environment and cell context line up.
+    pub fn invoke_callable(
+        &self,
+        callable: &Arc<dyn CustomCallable>,
+        args: &[LiteralValue],
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        callable.invoke(self.interp, args)
     }
 
     /// Evaluate this argument and expose the result as a `RangeView`: computed arrays (`B1:B4>0`,
@@ -838,6 +893,16 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 }
             }
         }
+    }
+
+    /// True when this argument slot was skipped in the source (`INDEX(rng,,2)`): the parser
+    /// represents each skipped slot as a bare empty-text literal. Functions treat a skipped
+    /// slot as an omitted argument and apply Excel's default for that slot.
+    pub fn is_skipped(&self) -> bool {
+        matches!(
+            &self.ast().node_type,
+            ASTNodeType::Literal(LiteralValue::Text(t)) if t.is_empty()
+        )
     }
 
     pub fn ast(&self) -> &ASTNode {

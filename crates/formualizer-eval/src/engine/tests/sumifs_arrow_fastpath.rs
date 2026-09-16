@@ -156,7 +156,7 @@ fn sumifs_arrow_fastpath_parity_small() {
 }
 
 #[test]
-fn sumifs_arrow_fastpath_broadcasts_1x1_text_criteria_range() {
+fn sumifs_arrow_fastpath_rejects_1x1_text_criteria_range() {
     let config = arrow_eval_config();
     let mut engine = Engine::new(TestWorkbook::new(), config.clone());
 
@@ -205,12 +205,17 @@ fn sumifs_arrow_fastpath_broadcasts_1x1_text_criteria_range() {
         fun.dispatch(&args, &fctx).unwrap().into_literal()
     };
 
+    // Excel: a 1x1 criteria range against a larger target range is a #VALUE! error
+    // (rowsncolumns/spreadsheet#546 C-R22) — no silent broadcast on either path.
     assert_eq!(got_fast, got_slow);
-    assert_eq!(got_fast, LiteralValue::Number(100.0));
+    assert!(
+        matches!(got_fast, LiteralValue::Error(ref e) if e.kind == formualizer_common::ExcelErrorKind::Value),
+        "expected #VALUE!, got {got_fast:?}"
+    );
 }
 
 #[test]
-fn sumifs_arrow_fastpath_broadcasts_1x1_numeric_criteria_range() {
+fn sumifs_arrow_fastpath_rejects_1x1_numeric_criteria_range() {
     let config = arrow_eval_config();
     let mut engine = Engine::new(TestWorkbook::new(), config.clone());
 
@@ -260,12 +265,17 @@ fn sumifs_arrow_fastpath_broadcasts_1x1_numeric_criteria_range() {
         fun.dispatch(&args, &fctx).unwrap().into_literal()
     };
 
+    // Excel: a 1x1 criteria range against a larger target range is a #VALUE! error
+    // (rowsncolumns/spreadsheet#546 C-R22) — no silent broadcast on either path.
     assert_eq!(got_fast, got_slow);
-    assert_eq!(got_fast, LiteralValue::Number(100.0));
+    assert!(
+        matches!(got_fast, LiteralValue::Error(ref e) if e.kind == formualizer_common::ExcelErrorKind::Value),
+        "expected #VALUE!, got {got_fast:?}"
+    );
 }
 
 #[test]
-fn countifs_arrow_fastpath_broadcasts_1x1_numeric_criteria_range() {
+fn countifs_arrow_fastpath_rejects_1x1_numeric_criteria_range() {
     let config = arrow_eval_config();
     let mut engine = Engine::new(TestWorkbook::new(), config.clone());
 
@@ -319,8 +329,13 @@ fn countifs_arrow_fastpath_broadcasts_1x1_numeric_criteria_range() {
         fun.dispatch(&args, &fctx).unwrap().into_literal()
     };
 
+    // Excel: a 1x1 criteria range against a larger target range is a #VALUE! error
+    // (rowsncolumns/spreadsheet#546 C-R22) — no silent broadcast on either path.
     assert_eq!(got_fast, got_slow);
-    assert_eq!(got_fast, LiteralValue::Number(2.0));
+    assert!(
+        matches!(got_fast, LiteralValue::Error(ref e) if e.kind == formualizer_common::ExcelErrorKind::Value),
+        "expected #VALUE!, got {got_fast:?}"
+    );
 }
 
 #[test]

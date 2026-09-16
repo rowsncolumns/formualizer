@@ -72,10 +72,10 @@ pub struct EdateFn;
 /// Variadic: false
 /// Signature: EDATE(arg1: number@scalar, arg2: number@scalar)
 /// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for EdateFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
 
     fn name(&self) -> &'static str {
         "EDATE"
@@ -168,10 +168,10 @@ pub struct EomonthFn;
 /// Variadic: false
 /// Signature: EOMONTH(arg1: number@scalar, arg2: number@scalar)
 /// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for EomonthFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
 
     fn name(&self) -> &'static str {
         "EOMONTH"

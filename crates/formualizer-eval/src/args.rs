@@ -65,7 +65,20 @@ pub enum CriteriaPredicate {
         pattern: String,
         case_insensitive: bool,
     },
+    /// `"<>a*"`: negation of a wildcard pattern (matches non-text cells too).
+    NotLike(Box<CriteriaPredicate>),
+    /// Case-insensitive text ordering (`">m"`): matches text cells only.
+    TextGt(String),
+    TextGe(String),
+    TextLt(String),
+    TextLe(String),
+    /// `"="`: truly blank cells only.
     IsBlank,
+    /// `"<>"`: every cell that is not blank (an empty-string result counts as
+    /// non-blank, as in Excel).
+    IsNotBlank,
+    /// `""`: blank cells and cells holding an empty-string value.
+    IsBlankOrEmptyText,
     IsNumber,
     IsText,
     IsLogical,
@@ -95,10 +108,23 @@ pub struct ValidationOptions {
 
 // Legacy adapter removed in clean break.
 
+/// Excel criteria-string parsing shared by COUNTIF/SUMIF/AVERAGEIF, the *IFS
+/// family and the database functions.
+///
+/// Rules (Excel): an optional comparison operator (`= <> > >= < <=`) followed
+/// by a value. The value is a number when it parses as one (so `"1"` and `1`
+/// are the same criterion and both match numeric 1 and the text "1"), a
+/// boolean for `TRUE`/`FALSE`, otherwise text — with `*`/`?` wildcards and the
+/// `~` escape, matched case-insensitively against text cells only. `""`
+/// matches blank cells and empty-string values, `"="` matches truly blank
+/// cells, `"<>"` matches every non-blank cell.
 pub fn parse_criteria(v: &LiteralValue) -> Result<CriteriaPredicate, ExcelError> {
     match v {
         LiteralValue::Text(s) => {
             let s_trim = s.trim();
+            if s_trim.is_empty() {
+                return Ok(CriteriaPredicate::IsBlankOrEmptyText);
+            }
 
             let unquote = |t: &str| -> String {
                 let t = t.trim();
@@ -114,8 +140,18 @@ pub fn parse_criteria(v: &LiteralValue) -> Result<CriteriaPredicate, ExcelError>
             for op in ops.iter() {
                 if let Some(rhs) = s_trim.strip_prefix(op) {
                     let rhs_trim = rhs.trim();
-                    // Try numeric parse for comparisons
-                    if let Ok(n) = rhs_trim.parse::<f64>() {
+                    if rhs_trim.is_empty() {
+                        return Ok(match *op {
+                            "=" => CriteriaPredicate::IsBlank,
+                            "<>" => CriteriaPredicate::IsNotBlank,
+                            ">" => CriteriaPredicate::TextGt(String::new()),
+                            ">=" => CriteriaPredicate::TextGe(String::new()),
+                            "<" => CriteriaPredicate::TextLt(String::new()),
+                            "<=" => CriteriaPredicate::TextLe(String::new()),
+                            _ => unreachable!(),
+                        });
+                    }
+                    if let Some(n) = parse_criteria_number(rhs_trim) {
                         return Ok(match *op {
                             ">=" => CriteriaPredicate::Ge(n),
                             "<=" => CriteriaPredicate::Le(n),
@@ -126,15 +162,36 @@ pub fn parse_criteria(v: &LiteralValue) -> Result<CriteriaPredicate, ExcelError>
                             _ => unreachable!(),
                         });
                     }
-                    // Fallback: non-numeric equals/neq text (support Excel-style quoted strings: ="aa")
-                    let lit = LiteralValue::Text(unquote(rhs_trim));
+                    let lower = rhs_trim.to_ascii_lowercase();
+                    if matches!(*op, "=" | "<>") && (lower == "true" || lower == "false") {
+                        let b = LiteralValue::Boolean(lower == "true");
+                        return Ok(if *op == "=" {
+                            CriteriaPredicate::Eq(b)
+                        } else {
+                            CriteriaPredicate::Ne(b)
+                        });
+                    }
+                    let lit = unquote(rhs_trim);
+                    if matches!(*op, "=" | "<>") && has_wildcard(&lit) {
+                        // `"<>a*"` = every cell that does NOT match the pattern.
+                        let like = CriteriaPredicate::TextLike {
+                            pattern: lit,
+                            case_insensitive: true,
+                        };
+                        return Ok(if *op == "=" {
+                            like
+                        } else {
+                            CriteriaPredicate::NotLike(Box::new(like))
+                        });
+                    }
+                    let lit = unescape_wildcards(&lit);
                     return Ok(match *op {
-                        "=" => CriteriaPredicate::Eq(lit),
-                        "<>" => CriteriaPredicate::Ne(lit),
-                        ">=" | "<=" | ">" | "<" => {
-                            // Non-numeric compare: not fully supported; degrade to equality on full expression
-                            CriteriaPredicate::Eq(LiteralValue::Text(s_trim.to_string()))
-                        }
+                        "=" => CriteriaPredicate::Eq(LiteralValue::Text(lit)),
+                        "<>" => CriteriaPredicate::Ne(LiteralValue::Text(lit)),
+                        ">" => CriteriaPredicate::TextGt(lit),
+                        ">=" => CriteriaPredicate::TextGe(lit),
+                        "<" => CriteriaPredicate::TextLt(lit),
+                        "<=" => CriteriaPredicate::TextLe(lit),
                         _ => unreachable!(),
                     });
                 }
@@ -142,27 +199,29 @@ pub fn parse_criteria(v: &LiteralValue) -> Result<CriteriaPredicate, ExcelError>
 
             let plain = unquote(s_trim);
 
-            // Wildcards * or ? => TextLike
-            if plain.contains('*') || plain.contains('?') {
+            if has_wildcard(&plain) {
                 return Ok(CriteriaPredicate::TextLike {
                     pattern: plain,
                     case_insensitive: true,
                 });
             }
-            // Booleans TRUE/FALSE
             let lower = plain.to_ascii_lowercase();
             if lower == "true" {
                 return Ok(CriteriaPredicate::Eq(LiteralValue::Boolean(true)));
             } else if lower == "false" {
                 return Ok(CriteriaPredicate::Eq(LiteralValue::Boolean(false)));
             }
-            // Plain text equality
-            Ok(CriteriaPredicate::Eq(LiteralValue::Text(plain)))
+            if let Some(n) = parse_criteria_number(&plain) {
+                return Ok(CriteriaPredicate::Eq(LiteralValue::Number(n)));
+            }
+            Ok(CriteriaPredicate::Eq(LiteralValue::Text(
+                unescape_wildcards(&plain),
+            )))
         }
         LiteralValue::Empty => Ok(CriteriaPredicate::IsBlank),
         LiteralValue::Number(n) => Ok(CriteriaPredicate::Eq(LiteralValue::Number(*n))),
-        // Normalize integer criteria to Number for Excel-style numeric coercions
-        // (e.g. blank == 0, numeric text == number, etc.)
+        // Normalize integer criteria to Number so numeric text cells ("1") match a
+        // numeric criterion the way they do in Excel.
         LiteralValue::Int(i) => Ok(CriteriaPredicate::Eq(LiteralValue::Number(*i as f64))),
         LiteralValue::Boolean(b) => Ok(CriteriaPredicate::Eq(LiteralValue::Boolean(*b))),
         LiteralValue::Error(e) => Err(e.clone()),
@@ -176,6 +235,75 @@ pub fn parse_criteria(v: &LiteralValue) -> Result<CriteriaPredicate, ExcelError>
         }
         other => Ok(CriteriaPredicate::Eq(other.clone())),
     }
+}
+
+/// Number parsing for criteria text: plain numbers, `%` suffix and
+/// thousands-grouped digits (`"1,000"`) — the forms Excel accepts in a
+/// criterion.
+fn parse_criteria_number(s: &str) -> Option<f64> {
+    let loc = crate::locale::Locale::invariant();
+    if let Some(n) = loc.parse_number_invariant(s) {
+        return Some(n);
+    }
+    let t = s.trim();
+    if t.contains(',') {
+        let body = t.strip_prefix('-').unwrap_or(t);
+        let (int_part, frac_part) = match body.split_once('.') {
+            Some((i, f)) => (i, Some(f)),
+            None => (body, None),
+        };
+        let groups: Vec<&str> = int_part.split(',').collect();
+        let grouped_ok = groups.len() > 1
+            && !groups[0].is_empty()
+            && groups[0].len() <= 3
+            && groups[0].chars().all(|c| c.is_ascii_digit())
+            && groups[1..]
+                .iter()
+                .all(|g| g.len() == 3 && g.chars().all(|c| c.is_ascii_digit()))
+            && frac_part.is_none_or(|f| !f.is_empty() && f.chars().all(|c| c.is_ascii_digit()));
+        if grouped_ok {
+            return t.replace(',', "").parse::<f64>().ok();
+        }
+    }
+    None
+}
+
+/// `true` when `s` holds an unescaped `*` or `?` (a `~` escapes the next char).
+pub fn has_wildcard(s: &str) -> bool {
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '~' => {
+                chars.next();
+            }
+            '*' | '?' => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Resolve `~` escapes in a criterion that has no live wildcards (`"a~*c"`
+/// compared as the literal text `a*c`).
+pub fn unescape_wildcards(s: &str) -> String {
+    if !s.contains('~') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '~' {
+            match chars.peek() {
+                Some('*') | Some('?') | Some('~') => {
+                    out.push(chars.next().unwrap());
+                }
+                _ => out.push('~'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 pub fn validate_and_prepare<'a, 'b>(
@@ -219,6 +347,13 @@ pub fn validate_and_prepare<'a, 'b>(
                 );
             }
         };
+
+        // A skipped slot (`INDEX(rng,,2)`) is an omitted argument: leave it to the function's
+        // per-slot default instead of coercing the parser's empty-text marker to `#VALUE!`.
+        if arg.is_skipped() {
+            items.push(PreparedArg::Value(Cow::Owned(LiteralValue::Empty)));
+            continue;
+        }
 
         // By-ref argument: prefer a reference (AST literal or function-returned). Range/array
         // shaped by-ref slots (`FILTER`'s include, `SORT`/`UNIQUE`'s array, …) also accept a

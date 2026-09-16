@@ -44,14 +44,16 @@ fn binary_search_match(slice: &[LiteralValue], needle: &LiteralValue, mode: i32)
         }
         if lo == 0 { None } else { Some(lo - 1) }
     } else {
-        // -1 mode handled via linear fallback since semantics differ (smallest >=)
+        // -1 mode handled via linear fallback since semantics differ: Excel returns the
+        // SMALLEST value that is >= needle (descending data), so compare candidates by value.
         let mut best: Option<usize> = None;
         for (i, v) in slice.iter().enumerate() {
             if let Some(c) = cmp_for_lookup(v, needle) {
                 if c == 0 {
                     return Some(i);
                 }
-                if c >= 0 && best.is_none_or(|b| i < b) {
+                if c > 0 && best.is_none_or(|b| cmp_for_lookup(v, &slice[b]).is_some_and(|o| o < 0))
+                {
                     best = Some(i);
                 }
             }

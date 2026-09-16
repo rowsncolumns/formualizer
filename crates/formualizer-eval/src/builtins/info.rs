@@ -77,10 +77,10 @@ pub struct IsNumberFn;
 /// Variadic: false
 /// Signature: ISNUMBER(arg1: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for IsNumberFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "ISNUMBER"
     }
@@ -157,10 +157,10 @@ pub struct IsTextFn;
 /// Variadic: false
 /// Signature: ISTEXT(arg1: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for IsTextFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "ISTEXT"
     }
@@ -230,10 +230,10 @@ pub struct IsLogicalFn;
 /// Variadic: false
 /// Signature: ISLOGICAL(arg1: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for IsLogicalFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "ISLOGICAL"
     }
@@ -303,10 +303,10 @@ pub struct IsBlankFn;
 /// Variadic: false
 /// Signature: ISBLANK(arg1: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for IsBlankFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "ISBLANK"
     }
@@ -376,10 +376,10 @@ pub struct IsErrorFn; // TRUE for any error (#N/A included)
 /// Variadic: false
 /// Signature: ISERROR(arg1: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for IsErrorFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "ISERROR"
     }
@@ -449,10 +449,10 @@ pub struct IsErrFn; // TRUE for any error except #N/A
 /// Variadic: false
 /// Signature: ISERR(arg1: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for IsErrFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "ISERR"
     }
@@ -526,10 +526,10 @@ pub struct IsNaFn; // TRUE only for #N/A
 /// Variadic: false
 /// Signature: ISNA(arg1: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for IsNaFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "ISNA"
     }
@@ -1368,10 +1368,10 @@ pub struct IsEvenFn;
 /// Variadic: false
 /// Signature: ISEVEN(arg1: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for IsEvenFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "ISEVEN"
     }
@@ -1461,10 +1461,10 @@ pub struct IsOddFn;
 /// Variadic: false
 /// Signature: ISODD(arg1: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for IsOddFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "ISODD"
     }
@@ -1564,10 +1564,10 @@ pub struct ErrorTypeFn;
 /// Variadic: false
 /// Signature: ERROR.TYPE(arg1: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for ErrorTypeFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "ERROR.TYPE"
     }
@@ -1656,7 +1656,7 @@ impl Function for ErrorTypeFn {
 /// Variadic: false
 /// Signature: ISNONTEXT(arg1: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 #[derive(Debug)]
 pub struct IsNonTextFn;
@@ -1671,7 +1671,7 @@ pub struct IsNonTextFn;
 /// Caps: PURE
 /// [formualizer-docgen:schema:end]
 impl Function for IsNonTextFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "ISNONTEXT"
     }
