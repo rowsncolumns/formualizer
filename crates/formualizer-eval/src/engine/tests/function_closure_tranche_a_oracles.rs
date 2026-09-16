@@ -34,7 +34,7 @@ impl Function for ReplacementFn {
 }
 
 #[test]
-#[ignore = "Swatch 0 observation: stale owned alias is corrected by Swatch 1"]
+#[ignore = "Swatch 0 observation; owned aliases are now inherited across replacement (see function_registry tests)"]
 fn baseline_alias_prefix_and_replacement_mismatch_is_observed() {
     function_registry::register_function(Arc::new(ReplacementFn {
         name: "TARGET",

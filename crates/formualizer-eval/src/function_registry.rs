@@ -219,8 +219,18 @@ fn register(function: Arc<dyn Function>, trusted_builtin: bool) -> Result<(), Re
     // trusted or not — always wins, so an explicit `register_function` override of
     // a builtin name survives later `load_builtins()` calls (Engine construction,
     // formula planning, template canonicalization all re-run builtin loading).
-    if trusted_builtin && state.registrations.contains_key(&key) {
-        return Ok(());
+    if trusted_builtin {
+        if let Some(existing) = state.registrations.get(&key) {
+            // The skipped builtin's alias spellings must still resolve (to whatever holds the
+            // name now): a host that registered its override before the builtin library loaded
+            // would otherwise never see the builtin's legacy names. Only vacant slots are filled.
+            let owner_generation = existing.generation;
+            let filled = fill_vacant_aliases(&mut state, &key, owner_generation, &aliases);
+            if !filled.is_empty() {
+                publish_semantic_change(&mut state, filled);
+            }
+            return Ok(());
+        }
     }
     let previous = state
         .registrations
@@ -228,18 +238,17 @@ fn register(function: Arc<dyn Function>, trusted_builtin: bool) -> Result<(), Re
         .map(|entry| (entry.generation, entry.trusted_builtin));
     let mut changed_spellings = Vec::new();
     if let Some((previous_generation, _)) = previous {
-        changed_spellings.extend(
-            state
-                .aliases
-                .iter()
-                .filter(|(_, alias)| {
-                    alias.owner.as_ref() == Some(&(key.clone(), previous_generation))
-                })
-                .map(|(alias_key, _)| alias_key.clone()),
-        );
-        state
-            .aliases
-            .retain(|_, alias| alias.owner.as_ref() != Some(&(key.clone(), previous_generation)));
+        // A replacement inherits every alias the replaced registration owned. The alias already
+        // targets this key; only its owner generation moves, so the spelling keeps resolving (to the
+        // new function) instead of dying silently when a host overrides an aliased builtin without
+        // restating its legacy names (`COVAR` → `COVARIANCE.P`, `POISSON` → `POISSON.DIST`, …).
+        let previous_owner = Some((key.clone(), previous_generation));
+        for (alias_key, alias) in state.aliases.iter_mut() {
+            if alias.owner == previous_owner {
+                alias.owner = Some((key.clone(), generation));
+                changed_spellings.push(alias_key.clone());
+            }
+        }
     }
     state.registrations.insert(
         key.clone(),
@@ -267,6 +276,35 @@ fn register(function: Arc<dyn Function>, trusted_builtin: bool) -> Result<(), Re
     changed_spellings.push(key);
     publish_semantic_change(&mut state, changed_spellings);
     Ok(())
+}
+
+/// Insert `aliases` for `key` where no alias or registration holds the spelling yet, owned by
+/// `key`'s `owner_generation`. Returns the spellings that were added.
+fn fill_vacant_aliases(
+    state: &mut RegistryState,
+    key: &RegistryKey,
+    owner_generation: u64,
+    aliases: &[&str],
+) -> Vec<RegistryKey> {
+    let mut filled = Vec::new();
+    for alias in aliases {
+        if alias.eq_ignore_ascii_case(&key.1) {
+            continue;
+        }
+        let alias_key = (key.0.clone(), norm(alias));
+        if state.aliases.contains_key(&alias_key) || state.registrations.contains_key(&alias_key) {
+            continue;
+        }
+        state.aliases.insert(
+            alias_key.clone(),
+            AliasEntry {
+                target: key.clone(),
+                owner: Some((key.clone(), owner_generation)),
+            },
+        );
+        filled.push(alias_key);
+    }
+    filled
 }
 
 fn failed_resolution(
@@ -1032,6 +1070,36 @@ pub fn snapshot_registered() -> Vec<(String, String, Arc<dyn Function>)> {
         .map(|((ns, name), entry)| (ns.clone(), name.clone(), Arc::clone(&entry.function)))
         .collect()
 }
+
+/// One alias spelling the registry resolves: a `Function::aliases` declaration (inherited across
+/// replacements of its target), a `register_alias` redirect, or a cached Excel-prefix spelling.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegisteredAlias {
+    pub namespace: String,
+    pub alias: String,
+    pub target_namespace: String,
+    pub target_name: String,
+}
+
+/// Every alias spelling currently registered. Together with [`snapshot_registered`] this is the
+/// complete set of names a formula can call without `#NAME?`; hosts use it to probe that overriding
+/// a builtin did not lose any of its legacy spellings.
+pub fn snapshot_aliases() -> Vec<RegisteredAlias> {
+    let state = REGISTRY
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state
+        .aliases
+        .iter()
+        .map(|((namespace, alias), entry)| RegisteredAlias {
+            namespace: namespace.clone(),
+            alias: alias.clone(),
+            target_namespace: entry.target.0.clone(),
+            target_name: entry.target.1.clone(),
+        })
+        .collect()
+}
+
 pub fn snapshot_semantics() -> Vec<ResolvedFunction> {
     let state = REGISTRY
         .read()
@@ -1257,7 +1325,12 @@ mod tests {
             &old_function,
             &snapshot.get_function(ns, "TARGET").unwrap(),
         ));
-        assert!(get(ns, "OLD_ALIAS").is_none());
+        // The live registry re-points the inherited alias at the replacement…
+        assert!(Arc::ptr_eq(
+            &get(ns, "OLD_ALIAS").unwrap(),
+            &current.function
+        ));
+        // …while the captured snapshot still sees the old function under both spellings.
         assert_eq!(
             snapshot
                 .function_semantic_identity(ns, "OLD_ALIAS", 1)
@@ -1534,12 +1607,12 @@ mod tests {
     }
 
     #[test]
-    fn trusted_replacement_records_removed_owned_alias_spelling() {
+    fn replacement_records_inherited_and_new_owned_alias_spellings() {
         let namespace = "__REG_STALE_ALIAS__";
         register_builtin(Arc::new(TestFn {
             ns: namespace,
             name: "TARGET",
-            aliases: &["STALE_OWNED_ALIAS"],
+            aliases: &["INHERITED_OWNED_ALIAS"],
         }));
         let before = semantic_epoch();
         register_function(Arc::new(TestFn {
@@ -1548,16 +1621,132 @@ mod tests {
             aliases: &["NEW_OWNED_ALIAS"],
         }));
         let changes = semantic_changes_since(before);
+        // Both spellings now resolve to the replacement, so both changed meaning.
         assert!(
             changes
                 .keys
-                .contains(&(namespace.to_string(), "STALE_OWNED_ALIAS".to_string()))
+                .contains(&(namespace.to_string(), "INHERITED_OWNED_ALIAS".to_string()))
         );
         assert!(
             changes
                 .keys
                 .contains(&(namespace.to_string(), "NEW_OWNED_ALIAS".to_string()))
         );
+        let replacement = resolve(namespace, "TARGET").unwrap();
+        for spelling in ["INHERITED_OWNED_ALIAS", "NEW_OWNED_ALIAS"] {
+            let resolved = resolve(namespace, spelling).unwrap();
+            assert_eq!(resolved.canonical_name, "TARGET", "{spelling}");
+            assert_eq!(
+                resolved.semantics.generation, replacement.semantics.generation,
+                "{spelling}"
+            );
+            assert!(!resolved.semantics.trusted_builtin, "{spelling}");
+        }
+    }
+
+    /// The rnc-engine host shims re-register aliased builtins (`COVARIANCE.P` owns `COVAR`,
+    /// `POISSON.DIST` owns `POISSON`, `T.INV.2T` owns `TINV`, …) without restating the legacy
+    /// names; those spellings must keep resolving — to the override — instead of `#NAME?`.
+    #[test]
+    fn host_override_of_an_aliased_builtin_keeps_the_builtin_aliases() {
+        let ns = "__REG_HOST_OVERRIDE_ALIAS__";
+        register_builtin(Arc::new(TestFn {
+            ns,
+            name: "POISSON.DIST",
+            aliases: &["POISSON"],
+        }));
+        let builtin = get(ns, "POISSON").unwrap();
+        register_function(Arc::new(TestFn {
+            ns,
+            name: "POISSON.DIST",
+            aliases: &[],
+        }));
+        let shim = get(ns, "POISSON.DIST").unwrap();
+        assert!(!Arc::ptr_eq(&builtin, &shim));
+        let via_alias = resolve(ns, "POISSON").unwrap();
+        assert!(Arc::ptr_eq(&via_alias.function, &shim));
+        assert_eq!(via_alias.canonical_name, "POISSON.DIST");
+        assert!(!via_alias.semantics.trusted_builtin);
+        // A later builtin reload neither clobbers the shim nor the alias's target.
+        register_builtin(Arc::new(TestFn {
+            ns,
+            name: "POISSON.DIST",
+            aliases: &["POISSON"],
+        }));
+        assert!(Arc::ptr_eq(&get(ns, "POISSON").unwrap(), &shim));
+        assert!(snapshot_aliases().contains(&RegisteredAlias {
+            namespace: ns.to_string(),
+            alias: "POISSON".to_string(),
+            target_namespace: ns.to_string(),
+            target_name: "POISSON.DIST".to_string(),
+        }));
+    }
+
+    /// Registration order must not matter: an override registered before the builtin library
+    /// loads still gets the builtin's alias spellings (pointing at the override).
+    #[test]
+    fn override_registered_before_the_builtin_still_gets_its_aliases() {
+        let ns = "__REG_OVERRIDE_FIRST_ALIAS__";
+        register_function(Arc::new(TestFn {
+            ns,
+            name: "T.INV.2T",
+            aliases: &[],
+        }));
+        let shim = get(ns, "T.INV.2T").unwrap();
+        assert!(get(ns, "TINV").is_none());
+        let before = semantic_epoch();
+        register_builtin(Arc::new(TestFn {
+            ns,
+            name: "T.INV.2T",
+            aliases: &["TINV"],
+        }));
+        // The shim survives the builtin registration and now answers to the legacy spelling too.
+        assert!(Arc::ptr_eq(&get(ns, "T.INV.2T").unwrap(), &shim));
+        assert!(Arc::ptr_eq(&get(ns, "TINV").unwrap(), &shim));
+        assert!(!resolve(ns, "TINV").unwrap().semantics.trusted_builtin);
+        assert!(
+            semantic_changes_since(before)
+                .keys
+                .contains(&(ns.to_string(), "TINV".to_string()))
+        );
+        // Re-loading the builtin is a no-op once the alias exists: neither spelling is republished
+        // as changed (other tests bump the global epoch concurrently, so check the keys, not the epoch).
+        let settled = semantic_epoch();
+        register_builtin(Arc::new(TestFn {
+            ns,
+            name: "T.INV.2T",
+            aliases: &["TINV"],
+        }));
+        let republished = semantic_changes_since(settled).keys;
+        for spelling in ["TINV", "T.INV.2T"] {
+            assert!(
+                !republished.contains(&(ns.to_string(), spelling.to_string())),
+                "{spelling} republished by a no-op builtin reload"
+            );
+        }
+    }
+
+    /// A replacement that declares its own aliases keeps the inherited ones as well (union).
+    #[test]
+    fn replacement_aliases_are_the_union_of_inherited_and_declared() {
+        let ns = "__REG_ALIAS_UNION__";
+        register_builtin(Arc::new(TestFn {
+            ns,
+            name: "F.INV.RT",
+            aliases: &["FINV"],
+        }));
+        register_function(Arc::new(TestFn {
+            ns,
+            name: "F.INV.RT",
+            aliases: &["FINV_RT_LEGACY"],
+        }));
+        let shim = get(ns, "F.INV.RT").unwrap();
+        for spelling in ["FINV", "FINV_RT_LEGACY", "_xlfn.FINV"] {
+            assert!(
+                Arc::ptr_eq(&get(ns, spelling).unwrap(), &shim),
+                "{spelling}"
+            );
+        }
     }
 
     #[test]
@@ -1761,7 +1950,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_replacements_leave_only_final_owned_alias() {
+    fn concurrent_replacements_leave_every_owned_alias_on_the_final_function() {
         let ns = "__REG_CONCURRENT__";
         register_function(Arc::new(TestFn {
             ns,
@@ -1785,15 +1974,19 @@ mod tests {
         for worker in workers {
             worker.join().unwrap();
         }
-        register_function(Arc::new(TestFn {
+        let final_function: Arc<dyn Function> = Arc::new(TestFn {
             ns,
             name: "TARGET",
             aliases: &["FINAL"],
-        }));
-        for stale in ["INITIAL", "A", "B", "C", "D"] {
-            assert!(get(ns, stale).is_none());
+        });
+        register_function(Arc::clone(&final_function));
+        // Every alias any replacement ever owned is inherited by — and resolves to — the last one.
+        for spelling in ["INITIAL", "A", "B", "C", "D", "FINAL"] {
+            assert!(
+                Arc::ptr_eq(&get(ns, spelling).unwrap(), &final_function),
+                "{spelling}"
+            );
         }
-        assert!(get(ns, "FINAL").is_some());
     }
 
     #[test]
