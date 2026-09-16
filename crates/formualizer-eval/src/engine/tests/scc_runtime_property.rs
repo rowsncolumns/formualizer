@@ -35,10 +35,9 @@
 //! The generated subset is intentionally narrow (numbers, `+ - *`,
 //! comparisons, `IF`, `NOT`, `SUM` over explicit ranges, boolean/number
 //! guards) so coercion is trivial and the oracle is auditable by eye. No
-//! division or text is generated, so the only errors that can ever surface are
-//! `#CIRC` (the cycle verdict) and the `#VALUE!` the engine's `IF`/`NOT`
-//! produce when an error reaches a *condition* — a documented, pre-#112 error
-//! rule the oracle reproduces faithfully (see the KNOWN ENGINE QUIRK notes) so
+//! division or text is generated, so the only error that can ever surface is
+//! `#CIRC` (the cycle verdict); an error reaching an `IF`/`NOT` *condition*
+//! propagates as itself, exactly like Excel (`IF(#REF!>0,1,0)` is `#REF!`), so
 //! the property stays sharp on cycle classification.
 
 use crate::engine::{CycleConfig, CycleDetection, CyclePolicy, Engine, EvalConfig};

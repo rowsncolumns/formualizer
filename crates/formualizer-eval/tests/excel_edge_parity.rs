@@ -231,6 +231,48 @@ fn choose_array_index_spills_element_wise() {
     assert_num("=SUM(CHOOSE({1,2},A1,A2))", 30.0);
 }
 
+#[test]
+fn choose_array_index_lifts_range_choices() {
+    // A range choice contributes its cells, column-stacked against the index — the
+    // `VLOOKUP(v,CHOOSE({1,2},B:B,A:A),2,0)` "lookup left" idiom.
+    assert_num("=SUM(CHOOSE({1,2},A1:A5,C1:C5))", 166.0);
+    assert_num("=VLOOKUP(\"banana\",CHOOSE({1,2},B1:B5,A1:A5),2,FALSE)", 20.0);
+    let g = eval_grid("=CHOOSE({1,2},A1:A5,C1:C5)", 5, 2);
+    for (i, (a, c)) in [(10.0, 5.0), (20.0, 3.0), (30.0, 5.0), (40.0, 1.0), (50.0, 2.0)]
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(g[i][0], Some(num(*a)), "row {i} col 1");
+        assert_eq!(g[i][1], Some(num(*c)), "row {i} col 2");
+    }
+    // Scalars broadcast alongside ranges; an untaken range choice is never materialized.
+    let m = eval_grid("=CHOOSE({1,2},A1:A5,0)", 5, 2);
+    assert_eq!(m[4][0], Some(num(50.0)));
+    assert_eq!(m[4][1], Some(num(0.0)));
+    assert_num("=SUM(CHOOSE({1,1},A1:A2,1/0))", 60.0);
+}
+
+// ───────────────────────── IF: an error in logical_test propagates ─────────────────────────
+
+#[test]
+fn if_error_condition_propagates_its_own_kind() {
+    assert_err("=IF(#REF!>0,1,0)", ExcelErrorKind::Ref);
+    assert_err("=IF(1/0,1,0)", ExcelErrorKind::Div);
+    assert_err("=IF(#N/A,1,0)", ExcelErrorKind::Na);
+    // A text condition that is not a boolean word is still #VALUE!.
+    assert_err("=IF(\"x\",1,0)", ExcelErrorKind::Value);
+}
+
+// ───────────────────────── Omitted arguments are not empty text ─────────────────────────
+
+#[test]
+fn omitted_argument_is_not_an_empty_text_literal() {
+    // `SUM(x,)` sums (Excel: an omitted numeric argument is 0); a typed `""` is a text argument.
+    assert_num("=SUM(A1:A2,)", 30.0);
+    assert_num("=INDEX(A1:A5,3,)", 30.0);
+    assert_eq!(eval_one("=IF(TRUE,\"\",1)"), text(""));
+}
+
 // ───────────────────────── E-46: 15 significant digits in numeric literals ─────────────────────────
 
 #[test]

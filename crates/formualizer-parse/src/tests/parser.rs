@@ -562,12 +562,14 @@ mod tests {
         if let ASTNodeType::Function { name, args } = &ast.node_type {
             assert_eq!(name, "IFERROR");
             assert_eq!(args.len(), 2);
-            // Second argument should be an empty string
-            if let ASTNodeType::Literal(LiteralValue::Text(text)) = &args[1].node_type {
-                assert_eq!(text, "");
-            } else {
-                panic!("Expected empty text literal for omitted argument");
-            }
+            // The omitted second argument is an `Empty` literal (`IFERROR(x,)` is not `IFERROR(x,"")`).
+            assert!(
+                matches!(
+                    &args[1].node_type,
+                    ASTNodeType::Literal(LiteralValue::Empty)
+                ),
+                "an omitted omitted argument is an Empty literal, not \"\""
+            );
         } else {
             panic!("Expected Function node");
         }
@@ -578,11 +580,13 @@ mod tests {
             assert_eq!(name, "IF");
             assert_eq!(args.len(), 3);
             // Middle argument should be empty
-            if let ASTNodeType::Literal(LiteralValue::Text(text)) = &args[1].node_type {
-                assert_eq!(text, "");
-            } else {
-                panic!("Expected empty text literal for omitted middle argument");
-            }
+            assert!(
+                matches!(
+                    &args[1].node_type,
+                    ASTNodeType::Literal(LiteralValue::Empty)
+                ),
+                "an omitted omitted middle argument is an Empty literal, not \"\""
+            );
         } else {
             panic!("Expected Function node");
         }
@@ -593,16 +597,20 @@ mod tests {
             assert_eq!(name, "IF");
             assert_eq!(args.len(), 3);
             // Both optional arguments should be empty
-            if let ASTNodeType::Literal(LiteralValue::Text(text)) = &args[1].node_type {
-                assert_eq!(text, "");
-            } else {
-                panic!("Expected empty text literal for second argument");
-            }
-            if let ASTNodeType::Literal(LiteralValue::Text(text)) = &args[2].node_type {
-                assert_eq!(text, "");
-            } else {
-                panic!("Expected empty text literal for third argument");
-            }
+            assert!(
+                matches!(
+                    &args[1].node_type,
+                    ASTNodeType::Literal(LiteralValue::Empty)
+                ),
+                "an omitted second argument is an Empty literal, not \"\""
+            );
+            assert!(
+                matches!(
+                    &args[2].node_type,
+                    ASTNodeType::Literal(LiteralValue::Empty)
+                ),
+                "an omitted third argument is an Empty literal, not \"\""
+            );
         } else {
             panic!("Expected Function node");
         }
@@ -613,16 +621,20 @@ mod tests {
             assert_eq!(name, "CHOOSE");
             assert_eq!(args.len(), 6);
             // Check the empty arguments (3rd and 5th)
-            if let ASTNodeType::Literal(LiteralValue::Text(text)) = &args[2].node_type {
-                assert_eq!(text, "");
-            } else {
-                panic!("Expected empty text literal for third argument");
-            }
-            if let ASTNodeType::Literal(LiteralValue::Text(text)) = &args[4].node_type {
-                assert_eq!(text, "");
-            } else {
-                panic!("Expected empty text literal for fifth argument");
-            }
+            assert!(
+                matches!(
+                    &args[2].node_type,
+                    ASTNodeType::Literal(LiteralValue::Empty)
+                ),
+                "an omitted third argument is an Empty literal, not \"\""
+            );
+            assert!(
+                matches!(
+                    &args[4].node_type,
+                    ASTNodeType::Literal(LiteralValue::Empty)
+                ),
+                "an omitted fifth argument is an Empty literal, not \"\""
+            );
         } else {
             panic!("Expected Function node");
         }
