@@ -86,6 +86,15 @@ impl Function for NotFn {
             LiteralValue::Error(e) => {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
             }
+            // Excel coerces the text booleans in a direct argument (`NOT("TRUE")`).
+            LiteralValue::Text(_) => match crate::coercion::to_logical(&v) {
+                Ok(b) => !b,
+                Err(_) => {
+                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                        ExcelError::new_value(),
+                    )));
+                }
+            },
             _ => {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                     ExcelError::new_value(),
@@ -183,6 +192,8 @@ impl Function for XorFn {
                             }
                         }
                         LiteralValue::Empty => {}
+                        // Text inside a reference is ignored, as in Excel.
+                        LiteralValue::Text(_) => {}
                         LiteralValue::Error(_) => {
                             if first_error.is_none() {
                                 err = Some(val.clone());
@@ -203,6 +214,13 @@ impl Function for XorFn {
                 }
             } else {
                 let v = a.value()?.into_literal();
+                let v = match v {
+                    LiteralValue::Text(_) => match crate::coercion::to_logical(&v) {
+                        Ok(b) => LiteralValue::Boolean(b),
+                        Err(_) => LiteralValue::Error(ExcelError::from_error_string("#VALUE!")),
+                    },
+                    v => v,
+                };
                 match v {
                     LiteralValue::Boolean(b) => {
                         if b {

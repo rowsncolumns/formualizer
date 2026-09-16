@@ -1,4 +1,4 @@
-//! Depreciation functions: SLN, SYD, DB, DDB
+//! Depreciation functions: SLN, SYD, DB, DDB, VDB
 
 use crate::args::ArgSchema;
 use crate::function::Function;
@@ -288,48 +288,47 @@ impl Function for DbFn {
             ));
         }
 
-        let life_int = life.trunc() as i32;
         let period_int = period.trunc() as i32;
 
-        if period_int < 1 || period_int > life_int + 1 {
+        if period_int < 1 || period > life + 1.0 {
             return Ok(CalcValue::Scalar(
                 LiteralValue::Error(ExcelError::new_num()),
             ));
         }
 
-        // Calculate rate (rounded to 3 decimal places)
-        let rate = if cost <= 0.0 || salvage <= 0.0 {
-            1.0
-        } else {
-            let r = 1.0 - (salvage / cost).powf(1.0 / life);
-            (r * 1000.0).round() / 1000.0
-        };
-
-        let mut total_depreciation = 0.0;
-        let value = cost;
-
-        for p in 1..=period_int {
-            let depreciation = if p == 1 {
-                // First period: prorated
-                value * rate * month / 12.0
-            } else if p == life_int + 1 {
-                // Last period (if partial year): remaining value minus salvage
-                (value - total_depreciation - salvage)
-                    .max(0.0)
-                    .min(value - total_depreciation)
-            } else {
-                (value - total_depreciation) * rate
-            };
-
-            if p == period_int {
-                return Ok(CalcValue::Scalar(LiteralValue::Number(depreciation)));
-            }
-
-            total_depreciation += depreciation;
-        }
-
-        Ok(CalcValue::Scalar(LiteralValue::Number(0.0)))
+        Ok(CalcValue::Scalar(LiteralValue::Number(db_depreciation(
+            cost, salvage, life, period_int, month,
+        ))))
     }
+}
+
+/// Excel's fixed-declining-balance schedule. The rate is rounded to three decimals, the first
+/// period is prorated by `month`, and when `month` < 12 the schedule runs one period past `life`
+/// for the remaining `12 - month` months: `(cost - accumulated) * rate * (12 - month) / 12`.
+fn db_depreciation(cost: f64, salvage: f64, life: f64, period: i32, month: f64) -> f64 {
+    let rate = if cost <= 0.0 || salvage <= 0.0 {
+        1.0
+    } else {
+        let r = 1.0 - (salvage / cost).powf(1.0 / life);
+        (r * 1000.0).round() / 1000.0
+    };
+
+    let first = cost * rate * month / 12.0;
+    if period == 1 {
+        return first;
+    }
+
+    let mut accumulated = first;
+    let mut depreciation = 0.0;
+    let last_full = life.min(period as f64).floor() as i32;
+    for _ in 2..=last_full {
+        depreciation = (cost - accumulated) * rate;
+        accumulated += depreciation;
+    }
+    if period as f64 > life {
+        depreciation = (cost - accumulated) * rate * (12.0 - month) / 12.0;
+    }
+    depreciation
 }
 
 /// Returns declining-balance depreciation for a period using a configurable acceleration factor.
@@ -459,10 +458,194 @@ impl Function for DdbFn {
     }
 }
 
+/// The declining-balance charge for a single whole `period` (1-based) at `factor / life`,
+/// clamped so the book value never drops below `salvage`. Shared by `VDB`.
+fn ddb_period(cost: f64, salvage: f64, life: f64, period: f64, factor: f64) -> f64 {
+    let mut rate = factor / life;
+    let old_value;
+    if rate >= 1.0 {
+        rate = 1.0;
+        old_value = if period == 1.0 { cost } else { 0.0 };
+    } else {
+        old_value = cost * (1.0 - rate).powf(period - 1.0);
+    }
+    let new_value = cost * (1.0 - rate).powf(period);
+    let ddb = if new_value < salvage {
+        old_value - salvage
+    } else {
+        old_value - new_value
+    };
+    ddb.max(0.0)
+}
+
+/// Declining-balance depreciation over the first `period` periods (fractional end allowed) of an
+/// asset whose remaining life is `life1`, switching to straight-line for the rest of the life once
+/// the straight-line charge on the remaining depreciable value exceeds the declining-balance one.
+fn vdb_switching(cost: f64, salvage: f64, life: f64, life1: f64, period: f64, factor: f64) -> f64 {
+    let int_end = period.ceil();
+    let loop_end = int_end as i64;
+    let mut remaining = cost - salvage;
+    let mut sln = 0.0;
+    let mut now_sln = false;
+    let mut total = 0.0;
+    for i in 1..=loop_end {
+        let mut term;
+        if !now_sln {
+            let ddb = ddb_period(cost, salvage, life, i as f64, factor);
+            sln = remaining / (life1 - (i - 1) as f64);
+            if sln > ddb {
+                term = sln;
+                now_sln = true;
+            } else {
+                term = ddb;
+                remaining -= ddb;
+            }
+        } else {
+            term = sln;
+        }
+        if i == loop_end {
+            term *= period + 1.0 - int_end;
+        }
+        total += term;
+    }
+    total
+}
+
+/// `VDB(cost, salvage, life, start_period, end_period, [factor], [no_switch])` — depreciation
+/// between two (possibly fractional) periods using the variable declining-balance method: the
+/// declining-balance charge at `factor / life`, switching to straight-line when that yields more
+/// unless `no_switch` is TRUE. Excel: `VDB(2400,300,10,0,1)` = 480, `VDB(2400,300,10,0,0.875,1.5)` = 315.
+#[derive(Debug)]
+pub struct VdbFn;
+impl Function for VdbFn {
+    func_caps!(PURE);
+    fn name(&self) -> &'static str {
+        "VDB"
+    }
+    fn min_args(&self) -> usize {
+        5
+    }
+    fn variadic(&self) -> bool {
+        true
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        use std::sync::LazyLock;
+        static SCHEMA: LazyLock<Vec<ArgSchema>> = LazyLock::new(|| {
+            vec![
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+            ]
+        });
+        &SCHEMA[..]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        _ctx: &dyn FunctionContext<'b>,
+    ) -> Result<CalcValue<'b>, ExcelError> {
+        let cost = coerce_num(&args[0])?;
+        let salvage = coerce_num(&args[1])?;
+        let life = coerce_num(&args[2])?;
+        let start = coerce_num(&args[3])?;
+        let end = coerce_num(&args[4])?;
+        let factor = if args.len() > 5 {
+            coerce_num(&args[5])?
+        } else {
+            2.0
+        };
+        let no_switch = if args.len() > 6 {
+            coerce_num(&args[6])? != 0.0
+        } else {
+            false
+        };
+
+        if cost < 0.0
+            || salvage < 0.0
+            || salvage > cost
+            || life <= 0.0
+            || start < 0.0
+            || end < start
+            || end > life
+            || factor <= 0.0
+        {
+            return Ok(CalcValue::Scalar(
+                LiteralValue::Error(ExcelError::new_num()),
+            ));
+        }
+
+        let int_start = start.floor();
+        let int_end = end.ceil();
+
+        let vdb = if no_switch {
+            let mut total = 0.0;
+            let loop_start = int_start as i64;
+            let loop_end = int_end as i64;
+            for i in (loop_start + 1)..=loop_end {
+                let mut term = ddb_period(cost, salvage, life, i as f64, factor);
+                if i == loop_start + 1 {
+                    term *= end.min(int_start + 1.0) - start;
+                } else if i == loop_end {
+                    term *= end + 1.0 - int_end;
+                }
+                total += term;
+            }
+            total
+        } else {
+            // Fractional start / end: depreciate the whole periods that bracket the window and
+            // subtract the slices outside it, each slice priced off the book value at its period.
+            let mut part = 0.0;
+            if start != int_start {
+                let temp_int_end = int_start + 1.0;
+                let temp_cost = cost - vdb_switching(cost, salvage, life, life, int_start, factor);
+                part += (start - int_start)
+                    * vdb_switching(
+                        temp_cost,
+                        salvage,
+                        life,
+                        life - int_start,
+                        temp_int_end - int_start,
+                        factor,
+                    );
+            }
+            if end != int_end {
+                let temp_int_start = int_end - 1.0;
+                let temp_cost =
+                    cost - vdb_switching(cost, salvage, life, life, temp_int_start, factor);
+                part += (int_end - end)
+                    * vdb_switching(
+                        temp_cost,
+                        salvage,
+                        life,
+                        life - temp_int_start,
+                        int_end - temp_int_start,
+                        factor,
+                    );
+            }
+            let cost_at_start = cost - vdb_switching(cost, salvage, life, life, int_start, factor);
+            vdb_switching(
+                cost_at_start,
+                salvage,
+                life,
+                life - int_start,
+                int_end - int_start,
+                factor,
+            ) - part
+        };
+
+        Ok(CalcValue::Scalar(LiteralValue::Number(vdb)))
+    }
+}
+
 pub fn register_builtins() {
     use std::sync::Arc;
     crate::function_registry::register_builtin(Arc::new(SlnFn));
     crate::function_registry::register_builtin(Arc::new(SydFn));
     crate::function_registry::register_builtin(Arc::new(DbFn));
     crate::function_registry::register_builtin(Arc::new(DdbFn));
+    crate::function_registry::register_builtin(Arc::new(VdbFn));
 }
