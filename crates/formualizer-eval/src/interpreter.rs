@@ -18,6 +18,9 @@ use crate::formula_plane::template_canonical::LiteralSlotId;
 pub enum LocalBinding {
     Value(LiteralValue),
     Callable(Arc<dyn crate::traits::CustomCallable>),
+    /// An optional `LAMBDA` parameter (`[name]`) the caller did not supply.
+    /// `ISOMITTED(name)` reports it; reading it as a value is `#VALUE!`.
+    Omitted,
 }
 
 #[derive(Clone, Default)]
@@ -179,7 +182,7 @@ impl<'a> Interpreter<'a> {
         )?))
     }
 
-    fn resolve_local_reference(
+    pub(crate) fn resolve_local_reference(
         &self,
         reference: &ReferenceType,
     ) -> Option<crate::traits::CalcValue<'a>> {
@@ -193,6 +196,10 @@ impl<'a> Interpreter<'a> {
         match self.local_env.lookup(name)? {
             LocalBinding::Value(v) => Some(crate::traits::CalcValue::Scalar(v)),
             LocalBinding::Callable(c) => Some(crate::traits::CalcValue::Callable(c)),
+            LocalBinding::Omitted => Some(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new(ExcelErrorKind::Value)
+                    .with_message(format!("LAMBDA parameter {name} was omitted")),
+            ))),
         }
     }
 
@@ -202,7 +209,7 @@ impl<'a> Interpreter<'a> {
         }
         match self.local_env.lookup(name)? {
             LocalBinding::Callable(c) => Some(c),
-            LocalBinding::Value(_) => None,
+            LocalBinding::Value(_) | LocalBinding::Omitted => None,
         }
     }
 
@@ -775,8 +782,7 @@ impl<'a> Interpreter<'a> {
                 .eval_binary(op, left, right)
                 .map(crate::traits::CalcValue::Scalar),
             ASTNodeType::Function { name, args } => self.eval_function_to_calc(name, args),
-            ASTNodeType::Call { .. } => Err(ExcelError::new(ExcelErrorKind::NImpl)
-                .with_message("Immediate-invocation calls are not yet supported")),
+            ASTNodeType::Call { callee, args } => self.eval_call_to_calc(callee, args),
             ASTNodeType::Array(rows) => self.eval_array_literal_to_calc(rows),
         }
     }
@@ -839,8 +845,7 @@ impl<'a> Interpreter<'a> {
                 }
                 self.eval_function_to_calc(name, args)
             }
-            ASTNodeType::Call { .. } => Err(ExcelError::new(ExcelErrorKind::NImpl)
-                .with_message("Immediate-invocation calls are not yet supported")),
+            ASTNodeType::Call { callee, args } => self.eval_call_to_calc(callee, args),
             ASTNodeType::Array(rows) => self.eval_array_literal_to_calc(rows),
         }
     }
@@ -1258,6 +1263,33 @@ impl<'a> Interpreter<'a> {
     }
 
     /* ===================  function calls  =================== */
+    /// Immediate invocation of a callable expression: `LAMBDA(x,x*2)(3)` or
+    /// `LET(f,LAMBDA(x,x+1),f)(41)`. The callee must evaluate to a `LAMBDA`
+    /// value; arguments are evaluated eagerly (ranges arrive as arrays).
+    pub(crate) fn eval_call_to_calc(
+        &self,
+        callee: &ASTNode,
+        args: &[ASTNode],
+    ) -> Result<crate::traits::CalcValue<'a>, ExcelError> {
+        let callable = match self.evaluate_ast(callee)? {
+            crate::traits::CalcValue::Callable(c) => c,
+            crate::traits::CalcValue::Scalar(LiteralValue::Error(e)) => {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+            }
+            _ => {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                    ExcelError::new(ExcelErrorKind::Value)
+                        .with_message("Only a LAMBDA value can be invoked"),
+                )));
+            }
+        };
+        let mut eval_args = Vec::with_capacity(args.len());
+        for arg in args {
+            eval_args.push(self.evaluate_ast(arg)?.into_literal());
+        }
+        callable.invoke(self, &eval_args)
+    }
+
     fn eval_function_to_calc(
         &self,
         name: &str,

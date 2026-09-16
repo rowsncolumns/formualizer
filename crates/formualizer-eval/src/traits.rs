@@ -524,6 +524,9 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
             ArgumentExpr::Ast(node) => match &node.node_type {
                 ASTNodeType::Reference { reference, .. } => {
                     let reference = self.interp.reference_for_current_offset(reference)?;
+                    if let Some(view) = self.local_range_view(&reference)? {
+                        return Ok(view);
+                    }
                     self.interp
                         .context
                         .resolve_range_view(&reference, self.interp.current_sheet())
@@ -575,6 +578,9 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 match node {
                     crate::engine::arena::AstNodeData::Reference { .. } => {
                         let reference = self.reference_for_eval()?;
+                        if let Some(view) = self.local_range_view(&reference)? {
+                            return Ok(view);
+                        }
                         self.interp
                             .context
                             .resolve_range_view(&reference, self.interp.current_sheet())
@@ -640,6 +646,45 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 }
             }
         }
+    }
+
+    /// A `LET` / `LAMBDA` local bound to an array (`LET(a,F1:F3,SUM(a))`,
+    /// `BYROW(rng,LAMBDA(r,SUM(r)))`) is not a workbook name: expose the bound
+    /// value as an owned view instead of asking the workbook to resolve it.
+    fn local_range_view(
+        &self,
+        reference: &ReferenceType,
+    ) -> Result<Option<RangeView<'b>>, ExcelError> {
+        let Some(local) = self.interp.resolve_local_reference(reference) else {
+            return Ok(None);
+        };
+        let ds = self.interp.context.date_system();
+        let token = self.interp.context.cancellation_token();
+        Ok(Some(match local {
+            crate::traits::CalcValue::Range(rv) => rv,
+            crate::traits::CalcValue::Scalar(LiteralValue::Array(rows)) => {
+                RangeView::from_owned_rows(rows, ds).with_cancel_token(token)
+            }
+            crate::traits::CalcValue::Scalar(LiteralValue::Error(e)) => return Err(e),
+            crate::traits::CalcValue::Scalar(v) => {
+                RangeView::from_owned_rows(vec![vec![v]], ds).with_cancel_token(token)
+            }
+            crate::traits::CalcValue::Callable(_) => {
+                return Err(ExcelError::new(ExcelErrorKind::Calc)
+                    .with_message("LAMBDA value must be invoked"));
+            }
+        }))
+    }
+
+    /// Invoke a `LAMBDA` value from inside a function body (`MAP`, `REDUCE`,
+    /// immediate calls): the closure needs the interpreter this argument was
+    /// created under so its captured environment and cell context line up.
+    pub fn invoke_callable(
+        &self,
+        callable: &Arc<dyn CustomCallable>,
+        args: &[LiteralValue],
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        callable.invoke(self.interp, args)
     }
 
     /// Evaluate this argument and expose the result as a `RangeView`: computed arrays (`B1:B4>0`,
