@@ -2455,7 +2455,9 @@ impl Parser {
             "," => Some((8, Associativity::Left)),
             "%" => Some((7, Associativity::Left)),
             "u" => Some((6, Associativity::Right)),
-            "^" => Some((5, Associativity::Right)),
+            // Excel evaluates `2^3^2` as `(2^3)^2` = 64 — left-associative,
+            // unlike most languages.
+            "^" => Some((5, Associativity::Left)),
             "*" | "/" => Some((4, Associativity::Left)),
             "+" | "-" => Some((3, Associativity::Left)),
             "&" => Some((2, Associativity::Left)),

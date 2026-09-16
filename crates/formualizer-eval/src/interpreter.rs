@@ -1542,23 +1542,49 @@ impl<'a> Interpreter<'a> {
             (Array(arr), v) => self.broadcast_apply(Array(arr), v, |a, b| self.compare(op, a, b)),
             (v, Array(arr)) => self.broadcast_apply(v, Array(arr), |a, b| self.compare(op, a, b)),
             (l, r) => {
-                let res = match (l, r) {
-                    (Number(a), Number(b)) => self.cmp_f64(a, b, op),
-                    (Int(a), Number(b)) => self.cmp_f64(a as f64, b, op),
-                    (Number(a), Int(b)) => self.cmp_f64(a, b as f64, op),
-                    (Boolean(a), Boolean(b)) => {
-                        self.cmp_f64(if a { 1.0 } else { 0.0 }, if b { 1.0 } else { 0.0 }, op)
+                // Excel never coerces across types in a comparison: a blank
+                // takes the counterpart's type (0 / "" / FALSE), same-type
+                // values compare by value, and mixed types compare by rank
+                // (numbers < text < booleans) so `="1"=1` and `=TRUE=1` are
+                // FALSE while `=TRUE>"z"` and `="a">1` are TRUE.
+                let (l, r) = match (l, r) {
+                    (Empty, Empty) => (Int(0), Int(0)),
+                    (Empty, r) => (Self::blank_as(&r), r),
+                    (l, Empty) => {
+                        let blank = Self::blank_as(&l);
+                        (l, blank)
                     }
-                    (Text(a), Text(b)) => self.cmp_text(&a, &b, op),
-                    (a, b) => {
-                        // fallback to numeric coercion or text compare
+                    pair => pair,
+                };
+                let res = match (Self::compare_rank(&l), Self::compare_rank(&r)) {
+                    (Some(1), Some(1)) => {
+                        let a = crate::coercion::to_number_strict(&l)?;
+                        let b = crate::coercion::to_number_strict(&r)?;
+                        self.cmp_f64(a, b, op)
+                    }
+                    (Some(2), Some(2)) => match (&l, &r) {
+                        (Text(a), Text(b)) => self.cmp_text(a, b, op),
+                        _ => unreachable!(),
+                    },
+                    (Some(3), Some(3)) => match (&l, &r) {
+                        (Boolean(a), Boolean(b)) => self.cmp_f64(
+                            if *a { 1.0 } else { 0.0 },
+                            if *b { 1.0 } else { 0.0 },
+                            op,
+                        ),
+                        _ => unreachable!(),
+                    },
+                    (Some(ra), Some(rb)) => self.cmp_f64(ra as f64, rb as f64, op),
+                    _ => {
+                        // Pending / other placeholders: keep the lenient
+                        // numeric-then-text fallback.
                         let an = crate::coercion::to_number_lenient_with_locale(
-                            &a,
+                            &l,
                             &self.context.locale(),
                         )
                         .ok();
                         let bn = crate::coercion::to_number_lenient_with_locale(
-                            &b,
+                            &r,
                             &self.context.locale(),
                         )
                         .ok();
@@ -1566,8 +1592,8 @@ impl<'a> Interpreter<'a> {
                             self.cmp_f64(a, b, op)
                         } else {
                             self.cmp_text(
-                                &crate::coercion::to_text_invariant(&a),
-                                &crate::coercion::to_text_invariant(&b),
+                                &crate::coercion::to_text_invariant(&l),
+                                &crate::coercion::to_text_invariant(&r),
                                 op,
                             )
                         }
@@ -1575,6 +1601,29 @@ impl<'a> Interpreter<'a> {
                 };
                 Ok(LiteralValue::Boolean(res))
             }
+        }
+    }
+
+    /// Excel's comparison type rank: numbers (incl. date/time serials) 1,
+    /// text 2, booleans 3. `None` for values that have no Excel rank.
+    fn compare_rank(v: &LiteralValue) -> Option<u8> {
+        use LiteralValue::*;
+        match v {
+            Int(_) | Number(_) | Date(_) | DateTime(_) | Time(_) | Duration(_) => Some(1),
+            Text(_) => Some(2),
+            Boolean(_) => Some(3),
+            _ => None,
+        }
+    }
+
+    /// The value a blank cell compares as against `counterpart` (Excel: 0
+    /// against numbers, "" against text, FALSE against booleans).
+    fn blank_as(counterpart: &LiteralValue) -> LiteralValue {
+        use LiteralValue::*;
+        match counterpart {
+            Text(_) => Text(String::new()),
+            Boolean(_) => Boolean(false),
+            _ => Int(0),
         }
     }
 

@@ -25,7 +25,7 @@ fn infix_info(op: &str) -> (u8, Associativity) {
         ":" => (10, Associativity::Left),
         " " => (9, Associativity::Left),
         "," => (8, Associativity::Left),
-        "^" => (5, Associativity::Right),
+        "^" => (5, Associativity::Left),
         "*" | "/" => (4, Associativity::Left),
         "+" | "-" => (3, Associativity::Left),
         "&" => (2, Associativity::Left),
@@ -83,8 +83,9 @@ fn child_needs_parens(
                         return true;
                     }
 
-                    // Even with same op, some operators are not associative.
-                    if parent_op == "-" || parent_op == "/" {
+                    // Even with same op, some operators are not associative
+                    // (`^` groups left in Excel, so `2^(3^2)` needs its parens).
+                    if parent_op == "-" || parent_op == "/" || parent_op == "^" {
                         return true;
                     }
                 }
@@ -283,6 +284,19 @@ mod tests {
         let formula = "=a1 + b2 *     3";
         let pretty = pretty_parse_render(formula).unwrap();
         assert_eq!(pretty, "=A1 + B2 * 3");
+    }
+
+    #[test]
+    fn test_pretty_print_exponent_is_left_associative() {
+        // Excel groups =2^3^2 as (2^3)^2, so no parentheses are needed…
+        let pretty = pretty_parse_render("=2^3^2").unwrap();
+        assert_eq!(pretty, "=2 ^ 3 ^ 2");
+        assert_eq!(pretty_parse_render(&pretty).unwrap(), pretty);
+
+        // …while an explicit right grouping must keep its parentheses.
+        let pretty = pretty_parse_render("=2^(3^2)").unwrap();
+        assert_eq!(pretty, "=2 ^ (3 ^ 2)");
+        assert_eq!(pretty_parse_render(&pretty).unwrap(), pretty);
     }
 
     #[test]
