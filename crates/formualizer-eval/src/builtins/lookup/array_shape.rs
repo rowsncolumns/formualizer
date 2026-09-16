@@ -1,4 +1,4 @@
-//! Dynamic array shape helpers: TOCOL and TOROW.
+//! Dynamic array shape helpers: TOCOL, TOROW, WRAPROWS, WRAPCOLS and EXPAND.
 
 use super::super::utils::collapse_if_scalar;
 use crate::args::{ArgSchema, CoercionPolicy, ShapeKind};
@@ -279,12 +279,357 @@ impl Function for ToRowFn {
     }
 }
 
+/* ───────────────────────── WRAPROWS / WRAPCOLS / EXPAND ───────────────────────── */
+
+#[derive(Debug)]
+pub struct WrapRowsFn;
+#[derive(Debug)]
+pub struct WrapColsFn;
+#[derive(Debug)]
+pub struct ExpandFn;
+
+fn wrap_schema() -> &'static [ArgSchema] {
+    use once_cell::sync::Lazy;
+    static SCHEMA: Lazy<Vec<ArgSchema>> = Lazy::new(|| {
+        vec![
+            // vector
+            ArgSchema {
+                kinds: smallvec::smallvec![ArgKind::Range, ArgKind::Any],
+                required: true,
+                by_ref: false,
+                shape: ShapeKind::Range,
+                coercion: CoercionPolicy::None,
+                max: None,
+                repeating: None,
+                default: None,
+            },
+            // wrap_count
+            ArgSchema {
+                kinds: smallvec::smallvec![ArgKind::Number],
+                required: true,
+                by_ref: false,
+                shape: ShapeKind::Scalar,
+                coercion: CoercionPolicy::NumberLenientText,
+                max: None,
+                repeating: None,
+                default: None,
+            },
+            // pad_with
+            ArgSchema {
+                kinds: smallvec::smallvec![ArgKind::Any],
+                required: false,
+                by_ref: false,
+                shape: ShapeKind::Scalar,
+                coercion: CoercionPolicy::None,
+                max: None,
+                repeating: None,
+                default: None,
+            },
+        ]
+    });
+    &SCHEMA
+}
+
+fn expand_schema() -> &'static [ArgSchema] {
+    use once_cell::sync::Lazy;
+    static SCHEMA: Lazy<Vec<ArgSchema>> = Lazy::new(|| {
+        vec![
+            // array
+            ArgSchema {
+                kinds: smallvec::smallvec![ArgKind::Range, ArgKind::Any],
+                required: true,
+                by_ref: false,
+                shape: ShapeKind::Range,
+                coercion: CoercionPolicy::None,
+                max: None,
+                repeating: None,
+                default: None,
+            },
+            // rows
+            ArgSchema {
+                kinds: smallvec::smallvec![ArgKind::Number, ArgKind::Any],
+                required: true,
+                by_ref: false,
+                shape: ShapeKind::Scalar,
+                coercion: CoercionPolicy::None,
+                max: None,
+                repeating: None,
+                default: None,
+            },
+            // columns
+            ArgSchema {
+                kinds: smallvec::smallvec![ArgKind::Number, ArgKind::Any],
+                required: false,
+                by_ref: false,
+                shape: ShapeKind::Scalar,
+                coercion: CoercionPolicy::None,
+                max: None,
+                repeating: None,
+                default: None,
+            },
+            // pad_with
+            ArgSchema {
+                kinds: smallvec::smallvec![ArgKind::Any],
+                required: false,
+                by_ref: false,
+                shape: ShapeKind::Scalar,
+                coercion: CoercionPolicy::None,
+                max: None,
+                repeating: None,
+                default: None,
+            },
+        ]
+    });
+    &SCHEMA
+}
+
+/// Excel pads WRAPROWS/WRAPCOLS/EXPAND/VSTACK/HSTACK with `#N/A` unless `pad_with` is given.
+pub(crate) fn na_pad() -> LiteralValue {
+    LiteralValue::Error(ExcelError::new(ExcelErrorKind::Na))
+}
+
+/// `pad_with` argument: omitted or blank → `#N/A`; an error is an error value, not a failure.
+fn pad_value<'b>(args: &[ArgumentHandle<'_, 'b>], idx: usize) -> Result<LiteralValue, ExcelError> {
+    if args.len() <= idx {
+        return Ok(na_pad());
+    }
+    Ok(match args[idx].value()?.into_literal() {
+        LiteralValue::Empty => na_pad(),
+        v => v,
+    })
+}
+
+/// Optional whole-number argument; `None` when omitted or blank.
+fn opt_count<'b>(args: &[ArgumentHandle<'_, 'b>], idx: usize) -> Result<Option<i64>, ExcelError> {
+    if args.len() <= idx {
+        return Ok(None);
+    }
+    Ok(match args[idx].value()?.into_literal() {
+        LiteralValue::Empty => None,
+        LiteralValue::Int(i) => Some(i),
+        LiteralValue::Number(n) => Some(n.trunc() as i64),
+        LiteralValue::Error(e) => return Err(e),
+        other => Some(crate::coercion::to_number_lenient(&other)?.trunc() as i64),
+    })
+}
+
+/// The one-dimensional input WRAPROWS/WRAPCOLS accept; a 2-D array is `#VALUE!` as in Excel.
+fn wrap_vector<'b>(arg: &ArgumentHandle<'_, 'b>) -> Result<Vec<LiteralValue>, ExcelError> {
+    let data = materialize_arg(arg)?;
+    let rows = data.len();
+    let cols = data.iter().map(Vec::len).max().unwrap_or(0);
+    if rows > 1 && cols > 1 {
+        return Err(ExcelError::new(ExcelErrorKind::Value)
+            .with_message("WRAPROWS/WRAPCOLS require a one-dimensional vector"));
+    }
+    Ok(data.into_iter().flatten().collect())
+}
+
+fn wrap_count<'b>(arg: &ArgumentHandle<'_, 'b>) -> Result<usize, ExcelError> {
+    match opt_count(std::slice::from_ref(arg), 0)? {
+        Some(n) if n >= 1 => Ok(n as usize),
+        _ => {
+            Err(ExcelError::new(ExcelErrorKind::Num).with_message("wrap_count must be at least 1"))
+        }
+    }
+}
+
+/// Lays a vector out row by row, `wrap_count` values per row.
+///
+/// # Remarks
+/// - The last row is padded with `pad_with` (default `#N/A`) so the result stays rectangular.
+/// - `wrap_count < 1` returns `#NUM!`; a two-dimensional `vector` returns `#VALUE!`.
+///
+/// ```yaml,sandbox
+/// title: "Wrap five values into rows of two"
+/// formula: "=WRAPROWS({1,2,3,4,5},2)"
+/// expected: [[1,2],[3,4],[5,"#N/A"]]
+/// ```
+///
+/// ```yaml,sandbox
+/// title: "Custom pad value"
+/// formula: "=WRAPROWS({1,2,3,4,5},2,0)"
+/// expected: [[1,2],[3,4],[5,0]]
+/// ```
+/// [formualizer-docgen:schema:start]
+/// Name: WRAPROWS
+/// Type: WrapRowsFn
+/// Min args: 2
+/// Max args: 3
+/// Variadic: false
+/// Signature: WRAPROWS(arg1: range|any@range, arg2: number@scalar, arg3?: any@scalar)
+/// Arg schema: arg1{kinds=range|any,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg3{kinds=any,required=false,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
+/// Caps: PURE
+/// [formualizer-docgen:schema:end]
+impl Function for WrapRowsFn {
+    func_caps!(PURE, MAY_SPILL);
+    fn name(&self) -> &'static str {
+        "WRAPROWS"
+    }
+    fn min_args(&self) -> usize {
+        2
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        wrap_schema()
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        let run = || -> Result<Vec<Vec<LiteralValue>>, ExcelError> {
+            let flat = wrap_vector(&args[0])?;
+            let width = wrap_count(&args[1])?;
+            let pad = pad_value(args, 2)?;
+            let mut out: Vec<Vec<LiteralValue>> = Vec::new();
+            for chunk in flat.chunks(width) {
+                let mut row = chunk.to_vec();
+                row.resize(width, pad.clone());
+                out.push(row);
+            }
+            if out.is_empty() {
+                out.push(vec![pad]);
+            }
+            Ok(out)
+        };
+        match run() {
+            Ok(rows) => Ok(collapse_if_scalar(rows, ctx.date_system())),
+            Err(e) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
+        }
+    }
+}
+
+/// Lays a vector out column by column, `wrap_count` values per column.
+///
+/// # Remarks
+/// - The last column is padded with `pad_with` (default `#N/A`).
+/// - `wrap_count < 1` returns `#NUM!`; a two-dimensional `vector` returns `#VALUE!`.
+///
+/// ```yaml,sandbox
+/// title: "Wrap five values into columns of two"
+/// formula: "=WRAPCOLS({1,2,3,4,5},2)"
+/// expected: [[1,3,5],[2,4,"#N/A"]]
+/// ```
+/// [formualizer-docgen:schema:start]
+/// Name: WRAPCOLS
+/// Type: WrapColsFn
+/// Min args: 2
+/// Max args: 3
+/// Variadic: false
+/// Signature: WRAPCOLS(arg1: range|any@range, arg2: number@scalar, arg3?: any@scalar)
+/// Arg schema: arg1{kinds=range|any,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg3{kinds=any,required=false,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
+/// Caps: PURE
+/// [formualizer-docgen:schema:end]
+impl Function for WrapColsFn {
+    func_caps!(PURE, MAY_SPILL);
+    fn name(&self) -> &'static str {
+        "WRAPCOLS"
+    }
+    fn min_args(&self) -> usize {
+        2
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        wrap_schema()
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        let run = || -> Result<Vec<Vec<LiteralValue>>, ExcelError> {
+            let flat = wrap_vector(&args[0])?;
+            let height = wrap_count(&args[1])?;
+            let pad = pad_value(args, 2)?;
+            if flat.is_empty() {
+                return Ok(vec![vec![pad]]);
+            }
+            let cols = flat.len().div_ceil(height);
+            let mut out = vec![vec![pad; cols]; height];
+            for (i, v) in flat.into_iter().enumerate() {
+                out[i % height][i / height] = v;
+            }
+            Ok(out)
+        };
+        match run() {
+            Ok(rows) => Ok(collapse_if_scalar(rows, ctx.date_system())),
+            Err(e) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
+        }
+    }
+}
+
+/// Expands an array to the given row and column counts, padding new cells.
+///
+/// # Remarks
+/// - Omitted or blank `rows` / `columns` keep the current size.
+/// - Sizes smaller than the source return `#VALUE!`.
+/// - New cells hold `pad_with` (default `#N/A`).
+///
+/// ```yaml,sandbox
+/// title: "Expand a 2x2 array to 3x3 with zeros"
+/// formula: "=EXPAND({1,4;2,5},3,3,0)"
+/// expected: [[1,4,0],[2,5,0],[0,0,0]]
+/// ```
+/// [formualizer-docgen:schema:start]
+/// Name: EXPAND
+/// Type: ExpandFn
+/// Min args: 2
+/// Max args: 4
+/// Variadic: false
+/// Signature: EXPAND(arg1: range|any@range, arg2: number|any@scalar, arg3?: number|any@scalar, arg4?: any@scalar)
+/// Arg schema: arg1{kinds=range|any,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=number|any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg3{kinds=number|any,required=false,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}; arg4{kinds=any,required=false,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
+/// Caps: PURE
+/// [formualizer-docgen:schema:end]
+impl Function for ExpandFn {
+    func_caps!(PURE, MAY_SPILL);
+    fn name(&self) -> &'static str {
+        "EXPAND"
+    }
+    fn min_args(&self) -> usize {
+        2
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        expand_schema()
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        let run = || -> Result<Vec<Vec<LiteralValue>>, ExcelError> {
+            let data = materialize_arg(&args[0])?;
+            let src_rows = data.len().max(1);
+            let src_cols = data.iter().map(Vec::len).max().unwrap_or(0).max(1);
+            let rows = opt_count(args, 1)?.map_or(src_rows, |n| n.max(0) as usize);
+            let cols = opt_count(args, 2)?.map_or(src_cols, |n| n.max(0) as usize);
+            if rows < src_rows || cols < src_cols {
+                return Err(ExcelError::new(ExcelErrorKind::Value)
+                    .with_message("EXPAND cannot shrink an array"));
+            }
+            let pad = pad_value(args, 3)?;
+            let mut out = Vec::with_capacity(rows);
+            for r in 0..rows {
+                let mut row: Vec<LiteralValue> = data.get(r).cloned().unwrap_or_default();
+                row.resize(cols, pad.clone());
+                out.push(row);
+            }
+            Ok(out)
+        };
+        match run() {
+            Ok(rows) => Ok(collapse_if_scalar(rows, ctx.date_system())),
+            Err(e) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
+        }
+    }
+}
+
 pub fn register_builtins() {
     use crate::function_registry::register_builtin;
     use std::sync::Arc;
 
     register_builtin(Arc::new(ToColFn));
     register_builtin(Arc::new(ToRowFn));
+    register_builtin(Arc::new(WrapRowsFn));
+    register_builtin(Arc::new(WrapColsFn));
+    register_builtin(Arc::new(ExpandFn));
 }
 
 #[cfg(test)]

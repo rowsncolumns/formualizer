@@ -520,6 +520,12 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
 
     /// Resolve as a RangeView (Phase 2 API). Only supports reference arguments.
     pub fn range_view(&self) -> Result<RangeView<'b>, ExcelError> {
+        // A `LET`/`LAMBDA` local bound to an array or range (`LET(a,F1:F3,SUM(a))`) is a
+        // NamedRange node with no workbook reference behind it: expose the bound value as an
+        // owned view instead of failing reference resolution.
+        if self.local_binding_value().is_some() {
+            return self.value_as_range_view();
+        }
         match &self.expr {
             ArgumentExpr::Ast(node) => match &node.node_type {
                 ASTNodeType::Reference { reference, .. } => {
@@ -640,6 +646,33 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                 }
             }
         }
+    }
+
+    /// The local (`LET`/`LAMBDA`) binding this argument names, if it is a bare local name.
+    fn local_binding_value(&self) -> Option<crate::interpreter::LocalBinding> {
+        let name = match &self.expr {
+            ArgumentExpr::Ast(node) => match &node.node_type {
+                ASTNodeType::Reference {
+                    reference: ReferenceType::NamedRange(name),
+                    ..
+                } => name.clone(),
+                _ => return None,
+            },
+            ArgumentExpr::Arena {
+                id,
+                data_store,
+                sheet_registry,
+            } => match data_store.get_node(*id)? {
+                crate::engine::arena::AstNodeData::Reference { ref_type, .. } => {
+                    match data_store.reconstruct_reference_type_for_eval(ref_type, sheet_registry) {
+                        ReferenceType::NamedRange(name) => name,
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            },
+        };
+        self.interp.resolve_local_name(&name)
     }
 
     /// Evaluate this argument and expose the result as a `RangeView`: computed arrays (`B1:B4>0`,

@@ -9,7 +9,7 @@
 //!   * include may be vertical column vector OR same sized 2D; we reduce any non-zero truthy cell to include row.
 //!   * if_empty omitted -> #CALC! per Excel when no matches.
 //! - UNIQUE supports: array, [by_col], [exactly_once]
-//!   * by_col TRUE -> operate column-wise returning unique columns (NYI -> returns #N/IMPL! if TRUE)
+//!   * by_col TRUE -> operate column-wise returning the unique columns (kept as columns)
 //!   * exactly_once TRUE returns only values with count == 1 (supported in row-wise primitive set)
 //! - All functions return Array literal values (spills) – engine handles spill placement later.
 //!
@@ -784,6 +784,43 @@ impl Function for XMatchFn {
     }
 }
 
+/// A numeric argument that may be a scalar or an array/range of numbers (`SORT`'s
+/// `sort_index` / `sort_order`). `Ok(None)` when the argument is blank.
+fn int_list_arg<'b>(arg: &ArgumentHandle<'_, 'b>) -> Result<Option<Vec<i64>>, ExcelError> {
+    fn to_int(v: &LiteralValue) -> Result<Option<i64>, ExcelError> {
+        Ok(match v {
+            LiteralValue::Empty => None,
+            LiteralValue::Int(i) => Some(*i),
+            LiteralValue::Number(n) => Some(n.trunc() as i64),
+            LiteralValue::Boolean(b) => Some(*b as i64),
+            LiteralValue::Error(e) => return Err(e.clone()),
+            other => Some(crate::coercion::to_number_lenient(other)?.trunc() as i64),
+        })
+    }
+    let collect = |rows: Vec<Vec<LiteralValue>>| -> Result<Option<Vec<i64>>, ExcelError> {
+        let mut out = Vec::new();
+        for v in rows.into_iter().flatten() {
+            if let Some(i) = to_int(&v)? {
+                out.push(i);
+            }
+        }
+        Ok(Some(out))
+    };
+    match arg.value()? {
+        crate::traits::CalcValue::Scalar(LiteralValue::Array(rows)) => collect(rows),
+        crate::traits::CalcValue::Scalar(v) => Ok(to_int(&v)?.map(|i| vec![i])),
+        crate::traits::CalcValue::Range(rv) => {
+            let mut rows = Vec::new();
+            rv.for_each_row(&mut |row| {
+                rows.push(row.to_vec());
+                Ok(())
+            })?;
+            collect(rows)
+        }
+        crate::traits::CalcValue::Callable(_) => Err(ExcelError::new(ExcelErrorKind::Value)),
+    }
+}
+
 /* ───────────────────────── SORT() ───────────────────────── */
 
 #[derive(Debug)]
@@ -794,8 +831,9 @@ pub struct SortFn;
 ///
 /// # Remarks
 /// - Defaults: `sort_index=1`, `sort_order=1` (ascending), `by_col=FALSE`.
-/// - `sort_index` is 1-based in the active sort axis.
-/// - `sort_order < 0` sorts descending; otherwise ascending.
+/// - `sort_index` is 1-based in the active sort axis; an array such as `{3,1}` sorts by several
+///   keys in order, and `sort_order` may be an array of matching length (`{1,-1}`).
+/// - `sort_order` is `1` (ascending) or `-1` (descending); any other value returns `#VALUE!`.
 /// - Invalid sort indexes return `#VALUE!`.
 /// - Empty input returns an empty spill.
 ///
@@ -873,24 +911,24 @@ impl Function for SortFn {
                     repeating: None,
                     default: None,
                 },
-                // sort_index (default 1)
+                // sort_index (default 1; a number or an array of key indexes)
                 ArgSchema {
-                    kinds: smallvec::smallvec![ArgKind::Number],
+                    kinds: smallvec::smallvec![ArgKind::Number, ArgKind::Any],
                     required: false,
                     by_ref: false,
                     shape: ShapeKind::Scalar,
-                    coercion: CoercionPolicy::NumberLenientText,
+                    coercion: CoercionPolicy::None,
                     max: None,
                     repeating: None,
                     default: Some(LiteralValue::Int(1)),
                 },
-                // sort_order (default 1 = ascending, -1 = descending)
+                // sort_order (default 1 = ascending, -1 = descending; number or array)
                 ArgSchema {
-                    kinds: smallvec::smallvec![ArgKind::Number],
+                    kinds: smallvec::smallvec![ArgKind::Number, ArgKind::Any],
                     required: false,
                     by_ref: false,
                     shape: ShapeKind::Scalar,
-                    coercion: CoercionPolicy::NumberLenientText,
+                    coercion: CoercionPolicy::None,
                     max: None,
                     repeating: None,
                     default: Some(LiteralValue::Int(1)),
@@ -926,25 +964,39 @@ impl Function for SortFn {
             ));
         }
 
-        let sort_index = if args.len() >= 2 {
-            match args[1].value()?.into_literal() {
-                LiteralValue::Int(i) => i,
-                LiteralValue::Number(n) => n as i64,
-                _ => 1,
-            }
-        } else {
-            1
+        let value_err = || {
+            Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new(ExcelErrorKind::Value),
+            )))
         };
 
-        let sort_order = if args.len() >= 3 {
-            match args[2].value()?.into_literal() {
-                LiteralValue::Int(i) => i,
-                LiteralValue::Number(n) => n as i64,
-                _ => 1,
+        let sort_indexes: Vec<i64> = if args.len() >= 2 {
+            match int_list_arg(&args[1])? {
+                Some(v) if !v.is_empty() => v,
+                Some(_) => return value_err(),
+                None => vec![1],
             }
         } else {
-            1
+            vec![1]
         };
+
+        let sort_orders: Vec<i64> = if args.len() >= 3 {
+            match int_list_arg(&args[2])? {
+                Some(v) if !v.is_empty() => v,
+                Some(_) => return value_err(),
+                None => vec![1],
+            }
+        } else {
+            vec![1]
+        };
+        // Excel accepts exactly 1 (ascending) or -1 (descending) — SORT(r,1,2) is #VALUE!.
+        if sort_orders.iter().any(|o| *o != 1 && *o != -1) {
+            return value_err();
+        }
+        // One order applies to every key; otherwise the arrays must align.
+        if sort_orders.len() != 1 && sort_orders.len() != sort_indexes.len() {
+            return value_err();
+        }
 
         let by_col = if args.len() >= 4 {
             matches!(args[3].value()?.into_literal(), LiteralValue::Boolean(true))
@@ -952,17 +1004,30 @@ impl Function for SortFn {
             false
         };
 
-        let ascending = sort_order >= 0;
+        let axis_len = if by_col { rows } else { cols };
+        let mut keys: Vec<(usize, bool)> = Vec::with_capacity(sort_indexes.len());
+        for (k, idx) in sort_indexes.iter().enumerate() {
+            if *idx < 1 || (*idx as usize) > axis_len {
+                return value_err();
+            }
+            let order = if sort_orders.len() == 1 {
+                sort_orders[0]
+            } else {
+                sort_orders[k]
+            };
+            keys.push(((*idx - 1) as usize, order >= 0));
+        }
+        let compare_keys = |a: &[LiteralValue], b: &[LiteralValue]| -> std::cmp::Ordering {
+            for (key_idx, ascending) in &keys {
+                let cmp = cmp_for_lookup(&a[*key_idx], &b[*key_idx]).unwrap_or(0);
+                if cmp != 0 {
+                    return if *ascending { cmp.cmp(&0) } else { 0.cmp(&cmp) };
+                }
+            }
+            std::cmp::Ordering::Equal
+        };
 
         if by_col {
-            // Sort columns by the specified row
-            let sort_row_idx = (sort_index - 1).max(0) as usize;
-            if sort_row_idx >= rows {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                    ExcelError::new(ExcelErrorKind::Value),
-                )));
-            }
-
             // Extract columns as vectors
             let mut columns: Vec<(usize, Vec<LiteralValue>)> = Vec::with_capacity(cols);
             for c in 0..cols {
@@ -973,13 +1038,8 @@ impl Function for SortFn {
                 columns.push((c, col_vals));
             }
 
-            // Sort columns by the value in sort_row_idx
-            columns.sort_by(|a, b| {
-                let val_a = &a.1[sort_row_idx];
-                let val_b = &b.1[sort_row_idx];
-                let cmp = cmp_for_lookup(val_a, val_b).unwrap_or(0);
-                if ascending { cmp.cmp(&0) } else { 0.cmp(&cmp) }
-            });
+            // Stable sort of the columns by the key rows
+            columns.sort_by(|a, b| compare_keys(&a.1, &b.1));
 
             // Reconstruct the array with sorted columns
             let mut out: Vec<Vec<LiteralValue>> = vec![Vec::with_capacity(cols); rows];
@@ -991,14 +1051,6 @@ impl Function for SortFn {
 
             Ok(collapse_if_scalar(out, _ctx.date_system()))
         } else {
-            // Sort rows by the specified column
-            let sort_col_idx = (sort_index - 1).max(0) as usize;
-            if sort_col_idx >= cols {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                    ExcelError::new(ExcelErrorKind::Value),
-                )));
-            }
-
             // Extract rows
             let mut row_data: Vec<Vec<LiteralValue>> = Vec::with_capacity(rows);
             for r in 0..rows {
@@ -1009,13 +1061,8 @@ impl Function for SortFn {
                 row_data.push(row_vals);
             }
 
-            // Sort rows by the value in sort_col_idx
-            row_data.sort_by(|a, b| {
-                let val_a = &a[sort_col_idx];
-                let val_b = &b[sort_col_idx];
-                let cmp = cmp_for_lookup(val_a, val_b).unwrap_or(0);
-                if ascending { cmp.cmp(&0) } else { 0.cmp(&cmp) }
-            });
+            // Stable sort of the rows by the key columns
+            row_data.sort_by(|a, b| compare_keys(a, b));
 
             Ok(collapse_if_scalar(row_data, _ctx.date_system()))
         }
@@ -1032,8 +1079,8 @@ pub struct SortByFn;
 ///
 /// # Remarks
 /// - Requires at least one `by_array` aligned to the row count of `array`.
-/// - `sort_order` defaults to ascending when omitted.
-/// - Additional `by_array`/`sort_order` criteria are processed left-to-right.
+/// - `sort_order` is `1` (ascending, the default) or `-1` (descending); other values return `#VALUE!`.
+/// - Additional `by_array`/`sort_order` pairs are processed left-to-right (`SORTBY(r,k1,1,k2,-1)`).
 /// - Shape mismatches or invalid criteria return `#VALUE!`.
 /// - Returns a spilled sorted array.
 ///
@@ -1081,8 +1128,8 @@ pub struct SortByFn;
 /// Min args: 2
 /// Max args: variadic
 /// Variadic: true
-/// Signature: SORTBY(arg1: range@range, arg2: range@range, arg3?...: number@scalar)
-/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg3{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=true}
+/// Signature: SORTBY(arg1: range@range, arg2...: range|number|any@scalar)
+/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=range|number|any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=Some(1),default=false}
 /// Caps: PURE
 /// [formualizer-docgen:schema:end]
 impl Function for SortByFn {
@@ -1111,29 +1158,19 @@ impl Function for SortByFn {
                     repeating: None,
                     default: None,
                 },
-                // by_array1
+                // by_array1, [sort_order1], [by_array2, [sort_order2]], … — one repeating slot
+                // that accepts either a key array (range/array) or a sort order (number); eval
+                // tells them apart, so the schema stays arity-agnostic.
                 ArgSchema {
-                    kinds: smallvec::smallvec![ArgKind::Range],
+                    kinds: smallvec::smallvec![ArgKind::Range, ArgKind::Number, ArgKind::Any],
                     required: true,
-                    by_ref: true,
-                    shape: ShapeKind::Range,
-                    coercion: CoercionPolicy::None,
-                    max: None,
-                    repeating: None,
-                    default: None,
-                },
-                // sort_order1 (optional, default 1)
-                ArgSchema {
-                    kinds: smallvec::smallvec![ArgKind::Number],
-                    required: false,
                     by_ref: false,
                     shape: ShapeKind::Scalar,
-                    coercion: CoercionPolicy::NumberLenientText,
+                    coercion: CoercionPolicy::None,
                     max: None,
-                    repeating: None,
-                    default: Some(LiteralValue::Int(1)),
+                    repeating: Some(1),
+                    default: None,
                 },
-                // Additional by_array/sort_order pairs can follow (variadic)
             ]
         });
         &SCHEMA
@@ -1196,26 +1233,38 @@ impl Function for SortByFn {
 
             arg_idx += 1;
 
-            // sort_order (optional)
+            // sort_order (optional): a scalar number is an order for the key just read; anything
+            // else (range, array) is the next by_array and is left for the next iteration.
             let ascending = if arg_idx < args.len() {
-                // TODO(phase6): SORTBY parsing can mis-handle multi-criteria sort_order.
-                // Check if next arg is a number (sort_order) or a range (next by_array)
-                match args[arg_idx].value() {
-                    Ok(v) => {
-                        let lit = v.into_literal();
-                        match lit {
-                            LiteralValue::Int(i) => {
-                                arg_idx += 1;
-                                i >= 0
+                match args[arg_idx].value()? {
+                    crate::traits::CalcValue::Scalar(LiteralValue::Int(i)) => {
+                        arg_idx += 1;
+                        match i {
+                            1 => true,
+                            -1 => false,
+                            _ => {
+                                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                                    ExcelError::new(ExcelErrorKind::Value),
+                                )));
                             }
-                            LiteralValue::Number(n) => {
-                                arg_idx += 1;
-                                n >= 0.0
-                            }
-                            _ => true, // Next arg is likely a range, use default ascending
                         }
                     }
-                    Err(_) => true,
+                    crate::traits::CalcValue::Scalar(LiteralValue::Number(n)) => {
+                        arg_idx += 1;
+                        if n == 1.0 {
+                            true
+                        } else if n == -1.0 {
+                            false
+                        } else {
+                            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                                ExcelError::new(ExcelErrorKind::Value),
+                            )));
+                        }
+                    }
+                    crate::traits::CalcValue::Scalar(LiteralValue::Error(e)) => {
+                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+                    }
+                    _ => true,
                 }
             } else {
                 true
@@ -2800,12 +2849,15 @@ impl Function for UniqueFn {
                 *counts.entry(key).or_insert(0) += 1;
             }
 
-            let mut out: Vec<Vec<LiteralValue>> = Vec::new();
-            for k in order {
-                if !exactly_once || counts.get(&k) == Some(&1) {
-                    out.push(k.0);
-                }
-            }
+            let kept: Vec<Vec<LiteralValue>> = order
+                .into_iter()
+                .filter(|k| !exactly_once || counts.get(k) == Some(&1))
+                .map(|k| k.0)
+                .collect();
+            // Unique columns stay columns: transpose the kept column vectors back into rows.
+            let out: Vec<Vec<LiteralValue>> = (0..rows)
+                .map(|r| kept.iter().map(|col| col[r].clone()).collect())
+                .collect();
             return Ok(collapse_if_scalar(out, _ctx.date_system()));
         }
 

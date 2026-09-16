@@ -10,7 +10,9 @@
 
 use crate::args::{ArgSchema, CoercionPolicy, ShapeKind};
 use crate::function::Function;
-use crate::function_contract::{FunctionContextDependence, FunctionSemanticContract};
+use crate::function_contract::{
+    FunctionContextDependence, FunctionResultSemantics, FunctionSemanticContract,
+};
 use crate::traits::{ArgumentHandle, FunctionContext};
 use formualizer_common::{ArgKind, ExcelError, ExcelErrorKind, LiteralValue};
 use formualizer_macros::func_caps;
@@ -72,10 +74,12 @@ impl Function for RowFn {
         0
     }
 
-    func_caps!(PURE);
+    func_caps!(PURE, MAY_SPILL);
 
     fn semantic_contract(&self, arity: usize) -> Option<FunctionSemanticContract> {
         let mut contract = FunctionSemanticContract::trusted_builtin_default(None);
+        // Multi-cell ranges spill one index per row/column (`ROW(A3:A5)` → {3;4;5}).
+        contract.result = FunctionResultSemantics::MaySpill;
         if arity == 0 {
             contract.context = FunctionContextDependence::PlacementDependent;
         }
@@ -128,6 +132,19 @@ impl Function for RowFn {
         // Extract row number from reference (1-based)
         let row_1based = match &reference {
             ReferenceType::Cell { row, .. } => *row as i64,
+            // A multi-row range spills one row number per row (`ROW(A3:A5)` → {3;4;5}).
+            ReferenceType::Range {
+                start_row: Some(sr),
+                end_row: Some(er),
+                ..
+            } if er > sr => {
+                let rows: Vec<Vec<LiteralValue>> = (*sr..=*er)
+                    .map(|r| vec![LiteralValue::Int(r as i64)])
+                    .collect();
+                return Ok(crate::traits::CalcValue::Range(
+                    crate::engine::range_view::RangeView::from_owned_rows(rows, ctx.date_system()),
+                ));
+            }
             ReferenceType::Range {
                 start_row: Some(sr),
                 ..
@@ -362,10 +379,12 @@ impl Function for ColumnFn {
         0
     }
 
-    func_caps!(PURE);
+    func_caps!(PURE, MAY_SPILL);
 
     fn semantic_contract(&self, arity: usize) -> Option<FunctionSemanticContract> {
         let mut contract = FunctionSemanticContract::trusted_builtin_default(None);
+        // Multi-cell ranges spill one index per row/column (`ROW(A3:A5)` → {3;4;5}).
+        contract.result = FunctionResultSemantics::MaySpill;
         if arity == 0 {
             contract.context = FunctionContextDependence::PlacementDependent;
         }
@@ -418,6 +437,21 @@ impl Function for ColumnFn {
         // Extract column number from reference (1-based)
         let col_1based = match &reference {
             ReferenceType::Cell { col, .. } => *col as i64,
+            // A multi-column range spills one column number per column (`COLUMN(A1:C1)` → {1,2,3}).
+            ReferenceType::Range {
+                start_col: Some(sc),
+                end_col: Some(ec),
+                ..
+            } if ec > sc => {
+                let row: Vec<LiteralValue> =
+                    (*sc..=*ec).map(|c| LiteralValue::Int(c as i64)).collect();
+                return Ok(crate::traits::CalcValue::Range(
+                    crate::engine::range_view::RangeView::from_owned_rows(
+                        vec![row],
+                        ctx.date_system(),
+                    ),
+                ));
+            }
             ReferenceType::Range {
                 start_col: Some(sc),
                 ..
@@ -640,7 +674,15 @@ mod tests {
             .dispatch(&args2, &ctx.function_context(None))
             .unwrap()
             .into_literal();
-        assert_eq!(result2, LiteralValue::Int(1));
+        // A multi-row range spills one row number per row, as in Excel.
+        assert_eq!(
+            result2,
+            LiteralValue::Array(vec![
+                vec![LiteralValue::Number(1.0)],
+                vec![LiteralValue::Number(2.0)],
+                vec![LiteralValue::Number(3.0)],
+            ])
+        );
     }
 
     #[test]
@@ -849,7 +891,15 @@ mod tests {
             .dispatch(&args2, &ctx.function_context(None))
             .unwrap()
             .into_literal();
-        assert_eq!(result2, LiteralValue::Int(2));
+        // A multi-column range spills one column number per column, as in Excel.
+        assert_eq!(
+            result2,
+            LiteralValue::Array(vec![vec![
+                LiteralValue::Number(2.0),
+                LiteralValue::Number(3.0),
+                LiteralValue::Number(4.0),
+            ]])
+        );
     }
 
     #[test]
