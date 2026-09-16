@@ -914,7 +914,7 @@ impl Function for FloorFn {
 fn floor_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
         let n = elem_num(n)?;
-        let mut sig = match sig {
+        let sig = match sig {
             Some(s) => elem_num(s)?,
             None => 1.0,
         };
@@ -923,8 +923,12 @@ fn floor_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> LiteralValue {
                 "#DIV/0!",
             )));
         }
-        if sig < 0.0 {
-            sig = sig.abs();
+        // Excel (2010+): a positive number with a negative significance is #NUM!; a negative
+        // number with a negative significance rounds toward zero (FLOOR(-2.5,-2) = -2), and a
+        // negative number with a positive significance rounds away from zero (FLOOR(-2.5,2) = -4).
+        // `floor(n / sig) * sig` yields all three once the significance keeps its sign.
+        if n > 0.0 && sig < 0.0 {
+            return Ok(LiteralValue::Error(ExcelError::new_num()));
         }
         let k = (n / sig).floor();
         Ok(LiteralValue::Number(k * sig))
@@ -1168,6 +1172,17 @@ fn power_element(base: &LiteralValue, expv: &LiteralValue) -> LiteralValue {
         let expv = elem_num(expv)?;
         if base < 0.0 && (expv.fract().abs() > 1e-12) {
             return Ok(LiteralValue::Error(ExcelError::new_num()));
+        }
+        // Excel: POWER(0,0) is #NUM! and POWER(0,negative) is #DIV/0!.
+        if base == 0.0 {
+            if expv == 0.0 {
+                return Ok(LiteralValue::Error(ExcelError::new_num()));
+            }
+            if expv < 0.0 {
+                return Ok(LiteralValue::Error(ExcelError::from_error_string(
+                    "#DIV/0!",
+                )));
+            }
         }
         Ok(LiteralValue::Number(base.powf(expv)))
     };

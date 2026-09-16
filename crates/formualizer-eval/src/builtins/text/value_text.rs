@@ -319,6 +319,12 @@ impl Function for TextFn {
         let num = match val {
             LiteralValue::Number(f) => f,
             LiteralValue::Int(i) => i as f64,
+            // Excel: a boolean is not coerced to 0/1 — TEXT(TRUE,"0") is "TRUE".
+            LiteralValue::Boolean(b) => {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(
+                    if b { "TRUE" } else { "FALSE" }.to_string(),
+                )));
+            }
             LiteralValue::Text(t) => match ctx.locale().parse_number_invariant(&t) {
                 Some(n) => n,
                 None => {
@@ -338,13 +344,6 @@ impl Function for TextFn {
                     return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(t)));
                 }
             },
-            LiteralValue::Boolean(b) => {
-                if b {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
             LiteralValue::Empty => 0.0,
             LiteralValue::Error(e) => {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));

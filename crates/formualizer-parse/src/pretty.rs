@@ -11,7 +11,33 @@ use crate::tokenizer::Associativity;
 /// - References printed via .normalise()
 /// - Array literals: {1, 2; 3, 4}
 pub fn pretty_print(ast: &ASTNode) -> String {
-    pretty_print_node(ast)
+    pretty_print_node(ast, Spacing::Padded)
+}
+
+/// How a rendered formula spaces its punctuation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spacing {
+    /// The canonical form: `A1 + B1`, `SUM(A1, B1)`, `{1, 2; 3, 4}`.
+    Padded,
+    /// Excel's own spelling: `A1+B1`, `SUM(A1,B1)`, `{1,2;3,4}` — what the formula bar shows and
+    /// what OOXML stores, so rewritten formula text matches what the user typed.
+    Compact,
+}
+
+impl Spacing {
+    fn list_sep(self) -> &'static str {
+        match self {
+            Spacing::Padded => ", ",
+            Spacing::Compact => ",",
+        }
+    }
+
+    fn row_sep(self) -> &'static str {
+        match self {
+            Spacing::Padded => "; ",
+            Spacing::Compact => ";",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,8 +144,9 @@ fn pretty_child(
     parent_prec: u8,
     parent_assoc: Associativity,
     side: Side,
+    spacing: Spacing,
 ) -> String {
-    let s = pretty_print_node(child);
+    let s = pretty_print_node(child, spacing);
     if child_needs_parens(child, parent_op, parent_prec, parent_assoc, side) {
         format!("({s})")
     } else {
@@ -127,7 +154,7 @@ fn pretty_child(
     }
 }
 
-fn pretty_print_node(ast: &ASTNode) -> String {
+fn pretty_print_node(ast: &ASTNode, spacing: Spacing) -> String {
     match &ast.node_type {
         ASTNodeType::Literal(value) => match value {
             // Quote and escape text literals to preserve Excel semantics
@@ -139,7 +166,7 @@ fn pretty_print_node(ast: &ASTNode) -> String {
         },
         ASTNodeType::Reference { reference, .. } => reference.normalise(),
         ASTNodeType::UnaryOp { op, expr } => {
-            let inner = pretty_print_node(expr);
+            let inner = pretty_print_node(expr, spacing);
             let inner = if unary_operand_needs_parens(op, expr) {
                 format!("({inner})")
             } else {
@@ -154,29 +181,30 @@ fn pretty_print_node(ast: &ASTNode) -> String {
         }
         ASTNodeType::BinaryOp { op, left, right } => {
             let (prec, assoc) = infix_info(op);
-            let left_s = pretty_child(left, op, prec, assoc, Side::Left);
-            let right_s = pretty_child(right, op, prec, assoc, Side::Right);
+            let left_s = pretty_child(left, op, prec, assoc, Side::Left, spacing);
+            let right_s = pretty_child(right, op, prec, assoc, Side::Right, spacing);
 
-            match op.as_str() {
+            match (op.as_str(), spacing) {
                 // Reference range operator prints tight; intersection is a
                 // single space rather than the generic three-space infix form.
-                ":" => format!("{left_s}:{right_s}"),
-                " " => format!("{left_s} {right_s}"),
-                "," => format!("{left_s}, {right_s}"),
-                _ => format!("{left_s} {op} {right_s}"),
+                (":", _) => format!("{left_s}:{right_s}"),
+                (" ", _) => format!("{left_s} {right_s}"),
+                (",", _) => format!("{left_s}{}{right_s}", spacing.list_sep()),
+                (_, Spacing::Padded) => format!("{left_s} {op} {right_s}"),
+                (_, Spacing::Compact) => format!("{left_s}{op}{right_s}"),
             }
         }
         ASTNodeType::Function { name, args } => {
             let args_str = args
                 .iter()
-                .map(pretty_print_node)
+                .map(|a| pretty_print_node(a, spacing))
                 .collect::<Vec<String>>()
-                .join(", ");
+                .join(spacing.list_sep());
 
             format!("{}({})", name.to_uppercase(), args_str)
         }
         ASTNodeType::Call { callee, args } => {
-            let callee_str = pretty_print_node(callee);
+            let callee_str = pretty_print_node(callee, spacing);
             // Wrap the callee in parentheses if it isn't already a callable-looking
             // primary (function call or another call expression). This keeps things
             // like `(1 + 2)(3)` unambiguous when round-tripping unusual ASTs.
@@ -186,9 +214,9 @@ fn pretty_print_node(ast: &ASTNode) -> String {
             };
             let args_str = args
                 .iter()
-                .map(pretty_print_node)
+                .map(|a| pretty_print_node(a, spacing))
                 .collect::<Vec<String>>()
-                .join(", ");
+                .join(spacing.list_sep());
             format!("{callee_rendered}({args_str})")
         }
         ASTNodeType::Array(rows) => {
@@ -196,12 +224,12 @@ fn pretty_print_node(ast: &ASTNode) -> String {
                 .iter()
                 .map(|row| {
                     row.iter()
-                        .map(pretty_print_node)
+                        .map(|v| pretty_print_node(v, spacing))
                         .collect::<Vec<String>>()
-                        .join(", ")
+                        .join(spacing.list_sep())
                 })
                 .collect::<Vec<String>>()
-                .join("; ");
+                .join(spacing.row_sep());
 
             format!("{{{rows_str}}}")
         }
@@ -214,6 +242,15 @@ fn pretty_print_node(ast: &ASTNode) -> String {
 /// a formula reconstructed from an AST.
 pub fn canonical_formula(ast: &ASTNode) -> String {
     format!("={}", pretty_print(ast))
+}
+
+/// Render an AST the way Excel spells a formula, prefixed with '=': no spaces around binary
+/// operators or after argument / array separators (`=SUM(A1,B1)*2`, `{1,2;3,4}`), references
+/// normalised, function names upper-cased. Use this when rewriting STORED formula text (a
+/// reference shift, a sheet rename, a shared-formula expansion) so the text stays the way the user
+/// typed it and the way OOXML stores it; `canonical_formula` is the padded display form.
+pub fn excel_formula(ast: &ASTNode) -> String {
+    format!("={}", pretty_print_node(ast, Spacing::Compact))
 }
 
 /// Tokenizes and parses a formula, then pretty-prints it.
@@ -284,6 +321,26 @@ mod tests {
         let formula = "=a1 + b2 *     3";
         let pretty = pretty_parse_render(formula).unwrap();
         assert_eq!(pretty, "=A1 + B2 * 3");
+    }
+
+    #[test]
+    fn test_excel_formula_is_compact_excel_spelling() {
+        // Excel's formula bar / OOXML spelling: no spaces around operators or after separators.
+        let ast = parse("=sum(  a1, b2  ) * 3 + $A$1").unwrap();
+        assert_eq!(excel_formula(&ast), "=SUM(A1,B2)*3+$A$1");
+        let ast = parse("={1, 2; 3, 4}").unwrap();
+        assert_eq!(excel_formula(&ast), "={1,2;3,4}");
+        // Precedence parentheses, the range/intersection operators, and unary forms are kept.
+        let ast = parse("=(a1+b1)*c1").unwrap();
+        assert_eq!(excel_formula(&ast), "=(A1+B1)*C1");
+        let ast = parse("=SUM(A1:B2 B1:C3)").unwrap();
+        assert_eq!(excel_formula(&ast), "=SUM(A1:B2 B1:C3)");
+        let ast = parse("=-A1%").unwrap();
+        assert_eq!(excel_formula(&ast), "=-A1%");
+        let ast = parse(r#"=IF(A1>1,"a,b","c")"#).unwrap();
+        assert_eq!(excel_formula(&ast), r#"=IF(A1>1,"a,b","c")"#);
+        // Padded canonical form is untouched.
+        assert_eq!(pretty_parse_render("=a1+b2*3").unwrap(), "=A1 + B2 * 3");
     }
 
     #[test]

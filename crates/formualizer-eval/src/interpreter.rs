@@ -1418,6 +1418,17 @@ impl<'a> Interpreter<'a> {
             if a < 0.0 && b.fract() != 0.0 {
                 return Ok(LiteralValue::Error(ExcelError::new_num()));
             }
+            // Excel: 0^0 is #NUM! and 0^negative is #DIV/0! (IEEE would give 1 / +inf).
+            if a == 0.0 {
+                if b == 0.0 {
+                    return Ok(LiteralValue::Error(ExcelError::new_num()));
+                }
+                if b < 0.0 {
+                    return Ok(LiteralValue::Error(ExcelError::from_error_string(
+                        "#DIV/0!",
+                    )));
+                }
+            }
             match crate::coercion::sanitize_numeric(a.powf(b)) {
                 Ok(n) => Ok(LiteralValue::Number(n)),
                 Err(e) => Ok(LiteralValue::Error(e)),
