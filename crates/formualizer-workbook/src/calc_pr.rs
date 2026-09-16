@@ -128,7 +128,7 @@ pub fn calc_settings_from_cycle(cycle: &CycleConfig) -> CalcSettings {
             iterate_delta: Some(max_change),
             ..Default::default()
         },
-        CyclePolicy::Error => CalcSettings {
+        CyclePolicy::Error | CyclePolicy::Zero => CalcSettings {
             iterate: false,
             ..Default::default()
         },
