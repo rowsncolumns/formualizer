@@ -124,8 +124,8 @@ fn percentof_whole_of_zero_is_div0() {
 
 #[test]
 fn percentof_arity_is_exactly_two() {
-    // Too few arguments follow the shared arity contract (`#N/A`, like SUM() / the JS engine);
-    // too many are rejected by the schema with `#VALUE!`.
+    // Too few arguments is the engine-wide #N/A (W4-A: Excel refuses to enter the formula,
+    // the JS engine and Sheets evaluate a stored one to #N/A); too many is #VALUE!.
     assert_err("=PERCENTOF(A1:A3)", ExcelErrorKind::Na);
     assert_err("=PERCENTOF(A1,A2,A3)", ExcelErrorKind::Value);
 }
@@ -183,6 +183,26 @@ fn trimrange_modes_select_leading_trailing_or_none() {
     assert_num("=COLUMNS(TRIMRANGE(H8:N8,3,2))", 5.0);
     // Row trimming never depends on the column mode and vice versa.
     assert_num("=ROWS(TRIMRANGE(D1:D4,3,0))", 2.0);
+}
+
+#[test]
+fn trimrange_blank_cell_mode_coerces_to_zero_not_default() {
+    // A blank cell in a numeric slot is 0 in Excel (as for TAKE / ROUND), not "omitted":
+    // C1 is blank, so TRIMRANGE(D1:D4,C1) keeps every row, matching N(C1) and a literal 0.
+    assert_num("=ROWS(TRIMRANGE(D1:D4,C1))", 4.0);
+    assert_num("=ROWS(TRIMRANGE(D1:D4,N(C1)))", 4.0);
+    assert_num("=ROWS(TRIMRANGE(D1:D4,0))", 4.0);
+    assert_eq!(
+        column("=TRIMRANGE(D1:D4,C1)", 4),
+        vec![None, Some(5.0), Some(6.0), None]
+    );
+    // Same for the column slot; the row slot still trims by default.
+    assert_num("=COLUMNS(TRIMRANGE(H8:N8,3,C1))", 7.0);
+    assert_num("=COLUMNS(TRIMRANGE(H8:N8,,C1))", 7.0);
+    // Only a truly skipped slot means the default (3).
+    assert_num("=ROWS(TRIMRANGE(D1:D4,,C1))", 2.0);
+    // The same blank-cell coercion every other numeric slot already applies.
+    assert_num("=ROUND(2.567,C1)", 3.0);
 }
 
 #[test]

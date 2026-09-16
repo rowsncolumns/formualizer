@@ -312,10 +312,13 @@ impl Function for RowsFn {
             };
             Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(rows)))
         } else {
-            // Handle array literal
+            // Handle array literal; an error value is the result (`ROWS(NA())` → `#N/A`)
             let v = args[0].value()?.into_literal();
             let rows = match v {
                 LiteralValue::Array(arr) => arr.len() as i64,
+                LiteralValue::Error(e) => {
+                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+                }
                 _ => 1,
             };
             Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(rows)))
@@ -619,10 +622,13 @@ impl Function for ColumnsFn {
             };
             Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(cols)))
         } else {
-            // Handle array literal
+            // Handle array literal; an error value is the result (`COLUMNS(NA())` → `#N/A`)
             let v = args[0].value()?.into_literal();
             let cols = match v {
                 LiteralValue::Array(arr) => arr.first().map(|r| r.len()).unwrap_or(0) as i64,
+                LiteralValue::Error(e) => {
+                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+                }
                 _ => 1,
             };
             Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(cols)))

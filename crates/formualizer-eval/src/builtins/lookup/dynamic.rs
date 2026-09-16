@@ -3685,16 +3685,18 @@ impl Function for TrimRangeFn {
         if args.is_empty() || args.len() > 3 {
             return scalar_err(ExcelError::new_value());
         }
-        // Trim mode: 0 none, 1 leading, 2 trailing, 3 both (default). A skipped slot
-        // (`TRIMRANGE(rng,,2)`) is the default, like an omitted argument.
+        // Trim mode: 0 none, 1 leading, 2 trailing, 3 both (default). Only an omitted or
+        // skipped slot (`TRIMRANGE(rng,,2)`) is the default; a blank cell in the slot is a
+        // number argument like any other and coerces to 0 (keep every row / column).
         let mode = |idx: usize| -> Result<u8, ExcelError> {
-            let Some(arg) = args.get(idx) else { return Ok(3) };
+            let Some(arg) = args.get(idx) else {
+                return Ok(3);
+            };
             if arg.is_skipped() {
                 return Ok(3);
             }
             match arg.value()?.into_literal() {
                 LiteralValue::Error(e) => Err(e),
-                LiteralValue::Empty => Ok(3),
                 v => {
                     let n = crate::coercion::to_number_lenient(&v)?.trunc();
                     if (0.0..=3.0).contains(&n) {
