@@ -94,8 +94,26 @@ impl Function for ValueFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        match scalar_like_value(&args[0])? {
+            // A blank cell is 0, as in Excel; numbers pass through unchanged
+            LiteralValue::Empty => {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)));
+            }
+            LiteralValue::Number(n) => {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(n)));
+            }
+            LiteralValue::Int(i) => {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
+                    i as f64,
+                )));
+            }
+            LiteralValue::Error(e) => {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+            }
+            _ => {}
+        }
         let s = to_text(&args[0])?;
-        let Some(n) = ctx.locale().parse_number_invariant(&s) else {
+        let Some(n) = crate::coercion::parse_numeric_text(&s, &ctx.locale()) else {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
@@ -604,7 +622,8 @@ mod tests {
         let wb = TestWorkbook::new().with_function(std::sync::Arc::new(TextFn));
         let ctx = wb.interpreter();
         let f = ctx.context.get_function("", "TEXT").unwrap();
-        for input in ["3-1", "10-", "1.234,56", "$5", "1/2"] {
+        // "$5" is numeric text in Excel (TEXT("$5","00") → "05"); the rest are not
+        for input in ["3-1", "10-", "1.234,56", "1/2"] {
             let v = lit(LiteralValue::Text(input.into()));
             let fmt = lit(LiteralValue::Text("00".into()));
             let out = f
