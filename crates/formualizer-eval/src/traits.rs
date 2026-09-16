@@ -95,7 +95,14 @@ impl Range for Box<dyn Range> {
 pub type CowValue<'a> = Cow<'a, LiteralValue>;
 
 pub trait CustomCallable: Send + Sync {
+    /// Declared parameter count — the most arguments a call may supply.
     fn arity(&self) -> usize;
+
+    /// Parameters a helper (`MAP`, `BYROW`, …) must supply an argument for: the
+    /// declared count minus the ones written as optional (`[name]`).
+    fn min_arity(&self) -> usize {
+        self.arity()
+    }
 
     fn invoke<'ctx>(
         &self,

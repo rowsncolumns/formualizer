@@ -46,21 +46,35 @@ fn local_name_from_ast(node: &ASTNode) -> Result<String, ExcelError> {
     }
 }
 
+#[derive(Clone, Debug)]
+struct LambdaParam {
+    name: String,
+    /// Declared as `[name]`. A direct call may leave out any trailing parameter,
+    /// bracketed or not; a helper (`MAP`, `BYROW`, …) may only leave out these.
+    optional: bool,
+}
+
 /// `LAMBDA` parameter: a bare name (`x`) or Excel's optional spelling (`[y]`).
 /// The tokenizer classifies `[y]` as a bracketed structured reference with the
-/// column name and no table, which is the shape matched here. The brackets are
-/// documentation only: at call time Excel lets the caller leave out any trailing
-/// parameter, bracketed or not, and `ISOMITTED` reports it either way.
-fn lambda_param_from_ast(node: &ASTNode) -> Result<String, ExcelError> {
+/// column name and no table, which is the shape matched here. For a direct call
+/// the brackets are documentation only: Excel lets the caller leave out any
+/// trailing parameter, and `ISOMITTED` reports it either way.
+fn lambda_param_from_ast(node: &ASTNode) -> Result<LambdaParam, ExcelError> {
     match &node.node_type {
         ASTNodeType::Reference {
             reference: ReferenceType::NamedRange(name),
             ..
-        } => Ok(name.clone()),
+        } => Ok(LambdaParam {
+            name: name.clone(),
+            optional: false,
+        }),
         ASTNodeType::Reference {
             reference: ReferenceType::Table(table),
             ..
-        } if !table.name.is_empty() => Ok(table.name.clone()),
+        } if !table.name.is_empty() => Ok(LambdaParam {
+            name: table.name.clone(),
+            optional: true,
+        }),
         _ => Err(value_error("Expected a LAMBDA parameter name")),
     }
 }
@@ -220,9 +234,15 @@ impl Function for LetFn {
 
 #[derive(Clone)]
 struct LambdaClosure {
-    params: Vec<String>,
+    params: Vec<LambdaParam>,
     body: ASTNode,
     captured_env: LocalEnv,
+}
+
+impl LambdaClosure {
+    fn required(&self) -> usize {
+        self.params.iter().filter(|p| !p.optional).count()
+    }
 }
 
 struct DepthGuard;
@@ -251,6 +271,10 @@ impl CustomCallable for LambdaClosure {
         self.params.len()
     }
 
+    fn min_arity(&self) -> usize {
+        self.required()
+    }
+
     fn invoke<'ctx>(
         &self,
         interp: &crate::interpreter::Interpreter<'ctx>,
@@ -259,6 +283,8 @@ impl CustomCallable for LambdaClosure {
         // Excel rejects surplus arguments but accepts a call with fewer
         // arguments than parameters: the missing ones are bound as omitted,
         // so `ISOMITTED(p)` is TRUE and reading `p` as a value is `#VALUE!`.
+        // Helpers check their own parameter count with `hof_arity_error`
+        // before invoking.
         if args.len() > self.params.len() {
             return Ok(err_value(format!(
                 "LAMBDA expected at most {} argument(s), got {}",
@@ -281,7 +307,7 @@ impl CustomCallable for LambdaClosure {
                 Some(value) => LocalBinding::Value(value.clone()),
                 None => LocalBinding::Omitted,
             };
-            env = env.with_binding(param, binding);
+            env = env.with_binding(&param.name, binding);
         }
 
         let scoped = interp.with_local_env(env);
@@ -300,8 +326,9 @@ pub struct LambdaFn;
 /// - All arguments except the last are parameter names; the last argument is the body expression.
 /// - A parameter may be written in brackets (`[name]`) to document it as optional; `ISOMITTED(name)` tells whether the caller supplied it.
 /// - Parameter names must be unique (case-insensitive), or `#VALUE!` is returned.
-/// - Invocation may supply fewer arguments than parameters (the rest are omitted) but never more than the declared count.
+/// - A direct call (`LAMBDA(...)(...)`, a LET-bound or a named lambda) may supply fewer arguments than parameters (the rest are omitted) but never more than the declared count.
 /// - Reading an omitted parameter as a value yields `#VALUE!`; `ISOMITTED` is the only function that accepts one.
+/// - `MAP`, `REDUCE`, `SCAN`, `BYROW`, `BYCOL` and `MAKEARRAY` supply a fixed number of arguments and return `#VALUE!` ("Incorrect Parameters") when the lambda's parameter count does not fit; only a `[name]` parameter may stay unsupplied there.
 /// - Returning an uninvoked lambda as a final cell value yields a `#CALC!` in evaluation.
 ///
 /// # Examples
@@ -342,7 +369,7 @@ pub struct LambdaFn;
 ///   - q: "Does a LAMBDA read outer LET variables at call time or definition time?"
 ///     a: "Definition time. The closure captures its lexical environment when created."
 ///   - q: "Can I call a LAMBDA with fewer or extra arguments?"
-///     a: "Fewer is allowed: the trailing parameters are omitted, ISOMITTED(param) is TRUE and using one as a value is #VALUE!. Extra arguments are rejected with #VALUE!."
+///     a: "In a direct call, fewer is allowed: the trailing parameters are omitted, ISOMITTED(param) is TRUE and using one as a value is #VALUE!. Extra arguments are rejected with #VALUE!. Helpers such as MAP or BYROW require a parameter per argument they supply unless it is written as [name]."
 /// ```
 ///
 /// [formualizer-docgen:schema:start]
@@ -413,7 +440,7 @@ impl Function for LambdaFn {
                 Ok(param) => param,
                 Err(e) => return Ok(CalcValue::Scalar(LiteralValue::Error(e))),
             };
-            let key = param.to_ascii_uppercase();
+            let key = param.name.to_ascii_uppercase();
             if !seen.insert(key) {
                 return Ok(err_value("LAMBDA parameter names must be unique"));
             }
@@ -632,6 +659,31 @@ fn dims(rows: &[Vec<LiteralValue>]) -> (usize, usize) {
     (rows.len(), rows.iter().map(Vec::len).max().unwrap_or(0))
 }
 
+/// Excel's "Incorrect Parameters" `#VALUE!` for `MAP` / `REDUCE` / `SCAN` /
+/// `BYROW` / `BYCOL` / `MAKEARRAY`: the helper drives the lambda with a fixed
+/// number of arguments and the lambda must declare a parameter for each of
+/// them. Only a `[name]` parameter may stay unsupplied — the "fewer arguments
+/// than parameters" allowance belongs to direct calls, not helpers. One error
+/// for the whole helper call, not one per element.
+fn hof_arity_error(
+    fname: &str,
+    callable: &Arc<dyn CustomCallable>,
+    supplied: usize,
+) -> Option<LiteralValue> {
+    let (min, max) = (callable.min_arity(), callable.arity());
+    if supplied < min || supplied > max {
+        let expected = if min == max {
+            format!("{max}")
+        } else {
+            format!("{min} to {max}")
+        };
+        return Some(LiteralValue::Error(value_error(format!(
+            "{fname} supplies {supplied} argument(s) to a LAMBDA that takes {expected}"
+        ))));
+    }
+    None
+}
+
 /// Invoke the lambda and reduce its result to one cell value: a nested array
 /// result cannot be placed in a single cell (`#CALC!`, as in Excel).
 fn call_scalar(
@@ -780,6 +832,9 @@ impl Function for MapFn {
             Ok(c) => c,
             Err(e) => return Ok(CalcValue::Scalar(e)),
         };
+        if let Some(e) = hof_arity_error("MAP", &callable, array_args.len()) {
+            return Ok(CalcValue::Scalar(e));
+        }
         let mut arrays = Vec::with_capacity(array_args.len());
         for arg in array_args {
             arrays.push(rows_of(arg)?);
@@ -895,6 +950,9 @@ impl Function for ReduceFn {
             Ok(c) => c,
             Err(e) => return Ok(CalcValue::Scalar(e)),
         };
+        if let Some(e) = hof_arity_error("REDUCE", &callable, 2) {
+            return Ok(CalcValue::Scalar(e));
+        }
         for row in rows_of(array_arg)? {
             for v in row {
                 acc = call_scalar(lambda_arg, &callable, &[acc, v]);
@@ -956,6 +1014,9 @@ impl Function for ScanFn {
             Ok(c) => c,
             Err(e) => return Ok(CalcValue::Scalar(e)),
         };
+        if let Some(e) = hof_arity_error("SCAN", &callable, 2) {
+            return Ok(CalcValue::Scalar(e));
+        }
         let mut out = Vec::new();
         for row in rows_of(array_arg)? {
             let mut out_row = Vec::with_capacity(row.len());
@@ -1018,6 +1079,9 @@ impl Function for ByRowFn {
             Ok(c) => c,
             Err(e) => return Ok(CalcValue::Scalar(e)),
         };
+        if let Some(e) = hof_arity_error("BYROW", &callable, 1) {
+            return Ok(CalcValue::Scalar(e));
+        }
         let out: Vec<Vec<LiteralValue>> = rows_of(&args[0])?
             .into_iter()
             .map(|row| {
@@ -1081,6 +1145,9 @@ impl Function for ByColFn {
             Ok(c) => c,
             Err(e) => return Ok(CalcValue::Scalar(e)),
         };
+        if let Some(e) = hof_arity_error("BYCOL", &callable, 1) {
+            return Ok(CalcValue::Scalar(e));
+        }
         let rows = rows_of(&args[0])?;
         let (_, cols) = dims(&rows);
         let out_row: Vec<LiteralValue> = (0..cols)
@@ -1161,6 +1228,9 @@ impl Function for MakeArrayFn {
             Ok(c) => c,
             Err(e) => return Ok(CalcValue::Scalar(e)),
         };
+        if let Some(e) = hof_arity_error("MAKEARRAY", &callable, 2) {
+            return Ok(CalcValue::Scalar(e));
+        }
         let out: Vec<Vec<LiteralValue>> = (1..=rows)
             .map(|r| {
                 (1..=cols)
@@ -1484,23 +1554,49 @@ mod tests {
     }
 
     #[test]
-    fn hofs_call_lambdas_that_declare_more_parameters_than_supplied() {
-        assert_eq!(
-            eval("=SUM(MAP({1,2,3},LAMBDA(v,k,IF(ISOMITTED(k),v,v+k))))"),
-            LiteralValue::Number(6.0)
-        );
-        assert_eq!(
-            eval("=REDUCE(0,{1,2,3},LAMBDA(a,v,w,a+v))"),
-            LiteralValue::Number(6.0)
-        );
-        assert_eq!(
-            eval("=SUM(BYROW({1,2;3,4},LAMBDA(r,extra,SUM(r))))"),
-            LiteralValue::Number(10.0)
-        );
-        // …but the body still fails if it actually uses the missing value.
+    fn returning_an_omitted_parameter_itself_is_value_error() {
+        assert_error(eval("=LAMBDA(x,y,y)(1)"), ExcelErrorKind::Value);
+        assert_error(eval("=LAMBDA(x,[y],y)(1)"), ExcelErrorKind::Value);
+        assert_error(eval("=LET(f,LAMBDA(x,y,y),f(1))"), ExcelErrorKind::Value);
+        // Spread into an array result the marker is #VALUE! per cell.
         assert_error(
-            eval("=SUM(MAP({1,2,3},LAMBDA(v,k,v+k)))"),
+            eval("=SUM(MAP({1,2,3},LAMBDA(v,[k],k)))"),
             ExcelErrorKind::Value,
+        );
+    }
+
+    // Excel: "Providing an invalid LAMBDA function or an incorrect number of
+    // parameters returns a #VALUE! error called 'Incorrect Parameters'" (MAP,
+    // REDUCE, SCAN, BYROW, BYCOL, MAKEARRAY docs). The fewer-arguments
+    // allowance is for direct calls only; a helper supplies a fixed count.
+    #[test]
+    fn hofs_reject_lambdas_whose_parameter_count_does_not_fit() {
+        for formula in [
+            "=MAP({1,2,3},LAMBDA(v,k,v))",
+            "=MAP({1,2,3},{4,5,6},LAMBDA(v,v))",
+            "=REDUCE(0,{1,2,3},LAMBDA(a,v,w,a+v))",
+            "=REDUCE(0,{1,2,3},LAMBDA(a,a))",
+            "=SCAN(0,{1,2,3},LAMBDA(a,v,w,a+v))",
+            "=BYROW({1,2;3,4},LAMBDA(r,extra,SUM(r)))",
+            "=BYCOL({1,2;3,4},LAMBDA(c,extra,SUM(c)))",
+            "=MAKEARRAY(2,2,LAMBDA(r,c,d,r*c))",
+            "=MAKEARRAY(2,2,LAMBDA(r,r))",
+        ] {
+            // One #VALUE! for the whole helper call, not an array of them.
+            assert_error(eval(formula), ExcelErrorKind::Value);
+        }
+        // A `[name]` parameter may stay unsupplied by the helper.
+        assert_eq!(
+            eval("=SUM(MAP({1,2,3},LAMBDA(v,[k],IF(ISOMITTED(k),v,v+k))))"),
+            LiteralValue::Number(6.0)
+        );
+        assert_eq!(
+            eval("=REDUCE(0,{1,2,3},LAMBDA(a,v,[w],a+v))"),
+            LiteralValue::Number(6.0)
+        );
+        assert_eq!(
+            eval("=SUM(BYROW({1,2;3,4},LAMBDA(r,[extra],SUM(r))))"),
+            LiteralValue::Number(10.0)
         );
     }
 
