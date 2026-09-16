@@ -11,6 +11,7 @@ pub mod lookup; // Sprint 4 classic lookup (partial)
 pub mod math;
 pub mod random;
 pub mod reference_fns;
+pub mod sheets_extras; // Google Sheets extras the legacy JS engine carries (SPLIT, JOIN, REGEXMATCH, SORTN, ARRAYFORMULA, QUERY stub)
 pub mod stats; // Phase 6 statistical basics + extended stats
 pub mod text; // Phase 2 core text functions
 pub(crate) mod utils;
@@ -31,6 +32,7 @@ pub fn load_builtins() {
     math::register_builtins();
     random::register_builtins();
     reference_fns::register_builtins();
+    sheets_extras::register_builtins();
     lookup::register_builtins();
     text::register_builtins();
     stats::register_builtins();
