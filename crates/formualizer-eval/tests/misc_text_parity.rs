@@ -159,13 +159,21 @@ fn value_and_array_to_text_spell_numbers_at_fifteen_digits() {
 
 #[test]
 fn exact_sixteen_digit_ties_round_away_from_zero_like_excel() {
-    assert_eq!(eval("=1234567890123445&\"\""), text("1.23456789012345E+15"));
-    assert_eq!(eval("=123456789012344.5&\"\""), text("123456789012345"));
+    // A typed literal is stored with 15 significant digits (Excel truncates `1234567890123445` to
+    // `1234567890123440` at entry, and so does the parser), so the exact 16-digit ties have to be
+    // COMPUTED: the doubles below are exact and Excel spells them half away from zero.
     assert_eq!(
-        eval("=-1234567890123445&\"\""),
+        eval("=(1234567890123440+5)&\"\""),
+        text("1.23456789012345E+15")
+    );
+    assert_eq!(eval("=(123456789012344+0.5)&\"\""), text("123456789012345"));
+    assert_eq!(
+        eval("=(-1234567890123440-5)&\"\""),
         text("-1.23456789012345E+15")
     );
-    assert_number("=LEN(123456789012344.5&\"\")", 15.0);
+    assert_number("=LEN((123456789012344+0.5)&\"\")", 15.0);
+    // The literal itself keeps Excel's typed-entry truncation.
+    assert_eq!(eval("=1234567890123445&\"\""), text("1.23456789012344E+15"));
 }
 
 #[test]

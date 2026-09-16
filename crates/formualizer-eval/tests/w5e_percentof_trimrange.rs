@@ -124,7 +124,9 @@ fn percentof_whole_of_zero_is_div0() {
 
 #[test]
 fn percentof_arity_is_exactly_two() {
-    assert_err("=PERCENTOF(A1:A3)", ExcelErrorKind::Value);
+    // Too few arguments follow the shared arity contract (`#N/A`, like SUM() / the JS engine);
+    // too many are rejected by the schema with `#VALUE!`.
+    assert_err("=PERCENTOF(A1:A3)", ExcelErrorKind::Na);
     assert_err("=PERCENTOF(A1,A2,A3)", ExcelErrorKind::Value);
 }
 

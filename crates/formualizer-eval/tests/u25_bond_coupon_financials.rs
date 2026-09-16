@@ -212,11 +212,11 @@ fn blank_optional_basis_slot_is_the_default() {
         180.0 / 360.0,
         1e-12,
     );
-    assert_close(
-        "=COUPDAYS(DATE(2007,1,25), DATE(2008,11,15), 2, \"\")",
-        180.0,
-        1e-12,
-    );
+    // An empty TEXT is not a blank slot: Excel coerces "" to a number and fails with #VALUE!.
+    match eval("=COUPDAYS(DATE(2007,1,25), DATE(2008,11,15), 2, \"\")") {
+        LiteralValue::Error(e) => assert_eq!(e.kind, ExcelErrorKind::Value),
+        other => panic!("COUPDAYS(..., \"\"): expected #VALUE!, got {other:?}"),
+    }
 }
 
 #[test]
