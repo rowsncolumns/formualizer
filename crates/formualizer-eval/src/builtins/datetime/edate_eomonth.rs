@@ -25,7 +25,7 @@ fn coerce_to_serial(arg: &ArgumentHandle) -> Result<f64, ExcelError> {
     if let LiteralValue::Error(e) = v {
         return Err(e);
     }
-    crate::coercion::to_number_lenient(&v).map_err(|_| {
+    crate::builtins::utils::coerce_num_for(arg, &v).map_err(|_| {
         ExcelError::new_value()
             .with_message("EDATE/EOMONTH expects numeric, date, or text-numeric arguments")
     })
@@ -36,7 +36,7 @@ fn coerce_to_int(arg: &ArgumentHandle) -> Result<i32, ExcelError> {
     if let LiteralValue::Error(e) = v {
         return Err(e);
     }
-    crate::coercion::to_number_lenient(&v)
+    crate::builtins::utils::coerce_num_for(arg, &v)
         .map(|f| f.trunc() as i32)
         .map_err(|_| {
             ExcelError::new_value()

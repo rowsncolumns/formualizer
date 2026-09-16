@@ -22,9 +22,32 @@ pub fn aggregate_result(n: f64) -> LiteralValue {
 /// - Number/Int map to f64
 /// - Boolean maps to 1.0/0.0
 /// - Empty maps to 0.0
+/// - Numeric text and full date/time text parse to their value
 /// - Others -> `#VALUE!`
+///
+/// Clock-less: year-less date text (`"1/2"`) needs the evaluation clock's year and is `#VALUE!`
+/// here. Use [`coerce_num_in`] / [`coerce_num_for`] wherever a `FunctionContext` or the
+/// argument's handle is at hand — every scalar-argument path a user can reach should.
 pub fn coerce_num(value: &LiteralValue) -> Result<f64, ExcelError> {
     crate::coercion::to_number_lenient(value)
+}
+
+/// [`coerce_num`] with the evaluation context: identical, plus Excel's year-less date text
+/// resolved in the clock's year (`"1/2"` → January 2 of this year, the year `TODAY()` reports).
+pub fn coerce_num_in(
+    ctx: &dyn crate::traits::FunctionContext<'_>,
+    value: &LiteralValue,
+) -> Result<f64, ExcelError> {
+    crate::coercion::to_number_lenient_with_clock(value, &ctx.locale(), ctx.clock())
+}
+
+/// [`coerce_num_in`] for a value read from `arg` — the argument handle carries the interpreter
+/// whose locale and clock apply.
+pub(crate) fn coerce_num_for(
+    arg: &crate::traits::ArgumentHandle<'_, '_>,
+    value: &LiteralValue,
+) -> Result<f64, ExcelError> {
+    arg.lenient_number(value)
 }
 
 /// Get a single numeric argument, with count and error checks.
@@ -38,7 +61,7 @@ pub fn unary_numeric_arg<'a, 'b>(
     let v = args[0].value()?.into_literal();
     match v {
         LiteralValue::Error(e) => Err(e),
-        other => coerce_num(&other),
+        other => coerce_num_for(&args[0], &other),
     }
 }
 
@@ -54,11 +77,11 @@ pub fn binary_numeric_args<'a, 'b>(
     let b = args[1].value()?.into_literal();
     let a_num = match a {
         LiteralValue::Error(e) => return Err(e),
-        other => coerce_num(&other)?,
+        other => coerce_num_for(&args[0], &other)?,
     };
     let b_num = match b {
         LiteralValue::Error(e) => return Err(e),
-        other => coerce_num(&other)?,
+        other => coerce_num_for(&args[1], &other)?,
     };
     Ok((a_num, b_num))
 }

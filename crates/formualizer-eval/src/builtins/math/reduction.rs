@@ -1,4 +1,4 @@
-use super::super::utils::{ARG_RANGE_NUM_LENIENT_ONE, coerce_num};
+use super::super::utils::{ARG_RANGE_NUM_LENIENT_ONE, coerce_num_for};
 use crate::args::ArgSchema;
 use crate::function::Function;
 use crate::function_contract::FunctionDependencyContract;
@@ -124,7 +124,7 @@ impl Function for MinFn {
                         return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
                     }
                     other => {
-                        if let Ok(n) = coerce_num(&other) {
+                        if let Ok(n) = coerce_num_for(a, &other) {
                             mv = Some(mv.map(|m| m.min(n)).unwrap_or(n));
                         }
                     }
@@ -254,7 +254,7 @@ impl Function for MaxFn {
                         return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
                     }
                     other => {
-                        if let Ok(n) = coerce_num(&other) {
+                        if let Ok(n) = coerce_num_for(a, &other) {
                             mv = Some(mv.map(|m| m.max(n)).unwrap_or(n));
                         }
                     }

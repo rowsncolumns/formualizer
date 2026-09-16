@@ -3698,7 +3698,7 @@ impl Function for TrimRangeFn {
             match arg.value()?.into_literal() {
                 LiteralValue::Error(e) => Err(e),
                 v => {
-                    let n = crate::coercion::to_number_lenient(&v)?.trunc();
+                    let n = crate::builtins::utils::coerce_num_for(arg, &v)?.trunc();
                     if (0.0..=3.0).contains(&n) {
                         Ok(n as u8)
                     } else {
@@ -3723,8 +3723,10 @@ impl Function for TrimRangeFn {
         if rows == 0 || cols == 0 {
             return scalar_err(ExcelError::new_ref());
         }
-        let blank_row = |r: usize| (0..cols).all(|c| matches!(view.get_cell(r, c), LiteralValue::Empty));
-        let blank_col = |c: usize| (0..rows).all(|r| matches!(view.get_cell(r, c), LiteralValue::Empty));
+        let blank_row =
+            |r: usize| (0..cols).all(|c| matches!(view.get_cell(r, c), LiteralValue::Empty));
+        let blank_col =
+            |c: usize| (0..rows).all(|r| matches!(view.get_cell(r, c), LiteralValue::Empty));
 
         let (mut row_start, mut row_end) = (0usize, rows);
         if trim_rows & 1 != 0 {

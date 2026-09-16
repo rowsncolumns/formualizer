@@ -716,7 +716,7 @@ fn count_arg(arg: &ArgumentHandle<'_, '_>) -> Result<i64, LiteralValue> {
         Ok(LiteralValue::Boolean(b)) => Ok(b as i64),
         Ok(LiteralValue::Empty) => Ok(0),
         Ok(LiteralValue::Text(t)) => {
-            match crate::coercion::to_number_lenient(&LiteralValue::Text(t)) {
+            match crate::builtins::utils::coerce_num_for(arg, &LiteralValue::Text(t)) {
                 Ok(n) => Ok(n.floor() as i64),
                 Err(e) => Err(LiteralValue::Error(e)),
             }

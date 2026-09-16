@@ -1,6 +1,6 @@
 use super::super::utils::{
     ARG_NUM_LENIENT_ONE, ARG_NUM_LENIENT_THREE, ARG_NUM_LENIENT_TWO, ARG_RANGE_NUM_LENIENT_ONE,
-    coerce_num, lift_elementwise,
+    coerce_num_for, coerce_num_in, lift_elementwise,
 };
 use crate::args::ArgSchema;
 use crate::function::Function;
@@ -10,10 +10,10 @@ use formualizer_common::{ExcelError, LiteralValue};
 use formualizer_macros::func_caps;
 
 /// Coerce one lifted element to f64; error elements pass through as errors.
-fn elem_num(v: &LiteralValue) -> Result<f64, ExcelError> {
+fn elem_num(ctx: &dyn FunctionContext<'_>, v: &LiteralValue) -> Result<f64, ExcelError> {
     match v {
         LiteralValue::Error(e) => Err(e.clone()),
-        other => coerce_num(other),
+        other => coerce_num_in(ctx, other),
     }
 }
 
@@ -94,7 +94,7 @@ impl Function for AbsFn {
         // per cell, not collapse the range to a scalar and return #VALUE!).
         lift_elementwise(args, ctx, |elems| match elems[0] {
             LiteralValue::Error(e) => LiteralValue::Error(e.clone()),
-            other => match coerce_num(other) {
+            other => match coerce_num_in(ctx, other) {
                 Ok(n) => LiteralValue::Number(n.abs()),
                 Err(e) => LiteralValue::Error(e),
             },
@@ -159,7 +159,7 @@ impl Function for SignFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+        lift_elementwise(args, ctx, |elems| match elem_num(ctx, elems[0]) {
             Ok(n) => LiteralValue::Number(if n > 0.0 {
                 1.0
             } else if n < 0.0 {
@@ -231,7 +231,7 @@ impl Function for IntFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+        lift_elementwise(args, ctx, |elems| match elem_num(ctx, elems[0]) {
             Ok(n) => LiteralValue::Number(n.floor()),
             Err(e) => LiteralValue::Error(e),
         })
@@ -304,17 +304,21 @@ impl Function for TruncFn {
             )));
         }
         lift_elementwise(args, ctx, |elems| {
-            trunc_element(elems[0], elems.get(1).copied())
+            trunc_element(ctx, elems[0], elems.get(1).copied())
         })
     }
 }
 
 /// Scalar TRUNC core, applied per element under array lifting.
-fn trunc_element(n: &LiteralValue, digits: Option<&LiteralValue>) -> LiteralValue {
+fn trunc_element(
+    ctx: &dyn FunctionContext<'_>,
+    n: &LiteralValue,
+    digits: Option<&LiteralValue>,
+) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let mut n = elem_num(n)?;
+        let mut n = elem_num(ctx, n)?;
         let digits: i32 = match digits {
-            Some(d) => elem_num(d)? as i32,
+            Some(d) => elem_num(ctx, d)? as i32,
             None => 0,
         };
         if digits >= 0 {
@@ -386,15 +390,19 @@ impl Function for RoundFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| round_element(elems[0], elems[1]))
+        lift_elementwise(args, ctx, |elems| round_element(ctx, elems[0], elems[1]))
     }
 }
 
 /// Scalar ROUND core, applied per element under array lifting.
-fn round_element(n: &LiteralValue, digits: &LiteralValue) -> LiteralValue {
+fn round_element(
+    ctx: &dyn FunctionContext<'_>,
+    n: &LiteralValue,
+    digits: &LiteralValue,
+) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let n = elem_num(n)?;
-        let digits = elem_num(digits)? as i32;
+        let n = elem_num(ctx, n)?;
+        let digits = elem_num(ctx, digits)? as i32;
         let f = 10f64.powi(digits.abs());
         // Excel rounds the 15-significant-digit decimal, so `ROUND(1.005,2)` is
         // 1.01 even though 1.005*100 is 100.49999999999999 as a double.
@@ -465,15 +473,21 @@ impl Function for RoundDownFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| rounddown_element(elems[0], elems[1]))
+        lift_elementwise(args, ctx, |elems| {
+            rounddown_element(ctx, elems[0], elems[1])
+        })
     }
 }
 
 /// Scalar ROUNDDOWN core, applied per element under array lifting.
-fn rounddown_element(n: &LiteralValue, digits: &LiteralValue) -> LiteralValue {
+fn rounddown_element(
+    ctx: &dyn FunctionContext<'_>,
+    n: &LiteralValue,
+    digits: &LiteralValue,
+) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let n = elem_num(n)?;
-        let digits = elem_num(digits)? as i32;
+        let n = elem_num(ctx, n)?;
+        let digits = elem_num(ctx, digits)? as i32;
         let f = 10f64.powi(digits.abs());
         let out = if digits >= 0 {
             crate::coercion::to_excel_precision(n * f).trunc() / f
@@ -542,15 +556,19 @@ impl Function for RoundUpFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| roundup_element(elems[0], elems[1]))
+        lift_elementwise(args, ctx, |elems| roundup_element(ctx, elems[0], elems[1]))
     }
 }
 
 /// Scalar ROUNDUP core, applied per element under array lifting.
-fn roundup_element(n: &LiteralValue, digits: &LiteralValue) -> LiteralValue {
+fn roundup_element(
+    ctx: &dyn FunctionContext<'_>,
+    n: &LiteralValue,
+    digits: &LiteralValue,
+) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let n = elem_num(n)?;
-        let digits = elem_num(digits)? as i32;
+        let n = elem_num(ctx, n)?;
+        let digits = elem_num(ctx, digits)? as i32;
         let f = 10f64.powi(digits.abs());
         let mut scaled =
             crate::coercion::to_excel_precision(if digits >= 0 { n * f } else { n / f });
@@ -622,15 +640,15 @@ impl Function for ModFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| mod_element(elems[0], elems[1]))
+        lift_elementwise(args, ctx, |elems| mod_element(ctx, elems[0], elems[1]))
     }
 }
 
 /// Scalar MOD core, applied per element under array lifting.
-fn mod_element(x: &LiteralValue, y: &LiteralValue) -> LiteralValue {
+fn mod_element(ctx: &dyn FunctionContext<'_>, x: &LiteralValue, y: &LiteralValue) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let x = elem_num(x)?;
-        let y = elem_num(y)?;
+        let x = elem_num(ctx, x)?;
+        let y = elem_num(ctx, y)?;
         if y == 0.0 {
             return Ok(LiteralValue::Error(ExcelError::from_error_string(
                 "#DIV/0!",
@@ -723,17 +741,21 @@ impl Function for CeilingFn {
             )));
         }
         lift_elementwise(args, ctx, |elems| {
-            ceiling_element(elems[0], elems.get(1).copied())
+            ceiling_element(ctx, elems[0], elems.get(1).copied())
         })
     }
 }
 
 /// Scalar CEILING core, applied per element under array lifting.
-fn ceiling_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> LiteralValue {
+fn ceiling_element(
+    ctx: &dyn FunctionContext<'_>,
+    n: &LiteralValue,
+    sig: Option<&LiteralValue>,
+) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let n = elem_num(n)?;
+        let n = elem_num(ctx, n)?;
         let mut sig = match sig {
-            Some(s) => elem_num(s)?,
+            Some(s) => elem_num(ctx, s)?,
             None => 1.0,
         };
         // Excel: CEILING(x,0) is 0 (unlike FLOOR, which is #DIV/0!).
@@ -824,22 +846,23 @@ impl Function for CeilingMathFn {
             )));
         }
         lift_elementwise(args, ctx, |elems| {
-            ceiling_math_element(elems[0], elems.get(1).copied(), elems.get(2).copied())
+            ceiling_math_element(ctx, elems[0], elems.get(1).copied(), elems.get(2).copied())
         })
     }
 }
 
 /// Scalar CEILING.MATH core, applied per element under array lifting.
 fn ceiling_math_element(
+    ctx: &dyn FunctionContext<'_>,
     n: &LiteralValue,
     sig: Option<&LiteralValue>,
     mode: Option<&LiteralValue>,
 ) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let n = elem_num(n)?;
+        let n = elem_num(ctx, n)?;
         let sig = match sig {
             Some(s) => {
-                let v = elem_num(s)?;
+                let v = elem_num(ctx, s)?;
                 // Excel: a zero significance yields 0, as for CEILING / CEILING.PRECISE.
                 if v == 0.0 {
                     return Ok(LiteralValue::Number(0.0));
@@ -849,7 +872,7 @@ fn ceiling_math_element(
             None => 1.0,
         };
         let mode_nonzero = match mode {
-            Some(m) => elem_num(m)? != 0.0,
+            Some(m) => elem_num(ctx, m)? != 0.0,
             None => false,
         };
         let q = excel_quotient(n, sig);
@@ -934,17 +957,21 @@ impl Function for FloorFn {
             )));
         }
         lift_elementwise(args, ctx, |elems| {
-            floor_element(elems[0], elems.get(1).copied())
+            floor_element(ctx, elems[0], elems.get(1).copied())
         })
     }
 }
 
 /// Scalar FLOOR core, applied per element under array lifting.
-fn floor_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> LiteralValue {
+fn floor_element(
+    ctx: &dyn FunctionContext<'_>,
+    n: &LiteralValue,
+    sig: Option<&LiteralValue>,
+) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let n = elem_num(n)?;
+        let n = elem_num(ctx, n)?;
         let sig = match sig {
-            Some(s) => elem_num(s)?,
+            Some(s) => elem_num(ctx, s)?,
             None => 1.0,
         };
         // Excel: FLOOR(0,0) is 0; any other number with a zero significance is #DIV/0!.
@@ -1035,28 +1062,29 @@ impl Function for FloorMathFn {
             )));
         }
         lift_elementwise(args, ctx, |elems| {
-            floor_math_element(elems[0], elems.get(1).copied(), elems.get(2).copied())
+            floor_math_element(ctx, elems[0], elems.get(1).copied(), elems.get(2).copied())
         })
     }
 }
 
 /// Scalar FLOOR.MATH core, applied per element under array lifting.
 fn floor_math_element(
+    ctx: &dyn FunctionContext<'_>,
     n: &LiteralValue,
     sig: Option<&LiteralValue>,
     mode: Option<&LiteralValue>,
 ) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let n = elem_num(n)?;
+        let n = elem_num(ctx, n)?;
         let sig = match sig {
             Some(s) => {
-                let v = elem_num(s)?;
+                let v = elem_num(ctx, s)?;
                 if v == 0.0 { 1.0 } else { v.abs() }
             }
             None => 1.0,
         };
         let mode_nonzero = match mode {
-            Some(m) => elem_num(m)? != 0.0,
+            Some(m) => elem_num(ctx, m)? != 0.0,
             None => false,
         };
         let q = excel_quotient(n, sig);
@@ -1130,7 +1158,7 @@ impl Function for SqrtFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+        lift_elementwise(args, ctx, |elems| match elem_num(ctx, elems[0]) {
             Ok(n) if n < 0.0 => LiteralValue::Error(ExcelError::new_num()),
             Ok(n) => LiteralValue::Number(n.sqrt()),
             Err(e) => LiteralValue::Error(e),
@@ -1195,15 +1223,19 @@ impl Function for PowerFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| power_element(elems[0], elems[1]))
+        lift_elementwise(args, ctx, |elems| power_element(ctx, elems[0], elems[1]))
     }
 }
 
 /// Scalar POWER core, applied per element under array lifting.
-fn power_element(base: &LiteralValue, expv: &LiteralValue) -> LiteralValue {
+fn power_element(
+    ctx: &dyn FunctionContext<'_>,
+    base: &LiteralValue,
+    expv: &LiteralValue,
+) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let base = elem_num(base)?;
-        let expv = elem_num(expv)?;
+        let base = elem_num(ctx, base)?;
+        let expv = elem_num(ctx, expv)?;
         if base < 0.0 && (expv.fract().abs() > 1e-12) {
             return Ok(LiteralValue::Error(ExcelError::new_num()));
         }
@@ -1281,7 +1313,7 @@ impl Function for ExpFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+        lift_elementwise(args, ctx, |elems| match elem_num(ctx, elems[0]) {
             Ok(n) => LiteralValue::Number(n.exp()),
             Err(e) => LiteralValue::Error(e),
         })
@@ -1345,7 +1377,7 @@ impl Function for LnFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+        lift_elementwise(args, ctx, |elems| match elem_num(ctx, elems[0]) {
             Ok(n) if n <= 0.0 => LiteralValue::Error(ExcelError::new_num()),
             Ok(n) => LiteralValue::Number(n.ln()),
             Err(e) => LiteralValue::Error(e),
@@ -1420,17 +1452,21 @@ impl Function for LogFn {
             )));
         }
         lift_elementwise(args, ctx, |elems| {
-            log_element(elems[0], elems.get(1).copied())
+            log_element(ctx, elems[0], elems.get(1).copied())
         })
     }
 }
 
 /// Scalar LOG core, applied per element under array lifting.
-fn log_element(n: &LiteralValue, base: Option<&LiteralValue>) -> LiteralValue {
+fn log_element(
+    ctx: &dyn FunctionContext<'_>,
+    n: &LiteralValue,
+    base: Option<&LiteralValue>,
+) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let n = elem_num(n)?;
+        let n = elem_num(ctx, n)?;
         let base = match base {
-            Some(b) => elem_num(b)?,
+            Some(b) => elem_num(ctx, b)?,
             None => 10.0,
         };
         if n <= 0.0 || base <= 0.0 || (base - 1.0).abs() < 1e-12 {
@@ -1498,7 +1534,7 @@ impl Function for Log10Fn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+        lift_elementwise(args, ctx, |elems| match elem_num(ctx, elems[0]) {
             Ok(n) if n <= 0.0 => LiteralValue::Error(ExcelError::new_num()),
             Ok(n) => LiteralValue::Number(n.log10()),
             Err(e) => LiteralValue::Error(e),
@@ -1574,15 +1610,19 @@ impl Function for QuotientFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| quotient_element(elems[0], elems[1]))
+        lift_elementwise(args, ctx, |elems| quotient_element(ctx, elems[0], elems[1]))
     }
 }
 
 /// Scalar QUOTIENT core, applied per element under array lifting.
-fn quotient_element(n: &LiteralValue, d: &LiteralValue) -> LiteralValue {
+fn quotient_element(
+    ctx: &dyn FunctionContext<'_>,
+    n: &LiteralValue,
+    d: &LiteralValue,
+) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let n = elem_num(n)?;
-        let d = elem_num(d)?;
+        let n = elem_num(ctx, n)?;
+        let d = elem_num(ctx, d)?;
         if d == 0.0 {
             return Ok(LiteralValue::Error(ExcelError::new_div()));
         }
@@ -1648,7 +1688,7 @@ impl Function for EvenFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+        lift_elementwise(args, ctx, |elems| match elem_num(ctx, elems[0]) {
             Ok(number) => {
                 if number == 0.0 {
                     LiteralValue::Number(0.0)
@@ -1723,7 +1763,7 @@ impl Function for OddFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+        lift_elementwise(args, ctx, |elems| match elem_num(ctx, elems[0]) {
             Ok(number) => {
                 let sign = if number < 0.0 { -1.0 } else { 1.0 };
                 let mut v = number.abs().ceil() as i64;
@@ -1794,7 +1834,7 @@ impl Function for SqrtPiFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| match elem_num(elems[0]) {
+        lift_elementwise(args, ctx, |elems| match elem_num(ctx, elems[0]) {
             Ok(n) if n < 0.0 => LiteralValue::Error(ExcelError::new_num()),
             Ok(n) => LiteralValue::Number((n * std::f64::consts::PI).sqrt()),
             Err(e) => LiteralValue::Error(e),
@@ -1860,7 +1900,7 @@ impl Function for MultinomialFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         let mut values: Vec<i64> = Vec::new();
         for arg in args {
@@ -1869,7 +1909,7 @@ impl Function for MultinomialFn {
                     LiteralValue::Error(e) => {
                         return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
                     }
-                    other => coerce_num(&other)?.trunc() as i64,
+                    other => coerce_num_in(ctx, &other)?.trunc() as i64,
                 };
                 if n < 0 {
                     return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
@@ -1977,25 +2017,25 @@ impl Function for SeriesSumFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         let x = match args[0].value()?.into_literal() {
             LiteralValue::Error(e) => {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
             }
-            other => coerce_num(&other)?,
+            other => coerce_num_in(ctx, &other)?,
         };
         let n = match args[1].value()?.into_literal() {
             LiteralValue::Error(e) => {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
             }
-            other => coerce_num(&other)?,
+            other => coerce_num_in(ctx, &other)?,
         };
         let m = match args[2].value()?.into_literal() {
             LiteralValue::Error(e) => {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
             }
-            other => coerce_num(&other)?,
+            other => coerce_num_in(ctx, &other)?,
         };
 
         let mut coeffs: Vec<f64> = Vec::new();
@@ -2003,7 +2043,7 @@ impl Function for SeriesSumFn {
             view.for_each_cell(&mut |cell| {
                 match cell {
                     LiteralValue::Error(e) => return Err(e.clone()),
-                    other => coeffs.push(coerce_num(other)?),
+                    other => coeffs.push(coerce_num_in(ctx, other)?),
                 }
                 Ok(())
             })?;
@@ -2018,7 +2058,7 @@ impl Function for SeriesSumFn {
                                         LiteralValue::Error(e),
                                     ));
                                 }
-                                other => coeffs.push(coerce_num(&other)?),
+                                other => coeffs.push(coerce_num_in(ctx, &other)?),
                             }
                         }
                     }
@@ -2026,7 +2066,7 @@ impl Function for SeriesSumFn {
                 LiteralValue::Error(e) => {
                     return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
                 }
-                other => coeffs.push(coerce_num(&other)?),
+                other => coeffs.push(coerce_num_in(ctx, &other)?),
             }
         }
 
@@ -2101,7 +2141,7 @@ impl Function for SumsqFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         let mut total = 0.0;
         for arg in args {
@@ -2141,7 +2181,7 @@ impl Function for SumsqFn {
                         return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
                     }
                     other => {
-                        let n = coerce_num(&other)?;
+                        let n = coerce_num_in(ctx, &other)?;
                         total += n * n;
                     }
                 }
@@ -2210,15 +2250,19 @@ impl Function for MroundFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        lift_elementwise(args, ctx, |elems| mround_element(elems[0], elems[1]))
+        lift_elementwise(args, ctx, |elems| mround_element(ctx, elems[0], elems[1]))
     }
 }
 
 /// Scalar MROUND core, applied per element under array lifting.
-fn mround_element(number: &LiteralValue, multiple: &LiteralValue) -> LiteralValue {
+fn mround_element(
+    ctx: &dyn FunctionContext<'_>,
+    number: &LiteralValue,
+    multiple: &LiteralValue,
+) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let number = elem_num(number)?;
-        let multiple = elem_num(multiple)?;
+        let number = elem_num(ctx, number)?;
+        let multiple = elem_num(ctx, multiple)?;
 
         if multiple == 0.0 {
             return Ok(LiteralValue::Number(0.0));
@@ -2352,15 +2396,19 @@ impl Function for RomanFn {
             )));
         }
         lift_elementwise(args, ctx, |elems| {
-            roman_element(elems[0], elems.get(1).copied())
+            roman_element(ctx, elems[0], elems.get(1).copied())
         })
     }
 }
 
 /// Scalar ROMAN core, applied per element under array lifting.
-fn roman_element(number: &LiteralValue, form: Option<&LiteralValue>) -> LiteralValue {
+fn roman_element(
+    ctx: &dyn FunctionContext<'_>,
+    number: &LiteralValue,
+    form: Option<&LiteralValue>,
+) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let number = elem_num(number)?.trunc() as i64;
+        let number = elem_num(ctx, number)?.trunc() as i64;
 
         if !(0..=3999).contains(&number) {
             return Ok(LiteralValue::Error(ExcelError::new_value()));
@@ -2597,22 +2645,23 @@ impl Function for BaseFn {
             )));
         }
         lift_elementwise(args, ctx, |elems| {
-            base_element(elems[0], elems[1], elems.get(2).copied())
+            base_element(ctx, elems[0], elems[1], elems.get(2).copied())
         })
     }
 }
 
 /// Scalar BASE core, applied per element under array lifting.
 fn base_element(
+    ctx: &dyn FunctionContext<'_>,
     number: &LiteralValue,
     radix: &LiteralValue,
     min_len: Option<&LiteralValue>,
 ) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let number = elem_num(number)?.trunc() as i64;
-        let radix = elem_num(radix)?.trunc() as i64;
+        let number = elem_num(ctx, number)?.trunc() as i64;
+        let radix = elem_num(ctx, radix)?.trunc() as i64;
         let min_len = match min_len {
-            Some(v) => elem_num(v)?.trunc() as usize,
+            Some(v) => elem_num(ctx, v)?.trunc() as usize,
             None => 0,
         };
         if !(2..=36).contains(&radix) || number < 0 {
@@ -2700,12 +2749,16 @@ impl Function for DecimalFn {
                 ExcelError::new_value(),
             )));
         }
-        lift_elementwise(args, ctx, |elems| decimal_element(elems[0], elems[1]))
+        lift_elementwise(args, ctx, |elems| decimal_element(ctx, elems[0], elems[1]))
     }
 }
 
 /// Scalar DECIMAL core, applied per element under array lifting.
-fn decimal_element(text: &LiteralValue, radix: &LiteralValue) -> LiteralValue {
+fn decimal_element(
+    ctx: &dyn FunctionContext<'_>,
+    text: &LiteralValue,
+    radix: &LiteralValue,
+) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
         let text = match text {
             LiteralValue::Text(s) => s.clone(),
@@ -2716,7 +2769,7 @@ fn decimal_element(text: &LiteralValue, radix: &LiteralValue) -> LiteralValue {
                 return Ok(LiteralValue::Error(ExcelError::new_value()));
             }
         };
-        let radix = elem_num(radix)?.trunc() as u32;
+        let radix = elem_num(ctx, radix)?.trunc() as u32;
         if !(2..=36).contains(&radix) {
             return Ok(LiteralValue::Error(ExcelError::new_num()));
         }
@@ -2788,18 +2841,22 @@ impl Function for CeilingPreciseFn {
             )));
         }
         lift_elementwise(args, ctx, |elems| {
-            ceiling_precise_element(elems[0], elems.get(1).copied())
+            ceiling_precise_element(ctx, elems[0], elems.get(1).copied())
         })
     }
 }
 
 /// Scalar CEILING.PRECISE / ISO.CEILING core, applied per element under array lifting.
-fn ceiling_precise_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> LiteralValue {
+fn ceiling_precise_element(
+    ctx: &dyn FunctionContext<'_>,
+    n: &LiteralValue,
+    sig: Option<&LiteralValue>,
+) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let n = elem_num(n)?;
+        let n = elem_num(ctx, n)?;
         let sig = match sig {
             Some(s) => {
-                let v = elem_num(s)?;
+                let v = elem_num(ctx, s)?;
                 if v == 0.0 {
                     return Ok(LiteralValue::Number(0.0));
                 }
@@ -2874,18 +2931,22 @@ impl Function for FloorPreciseFn {
             )));
         }
         lift_elementwise(args, ctx, |elems| {
-            floor_precise_element(elems[0], elems.get(1).copied())
+            floor_precise_element(ctx, elems[0], elems.get(1).copied())
         })
     }
 }
 
 /// Scalar FLOOR.PRECISE core, applied per element under array lifting.
-fn floor_precise_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> LiteralValue {
+fn floor_precise_element(
+    ctx: &dyn FunctionContext<'_>,
+    n: &LiteralValue,
+    sig: Option<&LiteralValue>,
+) -> LiteralValue {
     let compute = || -> Result<LiteralValue, ExcelError> {
-        let n = elem_num(n)?;
+        let n = elem_num(ctx, n)?;
         let sig = match sig {
             Some(s) => {
-                let v = elem_num(s)?;
+                let v = elem_num(ctx, s)?;
                 if v == 0.0 {
                     return Ok(LiteralValue::Number(0.0));
                 }
@@ -2960,7 +3021,7 @@ impl Function for IsoCeilingFn {
             )));
         }
         lift_elementwise(args, ctx, |elems| {
-            ceiling_precise_element(elems[0], elems.get(1).copied())
+            ceiling_precise_element(ctx, elems[0], elems.get(1).copied())
         })
     }
 }
@@ -2999,7 +3060,7 @@ fn collect_nums_from_arg<'a, 'b>(
                 }
             }
             other => {
-                out.push(coerce_num(&other)?);
+                out.push(coerce_num_for(arg, &other)?);
             }
         }
     }

@@ -321,25 +321,28 @@ impl Function for TextFn {
         let num = match val {
             LiteralValue::Number(f) => f,
             LiteralValue::Int(i) => i as f64,
-            LiteralValue::Text(t) => match ctx.locale().parse_number_invariant(&t) {
-                Some(n) => n,
-                None => {
-                    // Excel returns the text argument unchanged only when it is
-                    // *clearly* non-numeric (e.g. =TEXT("abc","00") -> "abc"). Text
-                    // that contains digits may be a number, date, currency or
-                    // fraction that Excel would coerce and format (e.g. "3-1",
-                    // "$5", "1/2", or locale-ambiguous "1.234,56"); handling those
-                    // requires a shared TEXT/VALUE coercion that does not exist yet,
-                    // so we conservatively keep returning #VALUE! for them rather
-                    // than passing them through unformatted.
-                    if t.chars().any(|c| c.is_ascii_digit()) {
-                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                            ExcelError::new_value(),
-                        )));
+            // The same text→number coercion as VALUE() and the operators: numeric, currency,
+            // percent, date/time text, and year-less dates in the clock's year
+            // (`TEXT("1/2","yyyy")` is this year).
+            LiteralValue::Text(t) => {
+                match crate::coercion::parse_numeric_text_with_clock(&t, &ctx.locale(), ctx.clock())
+                {
+                    Some(n) => n,
+                    None => {
+                        // Excel returns the text argument unchanged only when it is
+                        // *clearly* non-numeric (e.g. =TEXT("abc","00") -> "abc"). Digit-bearing
+                        // text the shared coercion did not accept (a mixed fraction like
+                        // "1 1/2", locale-ambiguous "1.234,56") is something Excel might still
+                        // coerce, so it stays #VALUE! rather than passing through unformatted.
+                        if t.chars().any(|c| c.is_ascii_digit()) {
+                            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                                ExcelError::new_value(),
+                            )));
+                        }
+                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(t)));
                     }
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(t)));
                 }
-            },
+            }
             // Booleans are not numbers to TEXT: Excel returns them as the text "TRUE"/"FALSE"
             // whatever the format code (`TEXT(TRUE,"0")` → "TRUE").
             LiteralValue::Boolean(b) => {
@@ -443,18 +446,15 @@ fn format_with_thousands(n: f64, fmt: &str) -> String {
     }
 }
 
-// very naive: treat integer part as days since 1899-12-31 ignoring leap bug for now
+// Minimal date-code support (`yyyy`, `mm`, `dd`, `hh:mm`). The calendar parts come from the
+// shared 1900-date-system authority, so the phantom 1900-02-29 (serial 60) and serial 0
+// ("January 0, 1900") format exactly as `DAY`/`MONTH`/`YEAR` report them; a serial outside the
+// system falls back to Excel's serial-0 day.
 fn format_serial_date(n: f64, fmt: &str) -> String {
-    use chrono::Datelike;
-    let days = n.trunc() as i64;
-    let base = chrono::NaiveDate::from_ymd_opt(1899, 12, 31).unwrap();
-    let date = base
-        .checked_add_signed(chrono::TimeDelta::days(days))
-        .unwrap_or(base);
+    let (year, month, day) =
+        crate::builtins::datetime::serial_to_ymd(n.trunc()).unwrap_or((1900, 1, 0));
     let mut out = fmt.to_string();
-    out = out.replace("yyyy", &format!("{:04}", date.year()));
-    out = out.replace("mm", &format!("{:02}", date.month()));
-    out = out.replace("dd", &format!("{:02}", date.day()));
+    // Time first: the `mm` in `hh:mm` is minutes, not the month.
     if out.contains("hh:mm") {
         let frac = n.fract();
         let total_minutes = (frac * 24.0 * 60.0).round() as i64;
@@ -462,6 +462,9 @@ fn format_serial_date(n: f64, fmt: &str) -> String {
         let mm = total_minutes % 60;
         out = out.replace("hh:mm", &format!("{hh:02}:{mm:02}"));
     }
+    out = out.replace("yyyy", &format!("{year:04}"));
+    out = out.replace("mm", &format!("{month:02}"));
+    out = out.replace("dd", &format!("{day:02}"));
     out
 }
 
@@ -617,15 +620,39 @@ mod tests {
 
     #[test]
     fn text_digit_bearing_text_still_errors() {
-        // Text that contains digits may be a number/date/currency/fraction that
-        // Excel would coerce and format. Until a shared TEXT/VALUE coercion exists
-        // we keep returning #VALUE! rather than passing it through unformatted,
-        // and we must not change the locale-ambiguous "1.234,56" case.
+        // Digit-bearing text goes through the shared VALUE()/operator coercion: "3-1" and
+        // "1/2" are Excel dates in the current year and format as their serial. Text that
+        // coercion rejects but that Excel might still read as a number (a dangling sign,
+        // the locale-ambiguous "1.234,56") stays #VALUE! rather than passing through
+        // unformatted.
         let wb = TestWorkbook::new().with_function(std::sync::Arc::new(TextFn));
         let ctx = wb.interpreter();
         let f = ctx.context.get_function("", "TEXT").unwrap();
-        // "$5" is numeric text in Excel (TEXT("$5","00") → "05"); the rest are not
-        for input in ["3-1", "10-", "1.234,56", "1/2"] {
+        for input in ["3-1", "1/2"] {
+            let v = lit(LiteralValue::Text(input.into()));
+            let fmt = lit(LiteralValue::Text("0".into()));
+            let out = f
+                .dispatch(
+                    &[
+                        ArgumentHandle::new(&v, &ctx),
+                        ArgumentHandle::new(&fmt, &ctx),
+                    ],
+                    &ctx.function_context(None),
+                )
+                .unwrap()
+                .into_literal();
+            match out {
+                LiteralValue::Text(t) => {
+                    let serial: f64 = t.parse().expect("a formatted date serial");
+                    assert!(serial > 40000.0, "TEXT({input:?},\"0\") = {t}");
+                }
+                other => {
+                    panic!("expected a formatted serial for TEXT({input:?},\"0\"), got {other:?}")
+                }
+            }
+        }
+        // "$5" is numeric text in Excel (TEXT("$5","00") → "05"); these are not
+        for input in ["10-", "1.234,56"] {
             let v = lit(LiteralValue::Text(input.into()));
             let fmt = lit(LiteralValue::Text("00".into()));
             let out = f

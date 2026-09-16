@@ -1486,7 +1486,7 @@ impl<'a> Interpreter<'a> {
 
     /// Excel's lenient text→number coercion for operators: locale-aware numeric text and
     /// date/time text, with year-less dates (`"1/2"`) taken in the evaluation clock's year.
-    fn lenient_number(&self, v: &LiteralValue) -> Result<f64, ExcelError> {
+    pub(crate) fn lenient_number(&self, v: &LiteralValue) -> Result<f64, ExcelError> {
         crate::coercion::to_number_lenient_with_clock(
             v,
             &self.context.locale(),
@@ -1979,10 +1979,6 @@ impl<'a> Interpreter<'a> {
     }
 
     /* ---------- coercion helpers ---------- */
-    fn coerce_number(&self, v: &LiteralValue) -> Result<f64, ExcelError> {
-        coercion::to_number_lenient(v)
-    }
-
     fn coerce_text(&self, v: &LiteralValue) -> String {
         coercion::to_text_invariant(v)
     }
