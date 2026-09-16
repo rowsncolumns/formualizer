@@ -162,6 +162,13 @@ fn pretty_print_node(ast: &ASTNode, spacing: Spacing) -> String {
                 let escaped = s.replace('"', "\"\"");
                 format!("\"{escaped}\"")
             }
+            // An omitted argument (`SUM(A1,)`, `IF(c,,1)`) prints as nothing: Excel distinguishes
+            // it from a typed `""` (`SUM(A1,"")` is #VALUE!, `IF(c,"",1)` returns text).
+            crate::LiteralValue::Empty => String::new(),
+            // Excel spells its literals upper-case and in General number form (`1E+20`, not
+            // `100000000000000000000`; 15 significant digits).
+            crate::LiteralValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+            crate::LiteralValue::Number(n) => formualizer_common::number_to_excel_text(*n),
             _ => format!("{value}"),
         },
         ASTNodeType::Reference { reference, .. } => reference.normalise(),
@@ -341,6 +348,33 @@ mod tests {
         assert_eq!(excel_formula(&ast), r#"=IF(A1>1,"a,b","c")"#);
         // Padded canonical form is untouched.
         assert_eq!(pretty_parse_render("=a1+b2*3").unwrap(), "=A1 + B2 * 3");
+    }
+
+    #[test]
+    fn test_excel_formula_spells_literals_like_excel() {
+        // Booleans upper-case, numbers in Excel's General form (15 significant digits, `E+nn`).
+        let ast = parse(r#"=IF(B2="a",true,false)"#).unwrap();
+        assert_eq!(excel_formula(&ast), r#"=IF(B2="a",TRUE,FALSE)"#);
+        let ast = parse("=1E+20").unwrap();
+        assert_eq!(excel_formula(&ast), "=1E+20");
+        let ast = parse("=100000000000000000000").unwrap();
+        assert_eq!(excel_formula(&ast), "=1E+20");
+        let ast = parse("=1.50*2+0.000001").unwrap();
+        assert_eq!(excel_formula(&ast), "=1.5*2+0.000001");
+        // An omitted argument stays omitted — `SUM(x,)` and `SUM(x,"")` mean different things.
+        let ast = parse("=SUM(A2:A3,)").unwrap();
+        assert_eq!(excel_formula(&ast), "=SUM(A2:A3,)");
+        let ast = parse("=IF(A1,,1)").unwrap();
+        assert_eq!(excel_formula(&ast), "=IF(A1,,1)");
+        let ast = parse("=CHOOSE(1,A1,,C1,,E1)").unwrap();
+        assert_eq!(excel_formula(&ast), "=CHOOSE(1,A1,,C1,,E1)");
+        let ast = parse(r#"=SUM(A1,"")"#).unwrap();
+        assert_eq!(excel_formula(&ast), r#"=SUM(A1,"")"#);
+        // The padded canonical form spells literals the same way.
+        assert_eq!(
+            pretty_parse_render("=IF(A1,,true)").unwrap(),
+            "=IF(A1, , TRUE)"
+        );
     }
 
     #[test]

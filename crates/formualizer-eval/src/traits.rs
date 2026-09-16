@@ -895,12 +895,13 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
     }
 
     /// True when this argument slot was skipped in the source (`INDEX(rng,,2)`): the parser
-    /// represents each skipped slot as a bare empty-text literal. Functions treat a skipped
+    /// represents each skipped slot as a bare `Empty` literal (distinct from a typed `""`, which
+    /// Excel treats as text — `SUM(x,)` sums, `SUM(x,"")` is #VALUE!). Functions treat a skipped
     /// slot as an omitted argument and apply Excel's default for that slot.
     pub fn is_skipped(&self) -> bool {
         matches!(
             &self.ast().node_type,
-            ASTNodeType::Literal(LiteralValue::Text(t)) if t.is_empty()
+            ASTNodeType::Literal(LiteralValue::Empty)
         )
     }
 

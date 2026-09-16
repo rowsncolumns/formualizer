@@ -537,8 +537,9 @@ fn if_truthy(v: &LiteralValue) -> Result<bool, ExcelError> {
         LiteralValue::Text(_) => crate::coercion::to_logical(v).map_err(|_| {
             ExcelError::new_value().with_message("IF condition must be boolean or number")
         }),
-        // An error condition surfaces as #VALUE! (the engine's documented
-        // contract, pinned by the SCC runtime oracle for settled #CIRC reads).
+        // An error in `logical_test` propagates as-is (`IF(#REF!>0,1,0)` is #REF!, `IF(1/0,1,0)`
+        // is #DIV/0!) — Excel never re-labels it #VALUE!.
+        LiteralValue::Error(e) => Err(e.clone()),
         _ => Err(ExcelError::new_value().with_message("IF condition must be boolean or number")),
     }
 }

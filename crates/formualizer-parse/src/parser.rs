@@ -2932,7 +2932,7 @@ impl Parser {
             && self.tokens[self.position].subtype == TokenSubType::Arg
         {
             args.push(ASTNode::new(
-                ASTNodeType::Literal(LiteralValue::Text("".to_string())),
+                ASTNodeType::Literal(LiteralValue::Empty),
                 None,
             ));
         } else {
@@ -2955,14 +2955,14 @@ impl Parser {
                         && next_token.subtype == TokenSubType::Arg
                     {
                         args.push(ASTNode::new(
-                            ASTNodeType::Literal(LiteralValue::Text("".to_string())),
+                            ASTNodeType::Literal(LiteralValue::Empty),
                             None,
                         ));
                     } else if next_token.token_type == TokenType::Func
                         && next_token.subtype == TokenSubType::Close
                     {
                         args.push(ASTNode::new(
-                            ASTNodeType::Literal(LiteralValue::Text("".to_string())),
+                            ASTNodeType::Literal(LiteralValue::Empty),
                             None,
                         ));
                         self.position += 1;
@@ -2972,7 +2972,7 @@ impl Parser {
                     }
                 } else {
                     args.push(ASTNode::new(
-                        ASTNodeType::Literal(LiteralValue::Text("".to_string())),
+                        ASTNodeType::Literal(LiteralValue::Empty),
                         None,
                     ));
                 }
