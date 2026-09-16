@@ -216,6 +216,16 @@ pub trait Function: Send + Sync + 'static {
             }
         }
 
+        // Excel evaluates a scalar function once per element when it is handed an array
+        // or a multi-cell range (`LEN(A1:A3)` spills `{1;2;3}`, `SUM(LEN(A1:A3))` sums
+        // them). Functions opt in with `ELEMENTWISE`; every other function keeps seeing
+        // its range arguments whole.
+        if self.caps().contains(FnCaps::ELEMENTWISE)
+            && let Some(lifted) = crate::lift::lift_elementwise(self, args, ctx)?
+        {
+            return Ok(lifted);
+        }
+
         self.eval(args, ctx)
     }
 }

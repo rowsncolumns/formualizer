@@ -51,10 +51,10 @@ pub struct NotFn;
 /// Variadic: false
 /// Signature: NOT(arg1: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for NotFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "NOT"
     }

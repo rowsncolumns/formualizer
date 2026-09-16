@@ -279,6 +279,12 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
         }
     }
 
+    /// The interpreter this argument is evaluated against (used to build synthetic
+    /// per-element handles when an `ELEMENTWISE` function lifts over an array argument).
+    pub(crate) fn interp(&self) -> &'a Interpreter<'b> {
+        self.interp
+    }
+
     pub fn value(&self) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         self.cached_value
             .get_or_init(|| self.compute_value())
@@ -551,15 +557,18 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                             .with_cancel_token(self.interp.context.cancellation_token()),
                     )
                 }
-                ASTNodeType::Function { .. } | ASTNodeType::BinaryOp { .. } => {
+                ASTNodeType::Function { .. }
+                | ASTNodeType::BinaryOp { .. }
+                | ASTNodeType::UnaryOp { .. } => {
                     match self.reference_for_eval() {
                         Ok(reference) => self
                             .interp
                             .context
                             .resolve_range_view(&reference, self.interp.current_sheet())
                             .map(|v| v.with_cancel_token(self.interp.context.cancellation_token())),
-                        // Not a reference-producing expression (e.g. `B1:B4>0`, `FILTER(...)`):
-                        // materialize its value as an owned view instead of failing with #REF!.
+                        // Not a reference-producing expression (e.g. `B1:B4>0`, `FILTER(...)`,
+                        // `--(A1:A3>1)`): materialize its value as an owned view instead of
+                        // failing with #REF!.
                         Err(_) => self.value_as_range_view(),
                     }
                 }
@@ -587,7 +596,8 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
                             .map(|v| v.with_cancel_token(self.interp.context.cancellation_token()))
                     }
                     crate::engine::arena::AstNodeData::Function { .. }
-                    | crate::engine::arena::AstNodeData::BinaryOp { .. } => {
+                    | crate::engine::arena::AstNodeData::BinaryOp { .. }
+                    | crate::engine::arena::AstNodeData::UnaryOp { .. } => {
                         match self.reference_for_eval() {
                             Ok(reference) => self
                                 .interp

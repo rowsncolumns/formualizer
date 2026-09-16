@@ -122,10 +122,10 @@ pub struct DaysFn;
 /// Variadic: false
 /// Signature: DAYS(arg1: number@scalar, arg2: number@scalar)
 /// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for DaysFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
 
     fn name(&self) -> &'static str {
         "DAYS"
@@ -199,10 +199,10 @@ pub struct Days360Fn;
 /// Variadic: true
 /// Signature: DAYS360(arg1: number@scalar, arg2: number@scalar, arg3...: any@scalar)
 /// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg3{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for Days360Fn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
 
     fn name(&self) -> &'static str {
         "DAYS360"
@@ -302,10 +302,10 @@ pub struct YearFracFn;
 /// Variadic: true
 /// Signature: YEARFRAC(arg1: number@scalar, arg2: number@scalar, arg3...: number@scalar)
 /// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg3{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for YearFracFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
 
     fn name(&self) -> &'static str {
         "YEARFRAC"
@@ -449,10 +449,10 @@ pub struct IsoWeekNumFn;
 /// Variadic: false
 /// Signature: ISOWEEKNUM(arg1: number@scalar)
 /// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for IsoWeekNumFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
 
     fn name(&self) -> &'static str {
         "ISOWEEKNUM"
@@ -521,10 +521,10 @@ pub struct YearFn;
 /// Variadic: false
 /// Signature: YEAR(arg1: number@scalar)
 /// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for YearFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
 
     fn name(&self) -> &'static str {
         "YEAR"
@@ -594,10 +594,10 @@ pub struct MonthFn;
 /// Variadic: false
 /// Signature: MONTH(arg1: number@scalar)
 /// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for MonthFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
 
     fn name(&self) -> &'static str {
         "MONTH"
@@ -667,10 +667,10 @@ pub struct DayFn;
 /// Variadic: false
 /// Signature: DAY(arg1: number@scalar)
 /// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for DayFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
 
     fn name(&self) -> &'static str {
         "DAY"
@@ -740,10 +740,10 @@ pub struct HourFn;
 /// Variadic: false
 /// Signature: HOUR(arg1: number@scalar)
 /// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for HourFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
 
     fn name(&self) -> &'static str {
         "HOUR"
@@ -816,10 +816,10 @@ pub struct MinuteFn;
 /// Variadic: false
 /// Signature: MINUTE(arg1: number@scalar)
 /// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for MinuteFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
 
     fn name(&self) -> &'static str {
         "MINUTE"
@@ -891,10 +891,10 @@ pub struct SecondFn;
 /// Variadic: false
 /// Signature: SECOND(arg1: number@scalar)
 /// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for SecondFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
 
     fn name(&self) -> &'static str {
         "SECOND"

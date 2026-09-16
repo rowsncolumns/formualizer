@@ -75,10 +75,10 @@ pub struct WeekdayFn;
 /// Variadic: true
 /// Signature: WEEKDAY(arg1: number@scalar, arg2...: number@scalar)
 /// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for WeekdayFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "WEEKDAY"
     }
@@ -187,10 +187,10 @@ pub struct WeeknumFn;
 /// Variadic: true
 /// Signature: WEEKNUM(arg1: number@scalar, arg2...: number@scalar)
 /// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for WeeknumFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "WEEKNUM"
     }
@@ -342,10 +342,10 @@ pub struct DatedifFn;
 /// Variadic: false
 /// Signature: DATEDIF(arg1: number@scalar, arg2: number@scalar, arg3: any@scalar)
 /// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg3{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for DatedifFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "DATEDIF"
     }

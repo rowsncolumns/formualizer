@@ -10,6 +10,7 @@ pub mod function_contract;
 pub mod function_registry;
 pub mod instant;
 pub mod interpreter;
+mod lift;
 pub mod locale;
 pub mod rng;
 pub mod stripes;

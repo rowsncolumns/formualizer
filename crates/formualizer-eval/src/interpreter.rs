@@ -571,13 +571,9 @@ impl<'a> Interpreter<'a> {
                     "^" => self
                         .power(left, right)
                         .map(crate::traits::CalcValue::Scalar),
-                    "&" => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(
-                        format!(
-                            "{}{}",
-                            crate::coercion::to_text_invariant(&left),
-                            crate::coercion::to_text_invariant(&right)
-                        ),
-                    ))),
+                    "&" => self
+                        .concat(left, right)
+                        .map(crate::traits::CalcValue::Scalar),
                     _ => Err(ExcelError::new(ExcelErrorKind::NImpl)
                         .with_message(format!("Binary op '{op}'"))),
                 }
@@ -1157,11 +1153,7 @@ impl<'a> Interpreter<'a> {
             "*" => self.numeric_binary(l_val, r_val, |a, b| a * b),
             "/" => self.divide(l_val, r_val),
             "^" => self.power(l_val, r_val),
-            "&" => Ok(LiteralValue::Text(format!(
-                "{}{}",
-                crate::coercion::to_text_invariant(&l_val),
-                crate::coercion::to_text_invariant(&r_val)
-            ))),
+            "&" => self.concat(l_val, r_val),
             ":" => {
                 // Compute a combined reference; in value context return #REF! for now.
                 let lref = self.evaluate_ast_as_reference(left)?;
@@ -1376,6 +1368,24 @@ impl<'a> Interpreter<'a> {
         })
     }
 
+    /// `&` lifts over arrays element-wise (`A1:A3&"x"` spills `10x,20x,30x`) and
+    /// propagates an error operand instead of concatenating its text.
+    fn concat(&self, left: LiteralValue, right: LiteralValue) -> Result<LiteralValue, ExcelError> {
+        self.broadcast_apply(left, right, |l, r| {
+            if let LiteralValue::Error(e) = l {
+                return Ok(LiteralValue::Error(e));
+            }
+            if let LiteralValue::Error(e) = r {
+                return Ok(LiteralValue::Error(e));
+            }
+            Ok(LiteralValue::Text(format!(
+                "{}{}",
+                crate::coercion::to_text_invariant(&l),
+                crate::coercion::to_text_invariant(&r)
+            )))
+        })
+    }
+
     fn divide(&self, left: LiteralValue, right: LiteralValue) -> Result<LiteralValue, ExcelError> {
         self.broadcast_apply(left, right, |l, r| {
             let ln = crate::coercion::to_number_lenient_with_locale(&l, &self.context.locale());
@@ -1442,13 +1452,21 @@ impl<'a> Interpreter<'a> {
     where
         F: Fn(LiteralValue, LiteralValue) -> Result<LiteralValue, ExcelError> + Copy,
     {
-        // Use strict broadcasting across dimensions
+        // Excel operator broadcasting: a dimension of 1 stretches; when both operands
+        // are wider than 1 the result takes the larger extent and the cells the shorter
+        // operand does not reach evaluate to #N/A (`{1;2;3}+{1;2}` → `{2;4;#N/A}`).
         let l_shape = (l.len(), l.first().map(|r| r.len()).unwrap_or(0));
         let r_shape = (r.len(), r.first().map(|r| r.len()).unwrap_or(0));
-        let target = match broadcast_shape(&[l_shape, r_shape]) {
-            Ok(s) => s,
-            Err(e) => return Ok(LiteralValue::Error(e)),
+        let dim = |a: usize, b: usize| {
+            if a == 1 {
+                b
+            } else if b == 1 {
+                a
+            } else {
+                a.max(b)
+            }
         };
+        let target = (dim(l_shape.0, r_shape.0), dim(l_shape.1, r_shape.1));
 
         let mut out = Vec::with_capacity(target.0);
         for i in 0..target.0 {
@@ -1456,16 +1474,16 @@ impl<'a> Interpreter<'a> {
             for j in 0..target.1 {
                 let (li, lj) = project_index((i, j), l_shape);
                 let (ri, rj) = project_index((i, j), r_shape);
-                let lv = l
-                    .get(li)
-                    .and_then(|r| r.get(lj))
-                    .cloned()
-                    .unwrap_or(LiteralValue::Empty);
-                let rv = r
-                    .get(ri)
-                    .and_then(|r| r.get(rj))
-                    .cloned()
-                    .unwrap_or(LiteralValue::Empty);
+                let (lv, rv) = match (
+                    l.get(li).and_then(|r| r.get(lj)),
+                    r.get(ri).and_then(|r| r.get(rj)),
+                ) {
+                    (Some(lv), Some(rv)) => (lv.clone(), rv.clone()),
+                    _ => {
+                        row.push(LiteralValue::Error(ExcelError::new(ExcelErrorKind::Na)));
+                        continue;
+                    }
+                };
                 row.push(match f(lv, rv) {
                     Ok(v) => v,
                     Err(e) => LiteralValue::Error(e),

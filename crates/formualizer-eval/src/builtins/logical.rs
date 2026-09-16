@@ -4,7 +4,7 @@ use super::utils::ARG_ANY_ONE;
 use crate::args::ArgSchema;
 use crate::function::Function;
 use crate::traits::{ArgumentHandle, FunctionContext};
-use formualizer_common::{ExcelError, LiteralValue};
+use formualizer_common::{ExcelError, ExcelErrorKind, LiteralValue};
 use formualizer_macros::func_caps;
 
 /* ─────────────────────────── TRUE() ─────────────────────────────── */
@@ -467,16 +467,15 @@ impl Function for IfFn {
         }
 
         let condition = args[0].value()?.into_literal();
-        let b = match condition {
-            LiteralValue::Boolean(b) => b,
-            LiteralValue::Number(n) => n != 0.0,
-            LiteralValue::Int(i) => i != 0,
-            LiteralValue::Empty => false,
-            _ => {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                    ExcelError::new_value().with_message("IF condition must be boolean or number"),
-                )));
-            }
+        // An array condition (`IF(A1:A5>25,A1:A5)`, the classic array-formula idiom) picks
+        // per element: both branches are evaluated once and broadcast against the
+        // condition's shape, as Excel does.
+        if let LiteralValue::Array(conds) = condition {
+            return if_elementwise(conds, args);
+        }
+        let b = match if_truthy(&condition) {
+            Ok(b) => b,
+            Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
 
         if b {
@@ -489,6 +488,65 @@ impl Function for IfFn {
             )))
         }
     }
+}
+
+fn if_truthy(v: &LiteralValue) -> Result<bool, ExcelError> {
+    match v {
+        LiteralValue::Boolean(b) => Ok(*b),
+        LiteralValue::Number(n) => Ok(*n != 0.0),
+        LiteralValue::Int(i) => Ok(*i != 0),
+        LiteralValue::Empty => Ok(false),
+        // An error or text condition surfaces as #VALUE! (the engine's documented
+        // contract, pinned by the SCC runtime oracle for settled #CIRC reads).
+        _ => Err(ExcelError::new_value().with_message("IF condition must be boolean or number")),
+    }
+}
+
+/// `IF` over an array condition: element `(i, j)` takes the matching element of the
+/// chosen branch (scalar branches broadcast, vector branches stretch along their unit
+/// dimension, cells a shorter branch does not reach are `#N/A`). An omitted false branch
+/// contributes `FALSE`, so `SUM(IF(rng>25,rng))` ignores the untaken cells.
+fn if_elementwise<'a, 'b, 'c>(
+    conds: Vec<Vec<LiteralValue>>,
+    args: &'c [ArgumentHandle<'a, 'b>],
+) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+    let shape = (conds.len(), conds.first().map(|r| r.len()).unwrap_or(0));
+    let branch = |idx: usize| -> Result<Option<Vec<Vec<LiteralValue>>>, ExcelError> {
+        Ok(match args.get(idx) {
+            None => None,
+            Some(a) => Some(match a.value()?.into_literal() {
+                LiteralValue::Array(rows) => rows,
+                v => vec![vec![v]],
+            }),
+        })
+    };
+    let when_true = branch(1)?.unwrap_or_default();
+    let when_false = branch(2)?;
+    let pick = |rows: &[Vec<LiteralValue>], i: usize, j: usize| -> LiteralValue {
+        let (br, bc) = (rows.len(), rows.first().map(|r| r.len()).unwrap_or(0));
+        let r = if br == 1 { 0 } else { i };
+        let c = if bc == 1 { 0 } else { j };
+        match rows.get(r).and_then(|row| row.get(c)) {
+            Some(v) => v.clone(),
+            None => LiteralValue::Error(ExcelError::new(ExcelErrorKind::Na)),
+        }
+    };
+    let mut out = Vec::with_capacity(shape.0);
+    for (i, row) in conds.iter().enumerate() {
+        let mut out_row = Vec::with_capacity(shape.1);
+        for (j, cond) in row.iter().enumerate() {
+            out_row.push(match if_truthy(cond) {
+                Err(e) => LiteralValue::Error(e),
+                Ok(true) => pick(&when_true, i, j),
+                Ok(false) => match &when_false {
+                    Some(rows) => pick(rows, i, j),
+                    None => LiteralValue::Boolean(false),
+                },
+            });
+        }
+        out.push(out_row);
+    }
+    Ok(crate::traits::CalcValue::Scalar(LiteralValue::Array(out)))
 }
 
 pub fn register_builtins() {

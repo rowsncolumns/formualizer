@@ -56,10 +56,10 @@ pub struct LenFn;
 /// Variadic: false
 /// Signature: LEN(arg1: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for LenFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "LEN"
     }
@@ -128,10 +128,10 @@ pub struct LeftFn;
 /// Variadic: true
 /// Signature: LEFT(arg1...: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for LeftFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "LEFT"
     }
@@ -222,10 +222,10 @@ pub struct RightFn;
 /// Variadic: true
 /// Signature: RIGHT(arg1...: any@scalar)
 /// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
-/// Caps: PURE
+/// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for RightFn {
-    func_caps!(PURE);
+    func_caps!(PURE, ELEMENTWISE);
     fn name(&self) -> &'static str {
         "RIGHT"
     }
