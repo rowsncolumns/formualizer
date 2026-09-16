@@ -34,7 +34,12 @@ fn criteria_mask_text_oob_column_uses_physical_rows() {
     };
     let view = engine.resolve_range_view(&c_whole_col, "Sheet1").unwrap();
 
-    let pred = crate::args::parse_criteria(&LiteralValue::Text("".into())).unwrap();
+    // Blank-family criteria ("" / "=" / "<>") are decided per cell, not via the Arrow mask.
+    let pred_blank = crate::args::parse_criteria(&LiteralValue::Text("".into())).unwrap();
+    assert!(engine.build_criteria_mask(&view, 0, &pred_blank).is_none());
+
+    // "<>Yes" folds nulls to true, so an empty column yields an all-true mask.
+    let pred = crate::args::parse_criteria(&LiteralValue::Text("<>Yes".into())).unwrap();
     let mask = engine
         .build_criteria_mask(&view, 0, &pred)
         .expect("expected cached criteria mask");

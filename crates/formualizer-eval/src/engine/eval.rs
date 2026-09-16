@@ -2293,13 +2293,35 @@ fn compute_criteria_mask(
     // This avoids materializing the full numeric column (64-bit per element) and instead
     // concatenates boolean masks (1-bit per element) - a 64x memory reduction.
     if is_numeric_pred {
+        // `=n` / `<>n` cannot be decided from the numeric column alone: a null slot may be
+        // numeric text ("1" matches `=1`) or a blank/text/boolean cell (which `<>1` matches).
+        // Those rows are settled per cell by `criteria_match`, the semantic reference.
+        let needs_cell_fill = matches!(
+            pred,
+            crate::args::CriteriaPredicate::Eq(_) | crate::args::CriteriaPredicate::Ne(_)
+        );
         let mut bool_parts: Vec<BooleanArray> = Vec::new();
         for res in view.numbers_slices() {
-            let (_rs, _rl, cols_seg) = res.ok()?;
+            let (rs, _rl, cols_seg) = res.ok()?;
             if col_in_view < cols_seg.len() {
                 let chunk = cols_seg[col_in_view].as_ref();
                 let mask = apply_numeric_pred(chunk, pred)?;
-                bool_parts.push(mask);
+                if needs_cell_fill && mask.null_count() > 0 {
+                    let mut bb = BooleanBuilder::with_capacity(mask.len());
+                    for i in 0..mask.len() {
+                        if mask.is_valid(i) {
+                            bb.append_value(mask.value(i));
+                        } else {
+                            bb.append_value(crate::builtins::utils::criteria_match(
+                                pred,
+                                &view.get_cell(rs + i, col_in_view),
+                            ));
+                        }
+                    }
+                    bool_parts.push(bb.finish());
+                } else {
+                    bool_parts.push(mask);
+                }
             }
         }
 
@@ -2332,12 +2354,22 @@ fn compute_criteria_mask(
             pattern,
             case_insensitive,
         } => {
+            // `~` escapes need the glob matcher; leave them to the per-cell path.
+            if pattern.contains('~') {
+                return None;
+            }
             let p = if *case_insensitive {
                 pattern.to_lowercase()
             } else {
                 pattern.clone()
             };
-            (2u8, p.replace('*', "%").replace('?', "_"), false)
+            // SQL LIKE treats `%`, `_` and `\` specially — escape literal ones before
+            // translating Excel's `*` / `?`.
+            let escaped = p
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            (2u8, escaped.replace('*', "%").replace('?', "_"), false)
         }
         _ => return None,
     };
@@ -5156,8 +5188,12 @@ where
     /// keys derived from a SPECIFIC sheet's data (lookup indexes, used-bounds) key on this, so a
     /// sheet-attributed edit elsewhere doesn't invalidate them.
     pub fn sheet_data_snapshot_id(&self, sheet_id: SheetId) -> u64 {
-        self.data_snapshot_id()
-            .wrapping_add(self.sheet_snapshot_offsets.get(&sheet_id).copied().unwrap_or(0))
+        self.data_snapshot_id().wrapping_add(
+            self.sheet_snapshot_offsets
+                .get(&sheet_id)
+                .copied()
+                .unwrap_or(0),
+        )
     }
 
     /// Mark a topology-changing edit: bump snapshot + topology epoch and invalidate cached schedules.
@@ -14574,10 +14610,10 @@ where
         }
         let ec0 = ec0.min(col_hi);
         // Pass-scoped cache with snapshot guard (sheet-scoped: edits to other sheets keep it)
-        let snap = self
-            .graph
-            .sheet_id(sheet)
-            .map_or_else(|| self.data_snapshot_id(), |sid| self.sheet_data_snapshot_id(sid));
+        let snap = self.graph.sheet_id(sheet).map_or_else(
+            || self.data_snapshot_id(),
+            |sid| self.sheet_data_snapshot_id(sid),
+        );
         let mut min_r0: Option<usize> = None;
         for ci in sc0..=ec0 {
             let sheet_id = self.graph.sheet_id(sheet)?;
@@ -16856,7 +16892,10 @@ where
             return Vec::new();
         };
         self.graph
-            .spill_region_of(CellRef::new(sheet_id, Coord::from_excel(row, col, true, true)))
+            .spill_region_of(CellRef::new(
+                sheet_id,
+                Coord::from_excel(row, col, true, true),
+            ))
             .into_iter()
             .map(|cell| {
                 (
@@ -21998,7 +22037,8 @@ impl RowBoundsCache {
         snapshot: u64,
         bounds: (Option<u32>, Option<u32>),
     ) {
-        self.map.insert((sheet_id as u32, col_idx), (snapshot, bounds));
+        self.map
+            .insert((sheet_id as u32, col_idx), (snapshot, bounds));
     }
 }
 

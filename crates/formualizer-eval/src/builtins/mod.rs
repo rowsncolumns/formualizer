@@ -12,7 +12,7 @@ pub mod random;
 pub mod reference_fns;
 pub mod stats; // Phase 6 statistical basics + extended stats
 pub mod text; // Phase 2 core text functions
-mod utils;
+pub(crate) mod utils;
 
 #[cfg(test)]
 mod tests;

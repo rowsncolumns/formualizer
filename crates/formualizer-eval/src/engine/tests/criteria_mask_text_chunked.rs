@@ -36,24 +36,33 @@ fn criteria_mask_text_is_built_per_chunk_and_handles_empty_string_semantics() {
     );
     let view = engine.resolve_range_view(&rng, "Sheet1").unwrap();
 
-    // Eq("") should treat Empty as equal and yield all true (no nulls).
+    // Blank-family criteria ("" / "<>") are decided per cell by `criteria_match`, not via the
+    // Arrow text mask.
     let pred_eq_empty = crate::args::parse_criteria(&LiteralValue::Text("".into())).unwrap();
-    let mask_eq = engine
-        .build_criteria_mask(&view, 0, &pred_eq_empty)
-        .expect("mask");
-    assert_eq!(mask_eq.len(), total_rows as usize);
-    assert_eq!(mask_eq.null_count(), 0);
-    for i in 0..mask_eq.len() {
-        assert!(mask_eq.value(i));
-    }
+    assert!(
+        engine
+            .build_criteria_mask(&view, 0, &pred_eq_empty)
+            .is_none()
+    );
 
-    // Ne("") should yield all nulls on an all-empty column (nilike(null, "") == null).
-    let pred_ne_empty = crate::args::parse_criteria(&LiteralValue::Text("<>".into())).unwrap();
+    // "<>Yes" folds Empty (null) cells to true: all rows match, no nulls.
+    let pred_ne_yes = crate::args::parse_criteria(&LiteralValue::Text("<>Yes".into())).unwrap();
     let mask_ne = engine
-        .build_criteria_mask(&view, 0, &pred_ne_empty)
+        .build_criteria_mask(&view, 0, &pred_ne_yes)
         .expect("mask");
     assert_eq!(mask_ne.len(), total_rows as usize);
-    assert_eq!(mask_ne.null_count(), total_rows as usize);
+    assert_eq!(mask_ne.null_count(), 0);
+    for i in 0..mask_ne.len() {
+        assert!(mask_ne.value(i));
+    }
+
+    // "Yes" leaves an all-empty column as all nulls (ilike(null, pat) == null).
+    let pred_eq_yes = crate::args::parse_criteria(&LiteralValue::Text("Yes".into())).unwrap();
+    let mask_eq = engine
+        .build_criteria_mask(&view, 0, &pred_eq_yes)
+        .expect("mask");
+    assert_eq!(mask_eq.len(), total_rows as usize);
+    assert_eq!(mask_eq.null_count(), total_rows as usize);
 
     // Ensure we actually walked chunks and hit the all-null segment fast path.
     let (segments_total, segments_all_null) =
