@@ -133,6 +133,23 @@ fn split_coerces_a_numeric_text_argument() {
     assert_eq!(spill("=SPLIT(1234.5, \".\")", 1, 2), row(&["1234", "5"]));
 }
 
+/// A letter or digit delimiter is a literal character, never a regex class: the JS engine used to
+/// escape every delimiter character, so `"d"` became `\d` (split on digits) and `"b"` became `\b`
+/// (backspace, no split). Both engines now agree on these.
+#[test]
+fn split_treats_an_alphanumeric_delimiter_literally() {
+    assert_eq!(spill("=SPLIT(\"1d2\", \"d\")", 1, 2), row(&["1", "2"]));
+    assert_eq!(spill("=SPLIT(\"a1b2c\", \"b\")", 1, 2), row(&["a1", "2c"]));
+    assert_eq!(spill("=SPLIT(\"a1b2c\", \"1b\")", 1, 2), row(&["a", "2c"]));
+    // Every character consumed by the delimiter set leaves no piece: an empty text result.
+    assert_eq!(scalar("=SPLIT(\"abc\", \"abc\")"), t(""));
+    // Regex metacharacters are literal too.
+    assert_eq!(
+        spill("=SPLIT(\"a.b*c\", \".*\")", 1, 3),
+        row(&["a", "b", "c"])
+    );
+}
+
 // ───────────────────────── JOIN ─────────────────────────
 
 #[test]
@@ -209,6 +226,19 @@ fn sortn_takes_a_sort_column_and_direction_and_ignores_display_ties_mode() {
         vec![vec![n(1.0), t("a")]]
     );
     assert_eq!(spill("=SORTN(A1:B3, 5)", 3, 2).len(), 3);
+}
+
+/// A scalar or array-constant first argument is a grid too (Sheets returns the value itself for a
+/// scalar; the JS engine does the same).
+#[test]
+fn sortn_accepts_a_scalar_or_array_constant_range() {
+    assert_eq!(scalar("=SORTN(5, 1)"), n(5.0));
+    assert_eq!(scalar("=SORTN(\"x\")"), t("x"));
+    assert_eq!(
+        spill("=SORTN({3;1;2}, 2)", 2, 1),
+        vec![vec![n(1.0)], vec![n(2.0)]]
+    );
+    assert_eq!(err_kind(&scalar("=SORTN(NA(), 1)")), ExcelErrorKind::Na);
 }
 
 #[test]
