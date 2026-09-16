@@ -213,4 +213,22 @@ mod tests {
         let r = ReferenceType::cell(Some("NoSuchSheet".to_string()), 1, 1);
         assert!(engine.resolve_range_view(&r, "Sheet1").is_err());
     }
+
+    #[test]
+    fn test_sheet_reference_resolution_is_case_insensitive() {
+        use crate::engine::{Engine, EvalConfig};
+        use crate::test_workbook::TestWorkbook;
+        use crate::traits::EvaluationContext;
+        use formualizer_parse::parser::ReferenceType;
+
+        // Excel resolves sheet names case-insensitively: =data!A1 reaches a
+        // sheet named Data.
+        let wb = TestWorkbook::new();
+        let mut engine = Engine::new(wb, EvalConfig::default());
+        engine.add_sheet("Data").unwrap();
+        let r = ReferenceType::cell(Some("data".to_string()), 1, 1);
+        assert!(engine.resolve_range_view(&r, "Data").is_ok());
+        let r_upper = ReferenceType::cell(Some("DATA".to_string()), 1, 1);
+        assert!(engine.resolve_range_view(&r_upper, "Data").is_ok());
+    }
 }
