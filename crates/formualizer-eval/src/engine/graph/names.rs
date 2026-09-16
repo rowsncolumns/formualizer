@@ -433,6 +433,15 @@ impl DependencyGraph {
                         self.vertex_to_names.remove(&vertex_id);
                     }
                 }
+                // The formula still spells this name. Park it as a pending reference so a
+                // re-definition (`define_name` → `resolve_pending_name_references`) rebuilds its
+                // dependencies onto the NEW name vertex; otherwise the formula re-evaluates once
+                // (it is dirty) and then never hears about the name's cells again — a redefined
+                // `Data` no longer propagates edits inside its range to `=SUM(Data)`.
+                if self.get_formula(vertex_id).is_some() {
+                    let sheet_id = self.get_sheet_id(vertex_id);
+                    self.record_pending_name_reference(sheet_id, &canon_name, vertex_id);
+                }
             }
             self.mark_named_vertex_deleted(&named_range);
             self.bump_symbol_revision();
