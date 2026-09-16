@@ -81,6 +81,9 @@ impl Function for LenFn {
             LiteralValue::Error(e) => {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
             }
+            LiteralValue::Number(f) => {
+                formualizer_common::number_to_excel_text(f).chars().count() as i64
+            }
             other => other.to_string().chars().count() as i64,
         };
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(count)))
@@ -161,6 +164,7 @@ impl Function for LeftFn {
             LiteralValue::Error(e) => {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
             }
+            LiteralValue::Number(f) => formualizer_common::number_to_excel_text(f),
             other => other.to_string(),
         };
         let n: i64 = if args.len() == 2 {
@@ -255,6 +259,7 @@ impl Function for RightFn {
             LiteralValue::Error(e) => {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
             }
+            LiteralValue::Number(f) => formualizer_common::number_to_excel_text(f),
             other => other.to_string(),
         };
         let n: i64 = if args.len() == 2 {

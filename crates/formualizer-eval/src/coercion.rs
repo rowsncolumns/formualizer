@@ -223,7 +223,7 @@ pub fn to_logical(value: &LiteralValue) -> Result<bool, ExcelError> {
 pub fn to_text_invariant(value: &LiteralValue) -> String {
     match value {
         LiteralValue::Text(s) => s.clone(),
-        LiteralValue::Number(n) => n.to_string(),
+        LiteralValue::Number(n) => formualizer_common::number_to_excel_text(*n),
         LiteralValue::Int(i) => i.to_string(),
         LiteralValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.into(),
         LiteralValue::Error(e) => e.to_string(),
@@ -234,7 +234,9 @@ pub fn to_text_invariant(value: &LiteralValue) -> String {
         LiteralValue::Date(_)
         | LiteralValue::DateTime(_)
         | LiteralValue::Time(_)
-        | LiteralValue::Duration(_) => value.as_serial_number().unwrap_or(0.0).to_string(),
+        | LiteralValue::Duration(_) => {
+            formualizer_common::number_to_excel_text(value.as_serial_number().unwrap_or(0.0))
+        }
         other => format!("{other:?}"),
     }
 }

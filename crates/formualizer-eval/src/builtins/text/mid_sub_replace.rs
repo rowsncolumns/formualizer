@@ -311,13 +311,7 @@ fn to_text<'a, 'b>(arg: &ArgumentHandle<'a, 'b>) -> Result<String, ExcelError> {
                 "FALSE".into()
             }
         }
-        LiteralValue::Number(f) => {
-            let mut s = f.to_string();
-            if s.ends_with(".0") {
-                s.truncate(s.len() - 2);
-            }
-            s
-        }
+        LiteralValue::Number(f) => formualizer_common::number_to_excel_text(f),
         LiteralValue::Int(i) => i.to_string(),
         LiteralValue::Error(e) => return Err(e),
         other => other.to_string(),
