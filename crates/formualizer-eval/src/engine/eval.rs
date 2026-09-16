@@ -23488,21 +23488,22 @@ where
                         | Some(formualizer_parse::parser::TableSpecifier::SpecialItem(
                             formualizer_parse::parser::SpecialItem::Headers,
                         )) => {
+                            // Excel: selecting a band the table does not have is #REF!.
                             if !has_headers {
-                                asheet.range_view(1, 1, 0, 0)
-                            } else {
-                                select(sr0, sc0, sr0, ec0)
+                                return Err(ExcelError::new(ExcelErrorKind::Ref)
+                                    .with_message("Table has no header row".to_string()));
                             }
+                            select(sr0, sc0, sr0, ec0)
                         }
                         Some(formualizer_parse::parser::TableSpecifier::Totals)
                         | Some(formualizer_parse::parser::TableSpecifier::SpecialItem(
                             formualizer_parse::parser::SpecialItem::Totals,
                         )) => {
                             if !has_totals {
-                                asheet.range_view(1, 1, 0, 0)
-                            } else {
-                                select(er0, sc0, er0, ec0)
+                                return Err(ExcelError::new(ExcelErrorKind::Ref)
+                                    .with_message("Table has no totals row".to_string()));
                             }
+                            select(er0, sc0, er0, ec0)
                         }
                         Some(
                             spec @ (formualizer_parse::parser::TableSpecifier::SpecialItem(
