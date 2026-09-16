@@ -1,12 +1,24 @@
 //! EDATE and EOMONTH functions for date arithmetic
 
-use super::serial::{date_to_serial, serial_to_date};
+use super::serial::{date_parts_to_serial_for, serial_to_ymd};
 use crate::args::ArgSchema;
+use crate::engine::DateSystem;
 use crate::function::Function;
 use crate::traits::{ArgumentHandle, FunctionContext};
-use chrono::{Datelike, NaiveDate};
 use formualizer_common::{ExcelError, LiteralValue};
 use formualizer_macros::func_caps;
+
+/// Serial of `DATE(year, month, day)` in the 1900 system, month overflow and all.
+fn ymd_serial(year: i32, month: i32, day: i32) -> Result<f64, ExcelError> {
+    date_parts_to_serial_for(DateSystem::Excel1900, year, month, day)
+}
+
+/// Days in a month counted in serials, so February 1900 has 29 (the phantom
+/// serial 60). Day 0 of the next month is the month's last day, which keeps
+/// December 9999 inside the representable range.
+fn days_in_month(year: i32, month: i32) -> Result<i32, ExcelError> {
+    Ok((ymd_serial(year, month + 1, 0)? - ymd_serial(year, month, 1)?) as i32 + 1)
+}
 
 fn coerce_to_serial(arg: &ArgumentHandle) -> Result<f64, ExcelError> {
     let v = arg.value()?.into_literal();
@@ -106,24 +118,15 @@ impl Function for EdateFn {
         let start_serial = coerce_to_serial(&args[0])?;
         let months = coerce_to_int(&args[1])?;
 
-        let start_date = serial_to_date(start_serial)?;
-
-        // Calculate target year and month using Euclidean division
-        let total_months =
-            start_date.year() as i64 * 12 + start_date.month() as i64 + months as i64;
-        let tm = total_months - 1;
-        let target_year = tm.div_euclid(12) as i32;
-        let target_month = (tm.rem_euclid(12) + 1) as u32;
-
-        // Keep the same day, but handle month-end overflow
-        let max_day = last_day_of_month(target_year, target_month);
-        let target_day = start_date.day().min(max_day);
-
-        let target_date = NaiveDate::from_ymd_opt(target_year, target_month, target_day)
-            .ok_or_else(ExcelError::new_num)?;
+        // Excel resolves the target month and clamps the day to its length. Built
+        // on serials (not NaiveDate) so the phantom 1900-02-29 is a real day:
+        // EDATE(60,1) = 89 (Mar 29 1900), EDATE(31,1) = 60. Out of range is #NUM!.
+        let (year, month, day) = serial_to_ymd(start_serial)?;
+        let target_month = month as i32 + months;
+        let target_day = (day as i32).min(days_in_month(year, target_month)?);
 
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            date_to_serial(&target_date),
+            ymd_serial(year, target_month, target_day)?,
         )))
     }
 }
@@ -200,36 +203,14 @@ impl Function for EomonthFn {
         let start_serial = coerce_to_serial(&args[0])?;
         let months = coerce_to_int(&args[1])?;
 
-        let start_date = serial_to_date(start_serial)?;
-
-        // Calculate target year and month using Euclidean division
-        let total_months =
-            start_date.year() as i64 * 12 + start_date.month() as i64 + months as i64;
-        let tm = total_months - 1;
-        let target_year = tm.div_euclid(12) as i32;
-        let target_month = (tm.rem_euclid(12) + 1) as u32;
-
-        // Get the last day of the target month
-        let last_day = last_day_of_month(target_year, target_month);
-
-        let target_date = NaiveDate::from_ymd_opt(target_year, target_month, last_day)
-            .ok_or_else(ExcelError::new_num)?;
+        // Day 0 of the month after the target month, counted in serials so
+        // February 1900 ends on the phantom serial 60 (EOMONTH(59,0) = 60).
+        let (year, month, _) = serial_to_ymd(start_serial)?;
 
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            date_to_serial(&target_date),
+            ymd_serial(year, month as i32 + months + 1, 0)?,
         )))
     }
-}
-
-/// Helper to get the last day of a month
-fn last_day_of_month(year: i32, month: u32) -> u32 {
-    // Try day 31, then 30, 29, 28
-    for day in (28..=31).rev() {
-        if NaiveDate::from_ymd_opt(year, month, day).is_some() {
-            return day;
-        }
-    }
-    28 // Fallback (should never reach here for valid months)
 }
 
 pub fn register_builtins() {

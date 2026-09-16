@@ -151,10 +151,17 @@ impl Function for DaysFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let end = coerce_to_date(&args[0])?;
-        let start = coerce_to_date(&args[1])?;
+        let end = coerce_to_serial(&args[0])?;
+        let start = coerce_to_serial(&args[1])?;
+        // Validate the range the way every other date function does (#NUM! below 0)…
+        serial_to_date(end)?;
+        serial_to_date(start)?;
+        // …but subtract the truncated serials themselves: Excel's phantom 1900-02-29
+        // (serial 60) is a day like any other (DAYS(60,59) = DAYS(61,60) = 1,
+        // DAYS(61,59) = 2), which a NaiveDate difference cannot say because serial 60
+        // has no real date to map to.
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            (end - start).num_days() as f64,
+            end.trunc() - start.trunc(),
         )))
     }
 }
