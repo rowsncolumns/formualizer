@@ -2041,6 +2041,18 @@ mod tests {
         // ≤ 1 year across a year boundary without a Feb 29 → 365.
         let actual = year_fraction(&d(2022, 12, 1), &d(2023, 3, 1), DayCountBasis::ActualActual);
         assert!((actual - 90.0 / 365.0).abs() < 1e-12, "got {actual}");
+        // ≤ 1 year ENDING on a real Feb 29 (never reaches Mar 1) → 366; Feb 28 of a leap year
+        // is not the leap day.
+        let actual = year_fraction(&d(2023, 3, 1), &d(2024, 2, 29), DayCountBasis::ActualActual);
+        assert!((actual - 365.0 / 366.0).abs() < 1e-12, "got {actual}");
+        let actual = year_fraction(
+            &d(2024, 2, 29),
+            &d(2025, 2, 28),
+            DayCountBasis::ActualActual,
+        );
+        assert!((actual - 365.0 / 366.0).abs() < 1e-12, "got {actual}");
+        let actual = year_fraction(&d(2023, 3, 1), &d(2024, 2, 28), DayCountBasis::ActualActual);
+        assert!((actual - 364.0 / 365.0).abs() < 1e-12, "got {actual}");
         // > 1 year → average length of the calendar years touched (2008 is leap).
         let actual = year_fraction(&d(2008, 1, 1), &d(2010, 1, 1), DayCountBasis::ActualActual);
         assert!(
@@ -2054,6 +2066,9 @@ mod tests {
         let forward = year_fraction(&d(2023, 12, 1), &d(2024, 3, 1), DayCountBasis::ActualActual);
         let backward = year_fraction(&d(2024, 3, 1), &d(2023, 12, 1), DayCountBasis::ActualActual);
         assert!((forward + backward).abs() < 1e-12);
+        let forward = year_fraction(&d(2023, 3, 1), &d(2024, 2, 29), DayCountBasis::ActualActual);
+        let backward = year_fraction(&d(2024, 2, 29), &d(2023, 3, 1), DayCountBasis::ActualActual);
+        assert!((forward - 365.0 / 366.0).abs() < 1e-12 && (forward + backward).abs() < 1e-12);
     }
 
     #[test]
