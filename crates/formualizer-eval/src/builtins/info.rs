@@ -1701,8 +1701,269 @@ impl Function for IsNonTextFn {
     }
 }
 
+/* ───────────────────────────── CELL / INFO / AREAS ───────────────────────────── */
+
+fn cell_info_text(arg: &ArgumentHandle<'_, '_>) -> Result<String, ExcelError> {
+    let v = match arg.value()? {
+        CalcValue::Scalar(v) => v,
+        CalcValue::Range(rv) => rv.get_cell(0, 0),
+        CalcValue::Callable(_) => return Err(ExcelError::new(ExcelErrorKind::Value)),
+    };
+    match v {
+        LiteralValue::Text(s) => Ok(s),
+        LiteralValue::Error(e) => Err(e),
+        _ => Err(ExcelError::new(ExcelErrorKind::Value)),
+    }
+}
+
+/// Quote a sheet name the way `ADDRESS(..., sheet_text)` does when it needs quoting.
+fn sheet_prefix(sheet: &str) -> String {
+    let needs_quotes = sheet
+        .chars()
+        .any(|c| !(c.is_alphanumeric() || c == '_' || c == '.'))
+        || sheet.chars().next().is_some_and(|c| c.is_ascii_digit());
+    if needs_quotes {
+        format!("'{}'!", sheet.replace('\'', "''"))
+    } else {
+        format!("{sheet}!")
+    }
+}
+
+/// `CELL(info_type, [reference])` — Excel's cell-metadata function for the info types the engine can
+/// answer without host layout data: address, col, row, contents, type, prefix, protect, width,
+/// format, filename, color, parentheses. With no reference it reports on the formula's own cell
+/// (Excel uses the last-changed cell; the engine has no such notion).
+///
+/// `format` needs the cell's number format, which the evaluation context does not expose, so it
+/// answers `"G"` (General); `width` answers Excel's default column width `8`; `filename` is empty
+/// for an unsaved workbook. Unknown info types are `#VALUE!` like Excel.
+#[derive(Debug)]
+pub struct CellFn;
+
+static ARG_CELL: std::sync::LazyLock<Vec<ArgSchema>> = std::sync::LazyLock::new(|| {
+    vec![
+        ArgSchema::any(),
+        ArgSchema {
+            kinds: smallvec::smallvec![formualizer_common::ArgKind::Any],
+            required: false,
+            by_ref: true,
+            shape: crate::args::ShapeKind::Range,
+            coercion: formualizer_common::CoercionPolicy::None,
+            max: None,
+            repeating: None,
+            default: None,
+        },
+    ]
+});
+
+impl Function for CellFn {
+    func_caps!(PURE);
+    fn name(&self) -> &'static str {
+        "CELL"
+    }
+    fn semantic_contract(&self, arity: usize) -> Option<FunctionSemanticContract> {
+        Some(workbook_metadata_contract(self.dependency_contract(arity)))
+    }
+    fn min_args(&self) -> usize {
+        1
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        &ARG_CELL[..]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+    ) -> Result<CalcValue<'b>, ExcelError> {
+        if args.is_empty() || args.len() > 2 {
+            return arity_error();
+        }
+        let info_type = cell_info_text(&args[0])?.trim().to_ascii_lowercase();
+
+        // Resolve the reported cell: (sheet name if not the current sheet, row, col, value).
+        let (sheet, row, col, value): (Option<String>, u32, u32, LiteralValue) = match args.get(1) {
+            Some(arg) if !arg.is_skipped() => {
+                let reference = arg
+                    .as_reference_or_eval()
+                    .map_err(|_| ExcelError::new(ExcelErrorKind::Value))?;
+                let (sheet, row, col) = match &reference {
+                    formualizer_parse::parser::ReferenceType::Cell {
+                        sheet, row, col, ..
+                    } => (sheet.clone(), *row, *col),
+                    formualizer_parse::parser::ReferenceType::Range {
+                        sheet,
+                        start_row,
+                        start_col,
+                        ..
+                    } => (
+                        sheet.clone(),
+                        start_row.unwrap_or(1),
+                        start_col.unwrap_or(1),
+                    ),
+                    formualizer_parse::parser::ReferenceType::Cell3D {
+                        sheet_first,
+                        row,
+                        col,
+                        ..
+                    } => (Some(sheet_first.clone()), *row, *col),
+                    _ => return Ok(error_value(ExcelErrorKind::Value)),
+                };
+                let value = match arg.value()? {
+                    CalcValue::Scalar(v) => v,
+                    CalcValue::Range(rv) => rv.get_cell(0, 0),
+                    CalcValue::Callable(_) => LiteralValue::Empty,
+                };
+                let sheet = sheet.filter(|s| !s.eq_ignore_ascii_case(ctx.current_sheet()));
+                (sheet, row, col, value)
+            }
+            _ => {
+                let Some(cell) = ctx.current_cell() else {
+                    return Ok(error_value(ExcelErrorKind::Value));
+                };
+                // The formula's own value is not knowable mid-evaluation; Excel reports the last
+                // edited cell here, so treat "contents" of the anchor as blank.
+                // Engine `Coord`s are 0-based; report Excel's 1-based row/column.
+                (
+                    None,
+                    cell.coord.row() + 1,
+                    cell.coord.col() + 1,
+                    LiteralValue::Empty,
+                )
+            }
+        };
+
+        let result = match info_type.as_str() {
+            "address" => {
+                let prefix = sheet.as_deref().map(sheet_prefix).unwrap_or_default();
+                // `ReferenceType` columns are 1-based; `col_to_letters` takes a 0-based index.
+                LiteralValue::Text(format!(
+                    "{prefix}${}${row}",
+                    crate::reference::Coord::col_to_letters(col.saturating_sub(1))
+                ))
+            }
+            "row" => LiteralValue::Int(row as i64),
+            "col" => LiteralValue::Int(col as i64),
+            "contents" => match value {
+                LiteralValue::Empty => LiteralValue::Int(0),
+                other => other,
+            },
+            "type" => LiteralValue::Text(
+                match value {
+                    LiteralValue::Empty => "b",
+                    LiteralValue::Text(_) => "l",
+                    _ => "v",
+                }
+                .to_string(),
+            ),
+            "prefix" => LiteralValue::Text(
+                match value {
+                    LiteralValue::Text(_) => "'",
+                    _ => "",
+                }
+                .to_string(),
+            ),
+            "protect" => LiteralValue::Int(1),
+            "width" => LiteralValue::Int(8),
+            "format" => LiteralValue::Text("G".to_string()),
+            "filename" => LiteralValue::Text(String::new()),
+            "color" | "parentheses" => LiteralValue::Int(0),
+            _ => return Ok(error_value(ExcelErrorKind::Value)),
+        };
+        Ok(scalar(result))
+    }
+}
+
+/// `INFO(type_text)` — environment facts. The engine is host-agnostic, so it answers the values
+/// Excel reports on a default Windows install; `numfile` is the sheet count when known.
+#[derive(Debug)]
+pub struct InfoFn;
+
+impl Function for InfoFn {
+    func_caps!(PURE);
+    fn name(&self) -> &'static str {
+        "INFO"
+    }
+    fn semantic_contract(&self, arity: usize) -> Option<FunctionSemanticContract> {
+        Some(workbook_metadata_contract(self.dependency_contract(arity)))
+    }
+    fn min_args(&self) -> usize {
+        1
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        &ARG_ANY_ONE[..]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+    ) -> Result<CalcValue<'b>, ExcelError> {
+        if args.len() != 1 {
+            return arity_error();
+        }
+        let type_text = cell_info_text(&args[0])?.trim().to_ascii_lowercase();
+        let result = match type_text.as_str() {
+            "directory" => LiteralValue::Text(String::new()),
+            "numfile" => LiteralValue::Int(ctx.workbook_sheet_count().unwrap_or(1) as i64),
+            "origin" => LiteralValue::Text("$A:$A$1".to_string()),
+            "osversion" => LiteralValue::Text("Windows (64-bit) NT 10.00".to_string()),
+            "recalc" => LiteralValue::Text("Automatic".to_string()),
+            "release" => LiteralValue::Text("16.0".to_string()),
+            "system" => LiteralValue::Text("pcdos".to_string()),
+            _ => return Ok(error_value(ExcelErrorKind::Value)),
+        };
+        Ok(scalar(result))
+    }
+}
+
+/// `AREAS(reference)` — the number of areas in a reference. The engine has no union references
+/// (`(A1:B2,D4)`), so every reference is one area; a non-reference argument is `#VALUE!`.
+#[derive(Debug)]
+pub struct AreasFn;
+
+static ARG_AREAS: std::sync::LazyLock<Vec<ArgSchema>> = std::sync::LazyLock::new(|| {
+    vec![ArgSchema {
+        kinds: smallvec::smallvec![formualizer_common::ArgKind::Any],
+        required: true,
+        by_ref: true,
+        shape: crate::args::ShapeKind::Range,
+        coercion: formualizer_common::CoercionPolicy::None,
+        max: None,
+        repeating: None,
+        default: None,
+    }]
+});
+
+impl Function for AreasFn {
+    func_caps!(PURE);
+    fn name(&self) -> &'static str {
+        "AREAS"
+    }
+    fn min_args(&self) -> usize {
+        1
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        &ARG_AREAS[..]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        _ctx: &dyn FunctionContext<'b>,
+    ) -> Result<CalcValue<'b>, ExcelError> {
+        if args.len() != 1 {
+            return arity_error();
+        }
+        match args[0].as_reference_or_eval() {
+            Ok(_) => Ok(scalar(LiteralValue::Int(1))),
+            Err(_) => Ok(error_value(ExcelErrorKind::Value)),
+        }
+    }
+}
+
 pub fn register_builtins() {
     use std::sync::Arc;
+    crate::function_registry::register_builtin(Arc::new(CellFn));
+    crate::function_registry::register_builtin(Arc::new(InfoFn));
+    crate::function_registry::register_builtin(Arc::new(AreasFn));
     crate::function_registry::register_builtin(Arc::new(IsNumberFn));
     crate::function_registry::register_builtin(Arc::new(IsTextFn));
     crate::function_registry::register_builtin(Arc::new(IsNonTextFn));

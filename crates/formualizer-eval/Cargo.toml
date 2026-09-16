@@ -38,6 +38,7 @@ chrono = { workspace = true }
 bitflags = "2.9.1"
 bumpalo = { version = "3.16", features = ["collections"] }
 smallvec = { workspace = true }
+regex = { workspace = true }
 # web-time is only needed for the js-runtime (browser/wasm-bindgen) profile.
 web-time = { workspace = true, optional = true }
 
