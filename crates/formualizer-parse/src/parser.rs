@@ -774,6 +774,10 @@ impl ReferenceType {
             let (start_row, start_row_abs) = split(start_row);
             let (end_col, end_col_abs) = split(end_col);
             let (end_row, end_row_abs) = split(end_row);
+            let ((start_row, start_row_abs), (end_row, end_row_abs)) =
+                order_range_axis((start_row, start_row_abs), (end_row, end_row_abs));
+            let ((start_col, start_col_abs), (end_col, end_col_abs)) =
+                order_range_axis((start_col, start_col_abs), (end_col, end_col_abs));
 
             Ok(ReferenceType::Range3D {
                 sheet_first: first.to_string(),
@@ -886,6 +890,14 @@ impl ReferenceType {
             let (start_row, start_row_abs) = split(start_row);
             let (end_col, end_col_abs) = split(end_col);
             let (end_row, end_row_abs) = split(end_row);
+            // Excel accepts corners in any order (`B2:A1`, `A3:A1`) and normalises the
+            // reference to top-left:bottom-right on entry, so a range never reaches the
+            // evaluator with `start > end`. Each axis is swapped independently, carrying its
+            // `$` anchors with the coordinate they were written on.
+            let ((start_row, start_row_abs), (end_row, end_row_abs)) =
+                order_range_axis((start_row, start_row_abs), (end_row, end_row_abs));
+            let ((start_col, start_col_abs), (end_col, end_col_abs)) =
+                order_range_axis((start_col, start_col_abs), (end_col, end_col_abs));
 
             if let Some((book_token, sheet_name)) = external_sheet {
                 Ok(ReferenceType::External(ExternalReference {
@@ -992,6 +1004,17 @@ impl ReferenceType {
         } else {
             row.to_string()
         }
+    }
+}
+
+/// Order one axis of a range so the bounded start is never past the bounded end. Open-ended
+/// bounds (`A:A`, `1:1`) have nothing to compare and pass through untouched.
+type RangeBound = (Option<u32>, bool);
+
+fn order_range_axis(start: RangeBound, end: RangeBound) -> (RangeBound, RangeBound) {
+    match (start.0, end.0) {
+        (Some(s), Some(e)) if s > e => (end, start),
+        _ => (start, end),
     }
 }
 
