@@ -16,7 +16,7 @@ mod reference_info; // modern lookup & dynamic array subset (XLOOKUP, FILTER, UN
 mod stack; // stacking & concatenation functions (HSTACK, VSTACK)
 
 pub use address::AddressFn;
-pub use array_shape::{ToColFn, ToRowFn};
+pub use array_shape::{ExpandFn, ToColFn, ToRowFn, WrapColsFn, WrapRowsFn};
 pub use choose::ChooseFn;
 pub use core::{HLookupFn, MatchFn, VLookupFn};
 pub use dynamic::{
