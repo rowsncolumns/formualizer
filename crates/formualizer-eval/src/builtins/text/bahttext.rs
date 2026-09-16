@@ -62,9 +62,14 @@ pub(crate) fn bahttext(num: f64) -> String {
         return ZERO.to_string();
     }
     let positive = num.abs();
-    let baht_int = positive.floor();
-    // Satang round to the nearest whole (432.214567 → 21); 0.995 rounds up to 100 like JS toFixed.
-    let satang_int = ((positive - baht_int) * 100.0).round();
+    let mut baht_int = positive.floor();
+    // Satang round to the nearest whole (432.214567 → 21). Excel never spells 100 satang: a
+    // fraction that rounds up to a whole baht (0.995 → 1.00) carries into the baht amount.
+    let mut satang_int = ((positive - baht_int) * 100.0).round();
+    if satang_int >= 100.0 {
+        baht_int += 1.0;
+        satang_int = 0.0;
+    }
     let baht = grammar_fix(&digits_to_words(&number_digits(baht_int as u64)));
     let satang = grammar_fix(&digits_to_words(&number_digits(satang_int as u64)));
     let body = match (baht.is_empty(), satang.is_empty()) {
@@ -161,5 +166,16 @@ mod tests {
             "สิบสองล้านสามแสนสี่หมื่นห้าพันหกร้อยเจ็ดสิบแปดบาทถ้วน"
         );
         assert_eq!(bahttext(-5.0), "ลบห้าบาทถ้วน");
+    }
+
+    /// A fraction that rounds up to a whole baht carries instead of reading "one hundred satang".
+    #[test]
+    fn satang_rounding_carries_into_baht() {
+        assert_eq!(bahttext(0.995), "หนึ่งบาทถ้วน");
+        assert_eq!(bahttext(1.995), "สองบาทถ้วน");
+        assert_eq!(bahttext(9.999), "สิบบาทถ้วน");
+        assert_eq!(bahttext(-0.995), "ลบหนึ่งบาทถ้วน");
+        assert_eq!(bahttext(1234.567), "หนึ่งพันสองร้อยสามสิบสี่บาทห้าสิบเจ็ดสตางค์");
+        assert_eq!(bahttext(0.994), "เก้าสิบเก้าสตางค์");
     }
 }

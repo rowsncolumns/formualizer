@@ -357,7 +357,7 @@ impl Function for FilterXmlFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<CalcValue<'b>, ExcelError> {
         let err = |e: ExcelError| Ok(CalcValue::Scalar(LiteralValue::Error(e)));
         let xml = match arg_text(&args[0]) {
@@ -372,10 +372,13 @@ impl Function for FilterXmlFn {
             Some(m) if !m.is_empty() => m,
             _ => return err(ExcelError::new_value()),
         };
-        // Matches are text; Excel returns the number when the text parses as one.
-        let cell = |s: String| match s.parse::<f64>() {
-            Ok(n) if !s.trim().is_empty() => LiteralValue::Number(n),
-            _ => LiteralValue::Text(s),
+        // Matches are text; Excel returns the number when the text is numeric by its own
+        // text→number rules (what `VALUE` accepts: `"1,000"`, `"5%"`, `"1/2/2024"`), so spellings
+        // Excel does not read as numbers (`"inf"`, `"NaN"`, `"0x10"`) stay text.
+        let locale = ctx.locale();
+        let cell = |s: String| match crate::coercion::parse_numeric_text(&s, &locale) {
+            Some(n) => LiteralValue::Number(n),
+            None => LiteralValue::Text(s),
         };
         if matches.len() == 1 {
             let only = matches.into_iter().next().unwrap_or_default();
