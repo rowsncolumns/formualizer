@@ -297,6 +297,9 @@ impl CompiledWildcardPattern {
             if let Some((star_tok, new_si)) = bt.pop()
                 && new_si <= text.len()
             {
+                // Let the `*` absorb one more character and keep the backtrack point armed
+                // so it can keep growing (`b*` must match "banana", not just "bx").
+                bt.push((star_tok, new_si + 1));
                 ti = star_tok + 1;
                 si = new_si;
                 continue;

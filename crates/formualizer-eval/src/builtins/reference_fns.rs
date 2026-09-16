@@ -232,22 +232,31 @@ impl Function for IndexFn {
             },
             other => other,
         };
-        let position = match args[1].value() {
-            Ok(cv) => match cv.into_literal() {
-                LiteralValue::Number(n) => n as i64,
-                LiteralValue::Int(i) => i,
-                _ => return Some(Err(ExcelError::new(ExcelErrorKind::Value))),
-            },
-            Err(e) => return Some(Err(e)),
-        };
-        let explicit_col = if args.len() >= 3 {
-            Some(match args[2].value() {
+        // A skipped slot (`INDEX(rng,,2)` / `INDEX(rng,2,)`) is Excel's 0: the whole column / row.
+        let position = if is_skipped_arg(&args[1]) {
+            0
+        } else {
+            match args[1].value() {
                 Ok(cv) => match cv.into_literal() {
                     LiteralValue::Number(n) => n as i64,
                     LiteralValue::Int(i) => i,
                     _ => return Some(Err(ExcelError::new(ExcelErrorKind::Value))),
                 },
                 Err(e) => return Some(Err(e)),
+            }
+        };
+        let explicit_col = if args.len() >= 3 {
+            Some(if is_skipped_arg(&args[2]) {
+                0
+            } else {
+                match args[2].value() {
+                    Ok(cv) => match cv.into_literal() {
+                        LiteralValue::Number(n) => n as i64,
+                        LiteralValue::Int(i) => i,
+                        _ => return Some(Err(ExcelError::new(ExcelErrorKind::Value))),
+                    },
+                    Err(e) => return Some(Err(e)),
+                }
             })
         } else {
             None
@@ -541,10 +550,7 @@ pub struct OffsetFn;
 /// coercion would otherwise reject it before the function can apply Excel's defaults (rows/cols
 /// → 0, height/width → the base reference's dimensions).
 fn is_skipped_arg(arg: &ArgumentHandle) -> bool {
-    matches!(
-        &arg.ast().node_type,
-        formualizer_parse::parser::ASTNodeType::Literal(LiteralValue::Text(t)) if t.is_empty()
-    )
+    arg.is_skipped()
 }
 
 impl Function for OffsetFn {

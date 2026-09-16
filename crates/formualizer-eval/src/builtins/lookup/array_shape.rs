@@ -129,7 +129,7 @@ fn materialize_arg<'b>(arg: &ArgumentHandle<'_, 'b>) -> Result<Vec<Vec<LiteralVa
 }
 
 fn ignore_mode<'b>(args: &[ArgumentHandle<'_, 'b>]) -> Result<i64, ExcelError> {
-    if args.len() < 2 {
+    if args.len() < 2 || args[1].is_skipped() {
         return Ok(0);
     }
     let raw = args[1].value()?.into_literal();
@@ -148,7 +148,7 @@ fn ignore_mode<'b>(args: &[ArgumentHandle<'_, 'b>]) -> Result<i64, ExcelError> {
 }
 
 fn scan_by_column<'b>(args: &[ArgumentHandle<'_, 'b>]) -> Result<bool, ExcelError> {
-    if args.len() < 3 {
+    if args.len() < 3 || args[2].is_skipped() {
         return Ok(false);
     }
     crate::coercion::to_logical(&args[2].value()?.into_literal())
