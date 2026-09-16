@@ -128,6 +128,15 @@ fn ceiling_floor_families_round_the_fifteen_digit_quotient() {
 }
 
 #[test]
+fn floor_sign_rules_match_excel() {
+    assert_error("=FLOOR(2.5,-2)", ExcelErrorKind::Num);
+    assert_number("=FLOOR(-2.5,-2)", -2.0);
+    assert_number("=FLOOR(-2.5,2)", -4.0);
+    assert_number("=FLOOR(2.5,2)", 2.0);
+    assert_number("=FLOOR(-0.3,-0.1)", -0.3);
+}
+
+#[test]
 fn zero_significance_is_zero_for_the_ceiling_family_and_div0_for_floor() {
     assert_number("=CEILING(2.5,0)", 0.0);
     assert_number("=CEILING.MATH(6.7,0)", 0.0);
