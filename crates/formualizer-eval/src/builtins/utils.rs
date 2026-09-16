@@ -622,3 +622,14 @@ pub static ARG_RANGE_NUM_LENIENT_ONE: LazyLock<Vec<ArgSchema>> = LazyLock::new(|
         s
     }]
 });
+
+/// Two required numeric range arguments (`PERCENTOF(data_subset, data_all)`).
+pub static ARG_RANGE_NUM_LENIENT_TWO: LazyLock<Vec<ArgSchema>> = LazyLock::new(|| {
+    let range_num = || {
+        let mut s = ArgSchema::number_lenient_scalar();
+        s.shape = ShapeKind::Range;
+        s.coercion = CoercionPolicy::NumberLenientText;
+        s
+    };
+    vec![range_num(), range_num()]
+});

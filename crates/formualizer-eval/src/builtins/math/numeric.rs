@@ -947,7 +947,11 @@ fn floor_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> LiteralValue {
             Some(s) => elem_num(s)?,
             None => 1.0,
         };
+        // Excel: FLOOR(0,0) is 0; any other number with a zero significance is #DIV/0!.
         if sig == 0.0 {
+            if n == 0.0 {
+                return Ok(LiteralValue::Number(0.0));
+            }
             return Ok(LiteralValue::Error(ExcelError::from_error_string(
                 "#DIV/0!",
             )));
