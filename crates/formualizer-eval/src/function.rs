@@ -188,13 +188,7 @@ pub trait Function: Send + Sync + 'static {
         if self.caps().contains(FnCaps::SHORT_CIRCUIT) {
             if args.len() < self.min_args() {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                    ExcelError::new(formualizer_common::ExcelErrorKind::Value).with_message(
-                        format!(
-                            "Too few arguments: expected at least {}, got {}",
-                            self.min_args(),
-                            args.len()
-                        ),
-                    ),
+                    crate::args::too_few_arguments(self.min_args(), args.len()),
                 )));
             }
             return self.eval(args, ctx);

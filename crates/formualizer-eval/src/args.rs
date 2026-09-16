@@ -108,6 +108,18 @@ pub struct ValidationOptions {
 
 // Legacy adapter removed in clean break.
 
+/// A call with fewer arguments than the function requires (`SUM()`, `IF(1)`, `VLOOKUP(1)`).
+///
+/// Excel refuses to *enter* such a formula, so it has no Excel result; a stored one (typed through
+/// an API, imported, or entered on the JS engine) is `#N/A` — Google Sheets' "Wrong number of
+/// arguments" value and the JS engine's result — rather than `#VALUE!`, so both engines agree
+/// (rowsncolumns/spreadsheet#546 E-41).
+pub fn too_few_arguments(min_args: usize, got: usize) -> ExcelError {
+    ExcelError::new(ExcelErrorKind::Na).with_message(format!(
+        "Too few arguments: expected at least {min_args}, got {got}"
+    ))
+}
+
 /// Excel criteria-string parsing shared by COUNTIF/SUMIF/AVERAGEIF, the *IFS
 /// family and the database functions.
 ///
@@ -317,11 +329,7 @@ pub fn validate_and_prepare<'a, 'b>(
         if options.warn_only {
             return Ok(PreparedArgs { items: Vec::new() });
         }
-        return Err(ExcelError::new(ExcelErrorKind::Value).with_message(format!(
-            "Too few arguments: expected at least {}, got {}",
-            options.min_args,
-            args.len()
-        )));
+        return Err(too_few_arguments(options.min_args, args.len()));
     }
 
     // Arity: simple rule – if schema.len() == 1, allow variadic repetition; else match up to schema.len()

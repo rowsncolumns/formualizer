@@ -57,7 +57,7 @@ pub struct SumFn;
 /// [formualizer-docgen:schema:start]
 /// Name: SUM
 /// Type: SumFn
-/// Min args: 0
+/// Min args: 1
 /// Max args: variadic
 /// Variadic: true
 /// Signature: SUM(arg1...: number@range)
@@ -71,7 +71,7 @@ impl Function for SumFn {
         "SUM"
     }
     fn min_args(&self) -> usize {
-        0
+        1
     }
     fn variadic(&self) -> bool {
         true
@@ -180,7 +180,7 @@ pub struct CountFn;
 /// [formualizer-docgen:schema:start]
 /// Name: COUNT
 /// Type: CountFn
-/// Min args: 0
+/// Min args: 1
 /// Max args: variadic
 /// Variadic: true
 /// Signature: COUNT(arg1...: number@range)
@@ -194,7 +194,7 @@ impl Function for CountFn {
         "COUNT"
     }
     fn min_args(&self) -> usize {
-        0
+        1
     }
     fn variadic(&self) -> bool {
         true
@@ -1805,7 +1805,7 @@ mod tests_subtotal_aggregate {
         let ctx = interp(&wb);
 
         let out = dispatch(&ctx, "SUBTOTAL", &[lit(LiteralValue::Int(9))]);
-        assert_error_kind(out, ExcelErrorKind::Value);
+        assert_error_kind(out, ExcelErrorKind::Na);
     }
 
     #[test]
@@ -1818,7 +1818,7 @@ mod tests_subtotal_aggregate {
             "AGGREGATE",
             &[lit(LiteralValue::Int(9)), lit(LiteralValue::Int(0))],
         );
-        assert_error_kind(out, ExcelErrorKind::Value);
+        assert_error_kind(out, ExcelErrorKind::Na);
     }
 
     #[test]

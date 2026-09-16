@@ -75,9 +75,9 @@ fn if_arity_error_is_preserved_with_lazy_dispatch() {
     let v = eval(&wb, "=IF(COUNTING())");
     match v {
         LiteralValue::Error(e) => {
-            assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Value);
+            assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Na);
         }
-        other => panic!("expected #VALUE! arity error, got {other:?}"),
+        other => panic!("expected #N/A arity error, got {other:?}"),
     }
     assert_eq!(
         counter.load(Ordering::SeqCst),
