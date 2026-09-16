@@ -208,11 +208,13 @@ fn formula_cells_block_spill() {
 }
 
 #[test]
-fn overlapping_spills_firstwins_is_deterministic_sequential() {
+fn overlapping_spills_resolve_by_anchor_position_not_evaluation_order_sequential() {
     let wb = TestWorkbook::new();
     let mut engine = Engine::new(wb, serial_eval_config());
 
-    // Evaluate A1 first, then A2; A2 should conflict and show #SPILL! (FirstWins)
+    // A1 spills A1:B2 first; a formula then lands on A2, inside that range. A formula cell is
+    // content, so A1 is the one blocked (#SPILL!) and A2 spills — as in Excel — even though A1
+    // was evaluated first (see `spill_contention`).
     engine
         .set_cell_formula("Sheet1", 1, 1, parse("={1,2;3,4}").unwrap())
         .unwrap();
@@ -225,10 +227,23 @@ fn overlapping_spills_firstwins_is_deterministic_sequential() {
 
     let a1 = engine.get_cell_value("Sheet1", 1, 1).unwrap();
     let a2 = engine.get_cell_value("Sheet1", 2, 1).unwrap();
-    match a2 {
+    match a1 {
         LiteralValue::Error(e) => assert_eq!(e, "#SPILL!"),
-        v => panic!("expected #SPILL! at A2, got {v:?} (A1={a1:?})"),
+        v => panic!("expected #SPILL! at A1, got {v:?} (A2={a2:?})"),
     }
+    assert_eq!(a2, LiteralValue::Number(5.0));
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 3, 2),
+        Some(LiteralValue::Number(8.0)),
+        "A2's array spills over A2:B3"
+    );
+    assert!(
+        matches!(
+            engine.get_cell_value("Sheet1", 1, 2),
+            None | Some(LiteralValue::Empty)
+        ),
+        "B1 (A1's former projection) is vacated"
+    );
 }
 
 #[test]

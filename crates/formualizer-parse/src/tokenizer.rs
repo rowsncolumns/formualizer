@@ -669,6 +669,15 @@ fn next_starts_reference_expression(formula: &str, mut offset: usize) -> bool {
         return false;
     }
 
+    if bytes[offset].is_ascii_digit() {
+        // A whole-row reference (`2:2`, `3:10`) is the one reference expression that starts with
+        // a digit: `A1:A3 2:2` intersects, while `A1 2` stays a plain (invalid) juxtaposition.
+        let mut end = offset;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        return end < bytes.len() && bytes[end] == b':';
+    }
     matches!(bytes[offset], b'(' | b'[' | b'\'' | b'$') || bytes[offset].is_ascii_alphabetic()
 }
 

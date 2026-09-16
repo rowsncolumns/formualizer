@@ -4144,3 +4144,87 @@ mod r1c1_disambiguation {
         }
     }
 }
+
+/// Excel accepts range corners in any order and normalises `B2:A1` to `A1:B2` on entry
+/// (rowsncolumns/spreadsheet#546 E-18). The evaluator rejects `start > end`, so the parser is the
+/// place that guarantees it never sees one.
+#[cfg(test)]
+mod reversed_range_corners {
+    use crate::parser::{ReferenceType, parse};
+
+    fn range(reference: &str) -> ReferenceType {
+        ReferenceType::from_string(reference).expect("range should parse")
+    }
+
+    #[test]
+    fn both_axes_reversed_normalise_to_top_left_bottom_right() {
+        assert_eq!(range("B2:A1"), range("A1:B2"));
+        assert_eq!(range("A3:A1"), range("A1:A3"));
+        assert_eq!(range("C1:A1"), range("A1:C1"));
+        assert_eq!(range("Sheet2!D4:B2"), range("Sheet2!B2:D4"));
+    }
+
+    #[test]
+    fn dollar_anchors_travel_with_their_coordinate() {
+        // `$B2:A$1` anchors column B and row 1; after normalisation those are the END column
+        // and the START row.
+        assert_eq!(
+            range("$B2:A$1"),
+            ReferenceType::Range {
+                sheet: None,
+                start_row: Some(1),
+                start_col: Some(1),
+                end_row: Some(2),
+                end_col: Some(2),
+                start_row_abs: true,
+                start_col_abs: false,
+                end_row_abs: false,
+                end_col_abs: true,
+            }
+        );
+    }
+
+    #[test]
+    fn open_ended_axes_are_untouched() {
+        assert_eq!(range("C:A"), range("A:C"));
+        assert_eq!(range("3:1"), range("1:3"));
+        assert_eq!(range("A:A"), range("A:A"));
+    }
+
+    #[test]
+    fn three_d_ranges_normalise_too() {
+        assert_eq!(range("Sheet1:Sheet3!B2:A1"), range("Sheet1:Sheet3!A1:B2"));
+    }
+
+    #[test]
+    fn reversed_range_round_trips_canonical() {
+        let ast = parse("=SUM(B2:A1)").unwrap();
+        assert_eq!(crate::pretty::canonical_formula(&ast), "=SUM(A1:B2)");
+    }
+}
+
+/// A whole-row operand after a reference is the intersection operator: `B:B 2:2` → B2
+/// (rowsncolumns/spreadsheet#546 E-14). Digits after a space are otherwise not a reference.
+#[cfg(test)]
+mod row_range_intersection {
+    use crate::parser::{ASTNodeType, parse};
+
+    #[test]
+    fn column_intersect_row_parses_as_intersection() {
+        let ast = parse("=SUM(B:B 2:2)").expect("parse");
+        let ASTNodeType::Function { args, .. } = &ast.node_type else {
+            panic!("expected SUM call, got {ast:?}");
+        };
+        assert_eq!(args.len(), 1, "one intersected argument: {args:?}");
+        assert!(
+            matches!(&args[0].node_type, ASTNodeType::BinaryOp { op, .. } if op == " "),
+            "expected an intersection, got {:?}",
+            args[0].node_type
+        );
+    }
+
+    #[test]
+    fn a_number_after_a_reference_is_still_not_an_intersection() {
+        assert!(parse("=A1 2").is_err());
+    }
+}

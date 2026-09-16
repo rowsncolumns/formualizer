@@ -915,6 +915,13 @@ impl EvalConfig {
         self
     }
 
+    /// Cap the cells one dynamic array may spill (see [`SpillConfig::max_spill_cells`]).
+    #[inline]
+    pub fn with_max_spill_cells(mut self, max_spill_cells: u64) -> Self {
+        self.spill.max_spill_cells = max_spill_cells;
+        self
+    }
+
     #[inline]
     pub fn with_case_sensitive_names(mut self, enable: bool) -> Self {
         self.case_sensitive_names = enable;
@@ -1193,11 +1200,15 @@ pub struct SpillConfig {
     /// Visibility policy for staged writes.
     pub visibility: SpillVisibility,
 
-    /// Hard cap on the number of cells a single spill may project.
-    ///
-    /// This prevents pathological vertex explosions from very large dynamic arrays.
-    pub max_spill_cells: u32,
+    /// Hard cap on the number of cells a single spill may project; a larger array resolves to
+    /// `#SPILL!` ("SpillTooLarge"). Defaults to a full Excel sheet (1,048,576 × 16,384), so only
+    /// the sheet's edges limit a spill — the Excel behaviour. Hosts that cannot afford the
+    /// vertices a sheet-sized spill creates lower it via [`EvalConfig::with_max_spill_cells`].
+    pub max_spill_cells: u64,
 }
+
+/// Cells in a full Excel sheet — the default [`SpillConfig::max_spill_cells`].
+pub const EXCEL_SHEET_CELLS: u64 = 1_048_576 * 16_384;
 
 impl Default for SpillConfig {
     fn default() -> Self {
@@ -1209,8 +1220,7 @@ impl Default for SpillConfig {
             memory_budget_bytes: None,
             cancellation: SpillCancellationPolicy::Cooperative,
             visibility: SpillVisibility::OnCommit,
-            // Conservative: enough for common UI patterns, small enough to avoid graph blowups.
-            max_spill_cells: 10_000,
+            max_spill_cells: EXCEL_SHEET_CELLS,
         }
     }
 }

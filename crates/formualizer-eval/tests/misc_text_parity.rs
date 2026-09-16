@@ -98,9 +98,11 @@ fn numbers_read_as_text_use_fifteen_significant_digits() {
     assert_eq!(eval("=1.5&\"\""), text("1.5"));
     assert_eq!(eval("=100000000000000&\"\""), text("100000000000000"));
     assert_eq!(eval("=10^15&\"\""), text("1E+15"));
+    // The literal itself is read with 15 significant digits and truncated at parse
+    // (Excel stores 1234567890123450000), so the text spells the truncated value.
     assert_eq!(
         eval("=1234567890123456789&\"\""),
-        text("1.23456789012346E+18")
+        text("1.23456789012345E+18")
     );
     assert_eq!(eval("=0.0001&\"\""), text("0.0001"));
     assert_eq!(eval("=0.00001&\"\""), text("1E-05"));

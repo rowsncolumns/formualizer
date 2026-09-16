@@ -1,10 +1,14 @@
-//! Depreciation functions: SLN, SYD, DB, DDB, VDB
+//! Depreciation functions: SLN, SYD, DB, DDB, VDB, AMORLINC, AMORDEGRC
 
 use crate::args::ArgSchema;
+use crate::builtins::datetime::serial_to_date;
 use crate::function::Function;
 use crate::traits::{ArgumentHandle, CalcValue, FunctionContext};
+use chrono::NaiveDate;
 use formualizer_common::{ExcelError, LiteralValue};
 use formualizer_macros::func_caps;
+
+use super::bonds::{DayCountBasis, year_fraction};
 
 fn coerce_num(arg: &ArgumentHandle) -> Result<f64, ExcelError> {
     let v = arg.value()?.into_literal();
@@ -641,6 +645,174 @@ impl Function for VdbFn {
     }
 }
 
+// ── French depreciation (AMORLINC / AMORDEGRC) ───────────────────────────────────────────────────
+
+struct AmortizationArgs {
+    cost: f64,
+    date_purchased: NaiveDate,
+    first_period: NaiveDate,
+    salvage: f64,
+    period: i32,
+    rate: f64,
+    basis: DayCountBasis,
+}
+
+/// `AMOR*(cost, date_purchased, first_period, salvage, period, rate, [basis])` with Excel's guards:
+/// non-negative cost / salvage / period, positive rate, `salvage <= cost`, `date_purchased <=
+/// first_period`, and a basis of 0, 1, 3 or 4 (Excel rejects basis 2 for these two functions).
+fn amortization_args(args: &[ArgumentHandle<'_, '_>]) -> Result<AmortizationArgs, ExcelError> {
+    let cost = coerce_num(&args[0])?;
+    let date_purchased = serial_to_date(coerce_num(&args[1])?.trunc())?;
+    let first_period = serial_to_date(coerce_num(&args[2])?.trunc())?;
+    let salvage = coerce_num(&args[3])?;
+    let period = coerce_num(&args[4])?.trunc() as i32;
+    let rate = coerce_num(&args[5])?;
+    let basis_int = match args
+        .get(6)
+        .map(|a| a.value())
+        .transpose()?
+        .map(|v| v.into_literal())
+    {
+        None | Some(LiteralValue::Empty) => 0,
+        Some(LiteralValue::Text(t)) if t.is_empty() => 0,
+        Some(LiteralValue::Number(n)) => n.trunc() as i32,
+        Some(LiteralValue::Int(i)) => i as i32,
+        Some(LiteralValue::Boolean(b)) => b as i32,
+        Some(LiteralValue::Error(e)) => return Err(e),
+        Some(_) => return Err(ExcelError::new_value()),
+    };
+    let basis = DayCountBasis::from_int(basis_int)?;
+    if cost < 0.0
+        || salvage < 0.0
+        || rate <= 0.0
+        || period < 0
+        || salvage > cost
+        || date_purchased > first_period
+        || basis == DayCountBasis::Actual360
+    {
+        return Err(ExcelError::new_num());
+    }
+    Ok(AmortizationArgs {
+        cost,
+        date_purchased,
+        first_period,
+        salvage,
+        period,
+        rate,
+        basis,
+    })
+}
+
+/// AMORLINC: period 0 is prorated over `date_purchased → first_period` (YEARFRAC on `basis`);
+/// later periods depreciate `cost × rate` until the salvage value is reached, the final period
+/// taking the remainder and everything after it 0.
+fn amorlinc(a: &AmortizationArgs) -> f64 {
+    let full_period = a.cost * a.rate;
+    let first_period = year_fraction(&a.date_purchased, &a.first_period, a.basis) * a.rate * a.cost;
+    let depreciable = a.cost - a.salvage;
+    let full_periods = ((depreciable - first_period) / full_period).floor() as i32;
+    if a.period == 0 {
+        first_period
+    } else if a.period <= full_periods {
+        full_period
+    } else if a.period == full_periods + 1 {
+        depreciable - full_period * full_periods as f64 - first_period
+    } else {
+        0.0
+    }
+}
+
+/// AMORDEGRC: declining balance at `rate × coefficient` (1.5 for a 3–4 year life, 2 for 5–6
+/// years, 2.5 beyond), each period's charge rounded to whole currency units; once the book value
+/// would drop below salvage the last period takes half the remaining book value, then 0.
+fn amordegrc(a: &AmortizationArgs) -> f64 {
+    let life = 1.0 / a.rate;
+    let coefficient = if life < 3.0 {
+        1.0
+    } else if life < 5.0 {
+        1.5
+    } else if life <= 6.0 {
+        2.0
+    } else {
+        2.5
+    };
+    let depreciation_rate = a.rate * coefficient;
+    let mut book_value = a.cost;
+    let mut depreciation = (year_fraction(&a.date_purchased, &a.first_period, a.basis)
+        * depreciation_rate
+        * book_value)
+        .round();
+    book_value -= depreciation;
+    let mut remaining = book_value - a.salvage;
+    for n in 0..a.period {
+        depreciation = (depreciation_rate * book_value).round();
+        remaining -= depreciation;
+        if remaining < 0.0 {
+            return if a.period - n <= 1 {
+                (book_value * 0.5).round()
+            } else {
+                0.0
+            };
+        }
+        book_value -= depreciation;
+    }
+    depreciation
+}
+
+static AMOR_SCHEMA: std::sync::LazyLock<Vec<ArgSchema>> =
+    std::sync::LazyLock::new(|| (0..7).map(|_| ArgSchema::number_lenient_scalar()).collect());
+
+macro_rules! amortization_fn {
+    ($ty:ident, $name:literal, $compute:path, $doc:literal) => {
+        #[doc = $doc]
+        #[derive(Debug)]
+        pub struct $ty;
+        impl Function for $ty {
+            func_caps!(PURE);
+            fn name(&self) -> &'static str {
+                $name
+            }
+            fn min_args(&self) -> usize {
+                6
+            }
+            fn variadic(&self) -> bool {
+                true
+            }
+            fn arg_schema(&self) -> &'static [ArgSchema] {
+                &AMOR_SCHEMA[..]
+            }
+            fn eval<'a, 'b, 'c>(
+                &self,
+                args: &'c [ArgumentHandle<'a, 'b>],
+                _ctx: &dyn FunctionContext<'b>,
+            ) -> Result<CalcValue<'b>, ExcelError> {
+                if args.len() < 6 {
+                    return Ok(CalcValue::Scalar(LiteralValue::Error(
+                        ExcelError::new_value(),
+                    )));
+                }
+                Ok(CalcValue::Scalar(match amortization_args(args) {
+                    Ok(a) => LiteralValue::Number($compute(&a)),
+                    Err(e) => LiteralValue::Error(e),
+                }))
+            }
+        }
+    };
+}
+
+amortization_fn!(
+    AmorlincFn,
+    "AMORLINC",
+    amorlinc,
+    "`AMORLINC(cost, date_purchased, first_period, salvage, period, rate, [basis])` — French linear depreciation for an accounting period: period 0 is prorated over the purchase → first-period span, later periods take `cost × rate` until the salvage value is reached. Excel: `AMORLINC(2400,DATE(2008,8,19),DATE(2008,12,31),300,1,0.15,1)` = 360."
+);
+amortization_fn!(
+    AmordegrcFn,
+    "AMORDEGRC",
+    amordegrc,
+    "`AMORDEGRC(cost, date_purchased, first_period, salvage, period, rate, [basis])` — French declining-balance depreciation with a life-dependent coefficient, rounded to whole currency units each period. Excel: `AMORDEGRC(2400,DATE(2008,8,19),DATE(2008,12,31),300,1,0.15,1)` = 776."
+);
+
 pub fn register_builtins() {
     use std::sync::Arc;
     crate::function_registry::register_builtin(Arc::new(SlnFn));
@@ -648,4 +820,6 @@ pub fn register_builtins() {
     crate::function_registry::register_builtin(Arc::new(DbFn));
     crate::function_registry::register_builtin(Arc::new(DdbFn));
     crate::function_registry::register_builtin(Arc::new(VdbFn));
+    crate::function_registry::register_builtin(Arc::new(AmorlincFn));
+    crate::function_registry::register_builtin(Arc::new(AmordegrcFn));
 }

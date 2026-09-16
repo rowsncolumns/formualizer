@@ -269,6 +269,9 @@ impl DependencyGraph {
                         if let Some(named_range) = self.resolve_name_entry(name, current_sheet_id) {
                             dependencies.insert(named_range.vertex);
                             named_dependencies.push(named_range.vertex);
+                        } else if let Some(table) = self.resolve_table_entry(name) {
+                            // A bare table name (`=ROWS(Table1)`) is the table's data body.
+                            dependencies.insert(table.vertex);
                         } else if let Some(source) = self.resolve_source_scalar_entry(name) {
                             dependencies.insert(source.vertex);
                         } else {
@@ -672,6 +675,9 @@ impl DependencyGraph {
                     if let Some(named_range) = self.resolve_name_entry(name, current_sheet_id) {
                         dependencies.insert(named_range.vertex);
                         named_dependencies.push(named_range.vertex);
+                    } else if let Some(table) = self.resolve_table_entry(name) {
+                        // A bare table name (`=ROWS(Table1)`) is the table's data body.
+                        dependencies.insert(table.vertex);
                     } else if let Some(source) = self.resolve_source_scalar_entry(name) {
                         dependencies.insert(source.vertex);
                     } else {

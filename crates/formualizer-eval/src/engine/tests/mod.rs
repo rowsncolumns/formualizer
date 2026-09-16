@@ -69,6 +69,7 @@ mod infinite_ranges;
 mod spill_atomic;
 mod spill_basic;
 mod spill_config_defaults;
+mod spill_contention;
 mod spill_edges;
 mod spill_parallel_501;
 mod spill_respill_dirty;
