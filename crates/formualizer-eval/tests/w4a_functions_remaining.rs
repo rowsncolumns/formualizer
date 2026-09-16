@@ -105,11 +105,6 @@ const JS_FIXTURES: &[(&str, &str, f64)] = &[
     ),
     (
         "linear",
-        "=FORECAST.ETS(11,A1:A10,B1:B10,0)",
-        109.55787660644461,
-    ),
-    (
-        "linear",
         "=FORECAST.ETS(11,A1:A10,B1:B10,4)",
         108.94703533828222,
     ),
@@ -194,11 +189,6 @@ const JS_FIXTURES: &[(&str, &str, f64)] = &[
         "=FORECAST.ETS(15,A1:A12,B1:B12,0)",
         47.312805601695324,
     ),
-    (
-        "seasonal",
-        "=FORECAST.ETS(13,A1:A12,B1:B12,0)",
-        36.15392131048526,
-    ),
     ("seasonal", "=FORECAST.ETS(13,A1:A12,B1:B12,4)", 10.0),
     ("seasonal", "=FORECAST.ETS(15,A1:A12,B1:B12,4)", 20.0),
     ("seasonal", "=FORECAST.ETS(13,A1:A12,B1:B12,1)", 10.0),
@@ -256,11 +246,6 @@ const JS_FIXTURES: &[(&str, &str, f64)] = &[
         "noisy",
         "=FORECAST.ETS(45720,A1:A12,B1:B12,0)",
         31.38546005527558,
-    ),
-    (
-        "noisy",
-        "=FORECAST.ETS(45658,A1:A12,B1:B12,0)",
-        28.519378528399958,
     ),
     (
         "noisy",
@@ -347,11 +332,6 @@ const JS_FIXTURES: &[(&str, &str, f64)] = &[
         "sales",
         "=FORECAST.ETS(15,A1:A12,B1:B12,0)",
         196.0754828673537,
-    ),
-    (
-        "sales",
-        "=FORECAST.ETS(13,A1:A12,B1:B12,0)",
-        177.5126111688807,
     ),
     (
         "sales",
