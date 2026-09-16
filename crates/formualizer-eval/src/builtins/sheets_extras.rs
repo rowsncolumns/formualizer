@@ -347,6 +347,33 @@ impl Function for RegexMatchFn {
     }
 }
 
+/// The rows `SORTN` sorts: a range or array argument as-is; a scalar (`SORTN(5, 1)`) is a 1×1
+/// grid, as on the JS engine (Sheets returns the value itself). An error scalar propagates.
+fn sortn_rows(arg: &ArgumentHandle<'_, '_>) -> Result<Vec<Vec<LiteralValue>>, ExcelError> {
+    if let Ok(view) = arg.range_view() {
+        let (rows, cols) = view.dims();
+        return Ok((0..rows)
+            .map(|r| (0..cols).map(|c| view.get_cell(r, c)).collect())
+            .collect());
+    }
+    Ok(match arg.value()? {
+        CalcValue::Scalar(LiteralValue::Array(rows)) => rows,
+        CalcValue::Scalar(LiteralValue::Error(e)) => return Err(e),
+        CalcValue::Scalar(v) => vec![vec![v]],
+        CalcValue::Range(rv) => {
+            let (rows, cols) = rv.dims();
+            (0..rows)
+                .map(|r| (0..cols).map(|c| rv.get_cell(r, c)).collect())
+                .collect()
+        }
+        CalcValue::Callable(_) => {
+            return Err(
+                ExcelError::new(ExcelErrorKind::Calc).with_message("LAMBDA value must be invoked")
+            );
+        }
+    })
+}
+
 /* ───────────────────────── SORTN() ───────────────────────── */
 
 /// The first `n` rows of a range after sorting it on one column (Google Sheets).
@@ -359,6 +386,8 @@ impl Function for RegexMatchFn {
 ///   result is always exactly the first `n` sorted rows.
 /// - `sort_column` (default 1) is 1-based within `range`; out of range is `#VALUE!`.
 /// - `is_ascending` defaults to TRUE. The sort is stable, like `SORT`.
+/// - A scalar `range` (`SORTN(5, 1)`) is a 1×1 grid — the value itself comes back, as in Sheets
+///   and on the legacy JS engine.
 ///
 /// ```yaml,sandbox
 /// title: "Two smallest rows"
@@ -412,11 +441,12 @@ impl Function for SortNFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<CalcValue<'b>, ExcelError> {
-        let view = match args[0].range_view() {
-            Ok(v) => v,
+        let data = match sortn_rows(&args[0]) {
+            Ok(rows) => rows,
             Err(e) => return Ok(CalcValue::Scalar(LiteralValue::Error(e))),
         };
-        let (rows, cols) = view.dims();
+        let rows = data.len();
+        let cols = data.first().map_or(0, |r| r.len());
         let n = arg_int(args, 1, rows as i64)?;
         // display_ties_mode: validated as a number, otherwise ignored (JS-engine parity).
         let _ties = arg_int(args, 2, 0)?;
@@ -434,9 +464,7 @@ impl Function for SortNFn {
             return Ok(value_err());
         }
         let key = (sort_column - 1) as usize;
-        let mut data: Vec<Vec<LiteralValue>> = (0..rows)
-            .map(|r| (0..cols).map(|c| view.get_cell(r, c)).collect())
-            .collect();
+        let mut data = data;
         data.sort_by(|a, b| {
             let cmp = cmp_for_lookup(&a[key], &b[key]).unwrap_or(0);
             if ascending { cmp.cmp(&0) } else { 0.cmp(&cmp) }
