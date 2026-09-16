@@ -125,6 +125,31 @@ fn filterxml_supports_element_and_attribute_paths() {
     );
 }
 
+/// Only text Excel itself reads as a number becomes one; `inf` / `NaN` / hex spellings that Rust's
+/// `f64` parser would accept stay text, so no non-finite value can enter the grid.
+#[test]
+fn filterxml_coerces_numbers_by_excel_rules_only() {
+    assert_eq!(
+        eval("=FILTERXML(\"<r><a>1,000</a></r>\",\"//a\")"),
+        LiteralValue::Number(1000.0)
+    );
+    assert_eq!(
+        eval("=FILTERXML(\"<r><a>50%</a></r>\",\"//a\")"),
+        LiteralValue::Number(0.5)
+    );
+    assert_eq!(
+        eval("=FILTERXML(\"<r><a>1/2/2024</a></r>\",\"//a\")"),
+        LiteralValue::Number(45293.0)
+    );
+    for spelling in ["inf", "-inf", "infinity", "NaN", "nan", "0x10", "1_000"] {
+        assert_eq!(
+            eval(&format!("=FILTERXML(\"<r><a>{spelling}</a></r>\",\"//a\")")),
+            text(spelling),
+            "{spelling} must stay text"
+        );
+    }
+}
+
 #[test]
 fn permutationa_is_number_to_the_chosen_power() {
     assert_eq!(num(&eval("=PERMUTATIONA(3,2)")), 9.0);
@@ -146,6 +171,13 @@ fn bahttext_spells_baht_and_satang() {
     assert_eq!(eval("=BAHTTEXT(0)"), text("ศูนย์บาทถ้วน"));
     assert_eq!(eval("=BAHTTEXT(-5)"), text("ลบห้าบาทถ้วน"));
     assert_eq!(err_kind(&eval("=BAHTTEXT(\"abc\")")), ExcelErrorKind::Value);
+    // Satang round to two places and carry into the baht — never "one hundred satang".
+    assert_eq!(eval("=BAHTTEXT(0.995)"), text("หนึ่งบาทถ้วน"));
+    assert_eq!(eval("=BAHTTEXT(1.995)"), text("สองบาทถ้วน"));
+    assert_eq!(
+        eval("=BAHTTEXT(1234.567)"),
+        text("หนึ่งพันสองร้อยสามสิบสี่บาทห้าสิบเจ็ดสตางค์")
+    );
 }
 
 #[test]
