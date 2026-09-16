@@ -462,6 +462,9 @@ impl<'a, R: EvaluationContext> EvaluationContext for RecordingContext<'a, R> {
     fn formula_text_at_cell(&self, cell: CellRef) -> Result<Option<String>, ExcelError> {
         self.engine.formula_text_at_cell(cell)
     }
+    fn sheet_id_by_name(&self, sheet: &str) -> Option<SheetId> {
+        self.engine.sheet_id_by_name(sheet)
+    }
     fn clock(&self) -> &dyn crate::timezone::ClockProvider {
         self.engine.clock()
     }

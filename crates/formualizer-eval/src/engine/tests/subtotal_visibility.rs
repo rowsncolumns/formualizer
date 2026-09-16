@@ -82,7 +82,9 @@ fn subtotal_109_respects_manual_and_filter_hidden_rows() {
         .unwrap();
 
     engine.evaluate_all().unwrap();
-    assert_num(engine.get_cell_value("Sheet1", 1, 2), 160.0);
+    // SUBTOTAL(9) keeps the manually hidden row but, like Excel, drops the
+    // AutoFilter-hidden one; SUBTOTAL(109) drops both.
+    assert_num(engine.get_cell_value("Sheet1", 1, 2), 130.0);
     assert_num(engine.get_cell_value("Sheet1", 1, 3), 110.0);
 
     engine
@@ -180,12 +182,14 @@ fn subtotal_all_function_codes_match_expected_matrix() {
 
     engine.evaluate_all().unwrap();
 
-    let include_all = [10.0, 20.0, 30.0, 100.0];
+    // 1–11 exclude only the filter-hidden row (30); 101–111 also drop the
+    // manually hidden row (20).
+    let not_filtered = [10.0, 20.0, 100.0];
     let visible_only = [10.0, 100.0];
 
     let mut verify_col = 2u32;
     for code in 1..=11 {
-        let expected = op_expected(code, &include_all);
+        let expected = op_expected(code, &not_filtered);
         assert_num(engine.get_cell_value("Sheet1", 1, verify_col), expected);
         verify_col += 1;
     }
@@ -194,4 +198,64 @@ fn subtotal_all_function_codes_match_expected_matrix() {
         assert_num(engine.get_cell_value("Sheet1", 1, verify_col), expected);
         verify_col += 1;
     }
+}
+
+#[test]
+fn subtotal_and_aggregate_skip_nested_subtotals_and_aggregates() {
+    let mut engine = Engine::new(TestWorkbook::new(), arrow_eval_config());
+
+    for (row, v) in [(2u32, 10), (3, 20), (4, 30)] {
+        engine
+            .set_cell_value("Sheet1", row, 1, LiteralValue::Int(v))
+            .unwrap();
+    }
+    // A5 = SUBTOTAL over the data, A6 = AGGREGATE over the data: both nested.
+    engine
+        .set_cell_formula("Sheet1", 5, 1, parse("=SUBTOTAL(9,A2:A4)").unwrap())
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 6, 1, parse("=AGGREGATE(9,0,A2:A4)").unwrap())
+        .unwrap();
+
+    engine
+        .set_cell_formula("Sheet1", 1, 2, parse("=SUBTOTAL(9,A2:A6)").unwrap())
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 1, 3, parse("=SUBTOTAL(103,A2:A6)").unwrap())
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 1, 4, parse("=AGGREGATE(9,0,A2:A6)").unwrap())
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 1, 5, parse("=AGGREGATE(9,4,A2:A6)").unwrap())
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 1, 6, parse("=AGGREGATE(14,2,A2:A6,1)").unwrap())
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 1, 7, parse("=SUM(A2:A6)").unwrap())
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 1, 8, parse("=AGGREGATE(14,6,A2:A6,1)").unwrap())
+        .unwrap();
+
+    engine.evaluate_all().unwrap();
+    let check = |r: u32, c: u32, expected: f64| match engine.get_cell_value("Sheet1", r, c) {
+        Some(LiteralValue::Number(n)) if (n - expected).abs() < 1e-9 => {}
+        Some(LiteralValue::Int(i)) if ((i as f64) - expected).abs() < 1e-9 => {}
+        other => panic!("cell r{r}c{c}: expected {expected}, got {other:?}"),
+    };
+
+    check(5, 1, 60.0);
+    check(6, 1, 60.0);
+    // Nested SUBTOTAL/AGGREGATE cells (A5, A6) are skipped …
+    check(1, 2, 60.0);
+    check(1, 3, 3.0);
+    check(1, 4, 60.0);
+    // … unless AGGREGATE options 4–7 ask to keep them.
+    check(1, 5, 180.0);
+    // LARGE with nested results excluded (option 2) → 30; option 6 keeps them → 60.
+    check(1, 6, 30.0);
+    check(1, 7, 180.0);
+    check(1, 8, 60.0);
 }
