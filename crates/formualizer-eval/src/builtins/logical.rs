@@ -149,8 +149,10 @@ pub struct AndFn;
 ///
 /// # Remarks
 /// - Booleans and numbers are accepted (`0` is FALSE, non-zero is TRUE).
-/// - Blank values are treated as FALSE.
-/// - Text and other non-coercible values yield `#VALUE!` unless a prior FALSE short-circuits.
+/// - Blank cells inside a reference are ignored (an omitted direct argument is FALSE).
+/// - Text inside a reference is ignored; a direct text argument must be `TRUE`/`FALSE` or it
+///   yields `#VALUE!` unless a prior FALSE short-circuits.
+/// - A reference that holds no logical or numeric value at all yields `#VALUE!`.
 /// - If no decisive FALSE is found, the first encountered error is returned.
 ///
 /// # Examples
@@ -174,7 +176,7 @@ pub struct AndFn;
 ///   - XOR
 /// faq:
 ///   - q: "What happens with blanks and text in AND?"
-///     a: "Blank values evaluate as FALSE; non-coercible text yields #VALUE! unless a prior FALSE short-circuits."
+///     a: "Blanks and text inside references are ignored; a direct non-boolean text yields #VALUE!, as does a reference with no logical values."
 /// ```
 /// [formualizer-docgen:schema:start]
 /// Name: AND
@@ -208,6 +210,7 @@ impl Function for AndFn {
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         let mut first_error: Option<LiteralValue> = None;
+        let mut saw_logical = false;
         for h in args {
             let from_range = h.range_view().is_ok();
             let it = h.lazy_values_owned()?;
@@ -227,6 +230,8 @@ impl Function for AndFn {
                             continue;
                         }
                     },
+                    // Blank cells inside a reference are ignored, like text.
+                    LiteralValue::Empty if from_range => continue,
                     v => v,
                 };
                 match v {
@@ -241,6 +246,7 @@ impl Function for AndFn {
                         )));
                     }
                     LiteralValue::Boolean(b) => {
+                        saw_logical = true;
                         if !b {
                             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
                                 false,
@@ -248,6 +254,7 @@ impl Function for AndFn {
                         }
                     }
                     LiteralValue::Number(n) => {
+                        saw_logical = true;
                         if n == 0.0 {
                             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
                                 false,
@@ -255,6 +262,7 @@ impl Function for AndFn {
                         }
                     }
                     LiteralValue::Int(i) => {
+                        saw_logical = true;
                         if i == 0 {
                             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
                                 false,
@@ -276,6 +284,12 @@ impl Function for AndFn {
         if let Some(err) = first_error {
             return Ok(crate::traits::CalcValue::Scalar(err));
         }
+        // Excel: a reference holding only text/blanks leaves nothing to test → #VALUE!.
+        if !saw_logical {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new_value().with_message("AND found no logical values"),
+            )));
+        }
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
             true,
         )))
@@ -292,8 +306,10 @@ pub struct OrFn;
 ///
 /// # Remarks
 /// - Booleans and numbers are accepted (`0` is FALSE, non-zero is TRUE).
-/// - Blank values are ignored.
-/// - Text and other non-coercible values yield `#VALUE!` if no prior TRUE short-circuits.
+/// - Blank cells inside a reference are ignored (an omitted direct argument is FALSE).
+/// - Text inside a reference is ignored; a direct text argument must be `TRUE`/`FALSE` or it
+///   yields `#VALUE!` if no prior TRUE short-circuits.
+/// - A reference that holds no logical or numeric value at all yields `#VALUE!`.
 /// - If no TRUE is found, the first encountered error is returned.
 ///
 /// # Examples
@@ -317,7 +333,7 @@ pub struct OrFn;
 ///   - XOR
 /// faq:
 ///   - q: "How does OR treat blanks and text?"
-///     a: "Blanks are ignored; non-coercible text returns #VALUE! unless a prior TRUE already short-circuits."
+///     a: "Blanks and text inside references are ignored; a direct non-boolean text yields #VALUE!, as does a reference with no logical values."
 /// ```
 /// [formualizer-docgen:schema:start]
 /// Name: OR
@@ -351,6 +367,7 @@ impl Function for OrFn {
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         let mut first_error: Option<LiteralValue> = None;
+        let mut saw_logical = false;
         for h in args {
             let from_range = h.range_view().is_ok();
             let it = h.lazy_values_owned()?;
@@ -379,9 +396,14 @@ impl Function for OrFn {
                         }
                     }
                     LiteralValue::Empty => {
-                        // ignored
+                        // Blank cells inside a reference are ignored; an omitted
+                        // direct argument counts as FALSE.
+                        if !from_range {
+                            saw_logical = true;
+                        }
                     }
                     LiteralValue::Boolean(b) => {
+                        saw_logical = true;
                         if b {
                             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
                                 true,
@@ -389,6 +411,7 @@ impl Function for OrFn {
                         }
                     }
                     LiteralValue::Number(n) => {
+                        saw_logical = true;
                         if n != 0.0 {
                             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
                                 true,
@@ -396,6 +419,7 @@ impl Function for OrFn {
                         }
                     }
                     LiteralValue::Int(i) => {
+                        saw_logical = true;
                         if i != 0 {
                             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
                                 true,
@@ -416,6 +440,12 @@ impl Function for OrFn {
         }
         if let Some(err) = first_error {
             return Ok(crate::traits::CalcValue::Scalar(err));
+        }
+        // Excel: a reference holding only text/blanks leaves nothing to test → #VALUE!.
+        if !saw_logical {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new_value().with_message("OR found no logical values"),
+            )));
         }
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
             false,
@@ -509,7 +539,7 @@ impl Function for IfFn {
         if let LiteralValue::Array(conds) = condition {
             return if_elementwise(conds, args);
         }
-        let b = match if_truthy(&condition) {
+        let b = match if_truthy(&condition, args[0].as_reference().is_ok()) {
             Ok(b) => b,
             Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
         };
@@ -526,14 +556,18 @@ impl Function for IfFn {
     }
 }
 
-fn if_truthy(v: &LiteralValue) -> Result<bool, ExcelError> {
+fn if_truthy(v: &LiteralValue, from_reference: bool) -> Result<bool, ExcelError> {
     match v {
         LiteralValue::Boolean(b) => Ok(*b),
         LiteralValue::Number(n) => Ok(*n != 0.0),
         LiteralValue::Int(i) => Ok(*i != 0),
         LiteralValue::Empty => Ok(false),
         // Excel coerces the text booleans ("TRUE"/"FALSE", any case) in a
-        // direct condition; any other text is #VALUE!.
+        // direct condition only; text read through a reference (a cell that
+        // says "TRUE") and any other text is #VALUE!.
+        LiteralValue::Text(_) if from_reference => {
+            Err(ExcelError::new_value().with_message("IF condition must be boolean or number"))
+        }
         LiteralValue::Text(_) => crate::coercion::to_logical(v).map_err(|_| {
             ExcelError::new_value().with_message("IF condition must be boolean or number")
         }),
@@ -589,7 +623,7 @@ fn if_elementwise<'a, 'b, 'c>(
     for (i, row) in conds.iter().enumerate() {
         let mut out_row = Vec::with_capacity(shape.1);
         for (j, cond) in row.iter().enumerate() {
-            out_row.push(match if_truthy(cond) {
+            out_row.push(match if_truthy(cond, true) {
                 Err(e) => LiteralValue::Error(e),
                 Ok(true) => pick(&when_true, i, j),
                 Ok(false) => match &when_false {

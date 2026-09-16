@@ -1,6 +1,6 @@
 use super::super::utils::{
-    ARG_NUM_LENIENT_ONE, ARG_NUM_LENIENT_TWO, ARG_RANGE_NUM_LENIENT_ONE, coerce_num,
-    lift_elementwise,
+    ARG_NUM_LENIENT_ONE, ARG_NUM_LENIENT_THREE, ARG_NUM_LENIENT_TWO, ARG_RANGE_NUM_LENIENT_ONE,
+    coerce_num, lift_elementwise,
 };
 use crate::args::ArgSchema;
 use crate::function::Function;
@@ -15,6 +15,17 @@ fn elem_num(v: &LiteralValue) -> Result<f64, ExcelError> {
         LiteralValue::Error(e) => Err(e.clone()),
         other => coerce_num(other),
     }
+}
+
+/// `n / sig` as Excel sees it: the quotient at 15 significant digits, so
+/// `CEILING(0.3,0.1)` rounds exactly 3 (not 2.9999999999999996) and lands on 0.3.
+fn excel_quotient(n: f64, sig: f64) -> f64 {
+    crate::coercion::to_excel_precision(n / sig)
+}
+
+/// `k * sig` at 15 significant digits (`3 * 0.1` is 0.3, not 0.30000000000000004).
+fn excel_multiple(k: f64, sig: f64) -> f64 {
+    crate::coercion::to_excel_precision(k * sig)
 }
 
 #[derive(Debug)]
@@ -647,12 +658,13 @@ fn mod_element(x: &LiteralValue, y: &LiteralValue) -> LiteralValue {
 pub struct CeilingFn; // CEILING(number, [significance]) legacy semantics simplified
 /// Rounds a number up to the nearest multiple of a significance.
 ///
-/// This implementation defaults significance to `1` and normalizes negative significance to positive.
-///
 /// # Remarks
 /// - If `significance` is omitted, `1` is used.
-/// - `significance = 0` returns `#DIV/0!`.
-/// - Negative significance is treated as its absolute value in this fallback behavior.
+/// - `significance = 0` returns `0` (Excel; `FLOOR` differs and returns `#DIV/0!`).
+/// - A positive number with a negative significance is `#NUM!`; a negative number with a
+///   negative significance rounds away from zero.
+/// - The quotient and the result are taken at Excel's 15 significant digits, so
+///   `CEILING(0.3,0.1)` is exactly `0.3`.
 ///
 /// # Examples
 /// ```yaml,sandbox
@@ -674,7 +686,7 @@ pub struct CeilingFn; // CEILING(number, [significance]) legacy semantics simpli
 ///   - ROUNDUP
 /// faq:
 ///   - q: "What happens if CEILING significance is 0?"
-///     a: "It returns #DIV/0! because a zero multiple is invalid."
+///     a: "It returns 0, as Excel does (FLOOR with a zero significance is #DIV/0!)."
 /// ```
 /// [formualizer-docgen:schema:start]
 /// Name: CEILING
@@ -724,10 +736,9 @@ fn ceiling_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> LiteralValue
             Some(s) => elem_num(s)?,
             None => 1.0,
         };
+        // Excel: CEILING(x,0) is 0 (unlike FLOOR, which is #DIV/0!).
         if sig == 0.0 {
-            return Ok(LiteralValue::Error(ExcelError::from_error_string(
-                "#DIV/0!",
-            )));
+            return Ok(LiteralValue::Number(0.0));
         }
         // Excel: a positive number with a negative significance is #NUM!; a
         // negative number with a negative significance rounds away from zero.
@@ -736,10 +747,13 @@ fn ceiling_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> LiteralValue
                 return Ok(LiteralValue::Error(ExcelError::new_num()));
             }
             sig = sig.abs();
-            return Ok(LiteralValue::Number((n / sig).floor() * sig));
+            return Ok(LiteralValue::Number(excel_multiple(
+                excel_quotient(n, sig).floor(),
+                sig,
+            )));
         }
-        let k = (n / sig).ceil();
-        Ok(LiteralValue::Number(k * sig))
+        let k = excel_quotient(n, sig).ceil();
+        Ok(LiteralValue::Number(excel_multiple(k, sig)))
     };
     compute().unwrap_or_else(LiteralValue::Error)
 }
@@ -749,7 +763,7 @@ pub struct CeilingMathFn; // CEILING.MATH(number,[significance],[mode])
 /// Rounds a number up to the nearest integer or multiple using `CEILING.MATH` rules.
 ///
 /// # Remarks
-/// - If `significance` is omitted (or passed as `0`), the function uses `1`.
+/// - If `significance` is omitted, `1` is used; a `significance` of `0` returns `0`.
 /// - `significance` is treated as a positive magnitude.
 /// - For negative numbers, non-zero `mode` rounds away from zero; otherwise it rounds toward positive infinity.
 ///
@@ -781,8 +795,8 @@ pub struct CeilingMathFn; // CEILING.MATH(number,[significance],[mode])
 /// Min args: 1
 /// Max args: variadic
 /// Variadic: true
-/// Signature: CEILING.MATH(arg1: number@scalar, arg2...: number@scalar)
-/// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
+/// Signature: CEILING.MATH(arg1: number@scalar, arg2: number@scalar, arg3...: number@scalar)
+/// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg3{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
 /// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for CeilingMathFn {
@@ -797,8 +811,8 @@ impl Function for CeilingMathFn {
         true
     }
     fn arg_schema(&self) -> &'static [ArgSchema] {
-        &ARG_NUM_LENIENT_TWO[..]
-    } // allow up to 3 handled manually
+        &ARG_NUM_LENIENT_THREE[..]
+    }
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
@@ -826,7 +840,11 @@ fn ceiling_math_element(
         let sig = match sig {
             Some(s) => {
                 let v = elem_num(s)?;
-                if v == 0.0 { 1.0 } else { v.abs() }
+                // Excel: a zero significance yields 0, as for CEILING / CEILING.PRECISE.
+                if v == 0.0 {
+                    return Ok(LiteralValue::Number(0.0));
+                }
+                v.abs()
             }
             None => 1.0,
         };
@@ -834,14 +852,15 @@ fn ceiling_math_element(
             Some(m) => elem_num(m)? != 0.0,
             None => false,
         };
-        let result = if n >= 0.0 {
-            (n / sig).ceil() * sig
+        let q = excel_quotient(n, sig);
+        let k = if n >= 0.0 {
+            q.ceil()
         } else if mode_nonzero {
-            (n / sig).floor() * sig /* away from zero */
+            q.floor() /* away from zero */
         } else {
-            (n / sig).ceil() * sig /* toward +inf (less negative) */
+            q.ceil() /* toward +inf (less negative) */
         };
-        Ok(LiteralValue::Number(result))
+        Ok(LiteralValue::Number(excel_multiple(k, sig)))
     };
     compute().unwrap_or_else(LiteralValue::Error)
 }
@@ -850,12 +869,13 @@ fn ceiling_math_element(
 pub struct FloorFn; // FLOOR(number,[significance])
 /// Rounds a number down to the nearest multiple of a significance.
 ///
-/// This implementation defaults significance to `1` and normalizes negative significance to positive.
-///
 /// # Remarks
 /// - If `significance` is omitted, `1` is used.
-/// - `significance = 0` returns `#DIV/0!`.
-/// - Negative significance is treated as its absolute value in this fallback behavior.
+/// - `significance = 0` returns `0` (Excel; `FLOOR` differs and returns `#DIV/0!`).
+/// - A positive number with a negative significance is `#NUM!`; a negative number with a
+///   negative significance rounds away from zero.
+/// - The quotient and the result are taken at Excel's 15 significant digits, so
+///   `CEILING(0.3,0.1)` is exactly `0.3`.
 ///
 /// # Examples
 /// ```yaml,sandbox
@@ -935,8 +955,8 @@ fn floor_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> LiteralValue {
         if sig < 0.0 {
             sig = sig.abs();
         }
-        let k = (n / sig).floor();
-        Ok(LiteralValue::Number(k * sig))
+        let k = excel_quotient(n, sig).floor();
+        Ok(LiteralValue::Number(excel_multiple(k, sig)))
     };
     compute().unwrap_or_else(LiteralValue::Error)
 }
@@ -978,8 +998,8 @@ pub struct FloorMathFn; // FLOOR.MATH(number,[significance],[mode])
 /// Min args: 1
 /// Max args: variadic
 /// Variadic: true
-/// Signature: FLOOR.MATH(arg1: number@scalar, arg2...: number@scalar)
-/// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
+/// Signature: FLOOR.MATH(arg1: number@scalar, arg2: number@scalar, arg3...: number@scalar)
+/// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg3{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
 /// Caps: PURE, ELEMENTWISE
 /// [formualizer-docgen:schema:end]
 impl Function for FloorMathFn {
@@ -994,7 +1014,7 @@ impl Function for FloorMathFn {
         true
     }
     fn arg_schema(&self) -> &'static [ArgSchema] {
-        &ARG_NUM_LENIENT_TWO[..]
+        &ARG_NUM_LENIENT_THREE[..]
     }
     fn eval<'a, 'b, 'c>(
         &self,
@@ -1031,14 +1051,15 @@ fn floor_math_element(
             Some(m) => elem_num(m)? != 0.0,
             None => false,
         };
-        let result = if n >= 0.0 {
-            (n / sig).floor() * sig
+        let q = excel_quotient(n, sig);
+        let k = if n >= 0.0 {
+            q.floor()
         } else if mode_nonzero {
-            (n / sig).ceil() * sig
+            q.ceil()
         } else {
-            (n / sig).floor() * sig
+            q.floor()
         };
-        Ok(LiteralValue::Number(result))
+        Ok(LiteralValue::Number(excel_multiple(k, sig)))
     };
     compute().unwrap_or_else(LiteralValue::Error)
 }
@@ -1185,7 +1206,10 @@ fn power_element(base: &LiteralValue, expv: &LiteralValue) -> LiteralValue {
         if base == 0.0 && expv < 0.0 {
             return Ok(LiteralValue::Error(ExcelError::new_div()));
         }
-        Ok(LiteralValue::Number(base.powf(expv)))
+        // Overflow (`POWER(2,1024)`) is #NUM!, as for the `^` operator.
+        Ok(LiteralValue::Number(crate::coercion::sanitize_numeric(
+            base.powf(expv),
+        )?))
     };
     compute().unwrap_or_else(LiteralValue::Error)
 }
@@ -2775,7 +2799,10 @@ fn ceiling_precise_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> Lite
             }
             None => 1.0,
         };
-        Ok(LiteralValue::Number((n / sig).ceil() * sig))
+        Ok(LiteralValue::Number(excel_multiple(
+            excel_quotient(n, sig).ceil(),
+            sig,
+        )))
     };
     compute().unwrap_or_else(LiteralValue::Error)
 }
@@ -2858,7 +2885,10 @@ fn floor_precise_element(n: &LiteralValue, sig: Option<&LiteralValue>) -> Litera
             }
             None => 1.0,
         };
-        Ok(LiteralValue::Number((n / sig).floor() * sig))
+        Ok(LiteralValue::Number(excel_multiple(
+            excel_quotient(n, sig).floor(),
+            sig,
+        )))
     };
     compute().unwrap_or_else(LiteralValue::Error)
 }

@@ -45,6 +45,16 @@ fn scalar_like_value(arg: &ArgumentHandle<'_, '_>) -> Result<LiteralValue, Excel
 ///   coerce_num succeeds). Non-numeric text is ignored (Excel would treat a direct non-numeric text
 ///   argument as #VALUE! in some contexts; covered by TODO for finer parity).
 fn collect_numeric_stats(args: &[ArgumentHandle]) -> Result<Vec<f64>, ExcelError> {
+    collect_numeric_stats_with(args, false)
+}
+
+/// `collect_numeric_stats` with `strict_direct_text`: a direct scalar argument that cannot be
+/// coerced to a number (`PRODUCT("x")`) is `#VALUE!` instead of being ignored. Text inside
+/// references and arrays is still skipped.
+fn collect_numeric_stats_with(
+    args: &[ArgumentHandle],
+    strict_direct_text: bool,
+) -> Result<Vec<f64>, ExcelError> {
     let mut out = Vec::new();
     for a in args {
         // Special-case: inline array literal argument should be treated like a list of direct scalar
@@ -80,11 +90,14 @@ fn collect_numeric_stats(args: &[ArgumentHandle]) -> Result<Vec<f64>, ExcelError
             let v = scalar_like_value(a)?;
             match v {
                 LiteralValue::Error(e) => return Err(e),
-                other => {
-                    if let Ok(n) = coerce_num(&other) {
-                        out.push(n);
+                other => match coerce_num(&other) {
+                    Ok(n) => out.push(n),
+                    Err(_) if strict_direct_text && matches!(other, LiteralValue::Text(_)) => {
+                        return Err(ExcelError::new_value()
+                            .with_message("Direct text argument is not numeric"));
                     }
-                }
+                    Err(_) => {}
+                },
             }
         }
     }
@@ -1784,7 +1797,9 @@ impl Function for ProductFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let nums = collect_numeric_stats(args)?;
+        // Excel: a direct non-numeric text literal is #VALUE!; text inside a
+        // reference is ignored, and a range with nothing numeric multiplies to 0.
+        let nums = collect_numeric_stats_with(args, true)?;
         if nums.is_empty() {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)));
         }
