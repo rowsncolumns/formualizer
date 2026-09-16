@@ -202,7 +202,12 @@ impl Function for LetFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<CalcValue<'b>, ExcelError> {
-        if args.len() < 3 || args.len().is_multiple_of(2) {
+        if args.len() < 3 {
+            return Ok(CalcValue::Scalar(LiteralValue::Error(
+                crate::args::too_few_arguments(3, args.len()),
+            )));
+        }
+        if args.len().is_multiple_of(2) {
             return Ok(err_value(
                 "LET expects name/value pairs followed by a final expression",
             ));
@@ -414,9 +419,9 @@ impl Function for LambdaFn {
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<CalcValue<'b>, ExcelError> {
         if args.is_empty() {
-            return Ok(err_value(
-                "LAMBDA requires at least a calculation expression",
-            ));
+            return Ok(CalcValue::Scalar(LiteralValue::Error(
+                crate::args::too_few_arguments(1, 0),
+            )));
         }
 
         let mut params = Vec::new();
@@ -717,11 +722,8 @@ macro_rules! hof_boilerplate {
             ctx: &dyn FunctionContext<'b>,
         ) -> Result<CalcValue<'b>, ExcelError> {
             if args.len() < self.min_args() {
-                return Ok(err_value(format!(
-                    "{} expects at least {} argument(s), got {}",
-                    self.name(),
-                    self.min_args(),
-                    args.len()
+                return Ok(CalcValue::Scalar(LiteralValue::Error(
+                    crate::args::too_few_arguments(self.min_args(), args.len()),
                 )));
             }
             self.eval(args, ctx)
@@ -1600,11 +1602,13 @@ mod tests {
     }
 
     #[test]
-    fn helper_arity_errors_are_value_errors() {
-        assert_error(eval("=MAP(LAMBDA(v,v))"), ExcelErrorKind::Value);
+    fn helper_arity_errors_follow_the_shared_contract() {
+        // Too few arguments is #N/A (the JS engine / Sheets value for a call Excel refuses to
+        // enter); an argument-shape error stays #VALUE!.
+        assert_error(eval("=MAP(LAMBDA(v,v))"), ExcelErrorKind::Na);
         assert_error(
             eval_with_wb("=REDUCE(F1:F3)", grid_wb()),
-            ExcelErrorKind::Value,
+            ExcelErrorKind::Na,
         );
         assert_error(
             eval_with_wb("=REDUCE(0,F1:F3,LAMBDA(a,v,a+v),1)", grid_wb()),

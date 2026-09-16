@@ -19,6 +19,8 @@
 //! - Empty numeric sets produce Excel-specific errors (#NUM! for LARGE/SMALL, #N/A for rank target
 //!   out of range, #DIV/0! for STDEV/VAR sample with n < 2, etc.).
 
+mod forecast_ets;
+
 use super::super::builtins::utils::{ARG_RANGE_NUM_LENIENT_ONE, coerce_num};
 use crate::args::ArgSchema;
 use crate::function::Function;
@@ -10315,6 +10317,7 @@ impl Function for GammaLnPreciseFn {
 
 pub fn register_builtins() {
     use std::sync::Arc;
+    forecast_ets::register_builtins();
     crate::function_registry::register_builtin(Arc::new(ForecastLinearFn));
     crate::function_registry::register_builtin(Arc::new(LognormdistFn));
     crate::function_registry::register_builtin(Arc::new(HypgeomdistFn));

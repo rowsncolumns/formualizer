@@ -401,8 +401,9 @@ mod tests {
         assert_eq!(abs.dependency_contract(2), None);
 
         let sum = SumFn;
+        assert_eq!(sum.dependency_contract(0), None);
         assert_eq!(
-            sum.dependency_contract(0).map(|contract| contract.class),
+            sum.dependency_contract(1).map(|contract| contract.class),
             Some(FunctionDependencyClass::StaticReduction)
         );
 

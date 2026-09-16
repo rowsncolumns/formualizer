@@ -1004,9 +1004,12 @@ mod tests {
     #[test]
     fn test_sum_function_argument_count() {
         let wb = create_workbook();
-        // SUM() with no arguments returns 0 (Excel behavior)
+        // Excel refuses to enter `=SUM()`; a stored one is #N/A (Sheets / the JS engine).
         let result = evaluate_formula("=SUM()", &wb).unwrap();
-        assert_eq!(result, LiteralValue::Number(0.0));
+        match result {
+            LiteralValue::Error(e) => assert_eq!(e.kind, ExcelErrorKind::Na),
+            other => panic!("expected #N/A, got {other:?}"),
+        }
     }
 
     #[test]
