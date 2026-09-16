@@ -3878,6 +3878,18 @@ where
         false
     }
 
+    /// Move a sheet to `new_position` in the tab order (0-based among the
+    /// active sheets, clamped to the end). The span a 3-D reference covers
+    /// and `SHEET()` positions follow the tab order, so every formula is
+    /// re-evaluated; nothing else about the sheet changes.
+    pub fn move_sheet(&mut self, sheet_id: SheetId, new_position: usize) -> Result<(), ExcelError> {
+        self.graph.move_sheet(sheet_id, new_position)?;
+        self.clear_all_computed_overlays();
+        self.mark_all_formula_vertices_dirty();
+        self.mark_topology_edited();
+        Ok(())
+    }
+
     pub fn rename_sheet(&mut self, sheet_id: SheetId, new_name: &str) -> Result<(), ExcelError> {
         let old_name = self.graph.sheet_name(sheet_id).to_string();
 
@@ -22658,6 +22670,51 @@ where
 }
 
 // Override EvaluationContext to provide thread pool access
+impl<R: EvaluationContext> Engine<R> {
+    /// A 3-D reference `first:last!<rect>` is the same rectangle on every
+    /// sheet between the two endpoints in tab order (inclusive, either
+    /// endpoint may come first). Excel exposes it to aggregators as one
+    /// value list, so the per-sheet views are stacked vertically into a
+    /// single owned view; an endpoint that is not a sheet is `#REF!`.
+    fn resolve_three_d_range_view<'c>(
+        &'c self,
+        sheet_first: &str,
+        sheet_last: &str,
+        bounds: (Option<u32>, Option<u32>, Option<u32>, Option<u32>),
+        current_sheet: &str,
+    ) -> Result<RangeView<'c>, ExcelError> {
+        let span = self
+            .graph
+            .sheet_reg()
+            .active_span_ids(sheet_first, sheet_last)
+            .ok_or_else(|| {
+                ExcelError::new(ExcelErrorKind::Ref)
+                    .with_message(format!("Sheet not found: {sheet_first}:{sheet_last}"))
+            })?;
+        let (start_row, start_col, end_row, end_col) = bounds;
+        let mut rows: Vec<Vec<LiteralValue>> = Vec::new();
+        for sheet_id in span {
+            let per_sheet = ReferenceType::Range {
+                sheet: Some(self.graph.sheet_name(sheet_id).to_string()),
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                start_row_abs: true,
+                start_col_abs: true,
+                end_row_abs: true,
+                end_col_abs: true,
+            };
+            let view = self.resolve_range_view(&per_sheet, current_sheet)?;
+            let (nrows, ncols) = view.dims();
+            for r in 0..nrows {
+                rows.push((0..ncols).map(|c| view.get_cell(r, c)).collect());
+            }
+        }
+        Ok(RangeView::from_owned_rows(rows, self.config.date_system))
+    }
+}
+
 impl<R> crate::traits::EvaluationContext for Engine<R>
 where
     R: EvaluationContext,
@@ -23479,10 +23536,32 @@ where
                 let owned = boxed.materialise().into_owned();
                 Ok(RangeView::from_owned_rows(owned, self.config.date_system))
             }
-            ReferenceType::Cell3D { .. } | ReferenceType::Range3D { .. } => {
-                Err(ExcelError::new(ExcelErrorKind::NImpl)
-                    .with_message("3D references are not yet supported".to_string()))
-            }
+            ReferenceType::Cell3D {
+                sheet_first,
+                sheet_last,
+                row,
+                col,
+                ..
+            } => self.resolve_three_d_range_view(
+                sheet_first,
+                sheet_last,
+                (Some(*row), Some(*col), Some(*row), Some(*col)),
+                current_sheet,
+            ),
+            ReferenceType::Range3D {
+                sheet_first,
+                sheet_last,
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                ..
+            } => self.resolve_three_d_range_view(
+                sheet_first,
+                sheet_last,
+                (*start_row, *start_col, *end_row, *end_col),
+                current_sheet,
+            ),
         }
     }
 

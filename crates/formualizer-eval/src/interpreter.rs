@@ -1617,11 +1617,9 @@ impl<'a> Interpreter<'a> {
                         _ => unreachable!(),
                     },
                     (Some(3), Some(3)) => match (&l, &r) {
-                        (Boolean(a), Boolean(b)) => self.cmp_f64(
-                            if *a { 1.0 } else { 0.0 },
-                            if *b { 1.0 } else { 0.0 },
-                            op,
-                        ),
+                        (Boolean(a), Boolean(b)) => {
+                            self.cmp_f64(if *a { 1.0 } else { 0.0 }, if *b { 1.0 } else { 0.0 }, op)
+                        }
                         _ => unreachable!(),
                     },
                     (Some(ra), Some(rb)) => self.cmp_f64(ra as f64, rb as f64, op),
@@ -1750,10 +1748,49 @@ fn relocate_reference_for_offset(
         // Defined names are placement-invariant: a relocated copy of the
         // formula references the same name, resolved at evaluation time.
         ReferenceType::NamedRange(name) => Ok(ReferenceType::NamedRange(name.clone())),
-        ReferenceType::Table(_)
-        | ReferenceType::Cell3D { .. }
-        | ReferenceType::Range3D { .. }
-        | ReferenceType::External(_) => Err(unsupported_reference_relocation_error()),
+        // 3-D references relocate exactly like their 2-D counterparts: the
+        // sheet span is fixed, the rectangle follows the copy offset.
+        ReferenceType::Cell3D {
+            sheet_first,
+            sheet_last,
+            row,
+            col,
+            row_abs,
+            col_abs,
+        } => Ok(ReferenceType::Cell3D {
+            sheet_first: sheet_first.clone(),
+            sheet_last: sheet_last.clone(),
+            row: shift_axis_for_offset(*row, row_delta, *row_abs)?,
+            col: shift_axis_for_offset(*col, col_delta, *col_abs)?,
+            row_abs: *row_abs,
+            col_abs: *col_abs,
+        }),
+        ReferenceType::Range3D {
+            sheet_first,
+            sheet_last,
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            start_row_abs,
+            start_col_abs,
+            end_row_abs,
+            end_col_abs,
+        } => Ok(ReferenceType::Range3D {
+            sheet_first: sheet_first.clone(),
+            sheet_last: sheet_last.clone(),
+            start_row: shift_optional_axis_for_offset(*start_row, row_delta, *start_row_abs)?,
+            start_col: shift_optional_axis_for_offset(*start_col, col_delta, *start_col_abs)?,
+            end_row: shift_optional_axis_for_offset(*end_row, row_delta, *end_row_abs)?,
+            end_col: shift_optional_axis_for_offset(*end_col, col_delta, *end_col_abs)?,
+            start_row_abs: *start_row_abs,
+            start_col_abs: *start_col_abs,
+            end_row_abs: *end_row_abs,
+            end_col_abs: *end_col_abs,
+        }),
+        ReferenceType::Table(_) | ReferenceType::External(_) => {
+            Err(unsupported_reference_relocation_error())
+        }
     }
 }
 

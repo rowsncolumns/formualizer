@@ -313,7 +313,10 @@ fn package_fallback_table_reference_discovers_the_same_staged_closure_as_ordinar
 }
 
 #[test]
-fn package_fallback_opaque_3d_reference_widens_and_matches_prepare_all_error() {
+fn package_fallback_3d_reference_to_unknown_sheet_widens_and_matches_prepare_all_error() {
+    // `Inputs:Middle!A1` spans to a sheet that does not exist. 3-D references evaluate now,
+    // so the unknown endpoint is an ordinary unresolved cross-sheet binding rather than an
+    // opaque `#N/IMPL!` reference.
     let setup = || {
         let mut engine = engine(FormulaPlaneMode::Off);
         engine.stage_formula_text("Inputs", 9, 9, "=99".into());
@@ -341,11 +344,9 @@ fn package_fallback_opaque_3d_reference_widens_and_matches_prepare_all_error() {
         target.evaluate_cell("Outputs", 1, 1).unwrap(),
         oracle.evaluate_cell("Outputs", 1, 1).unwrap()
     );
-    assert!(matches!(
-        target.evaluate_cell("Outputs", 1, 1).unwrap(),
-        Some(LiteralValue::Error(ref error))
-            if error.kind == formualizer_common::ExcelErrorKind::NImpl
-    ));
+    // The span endpoint `Middle` is not a sheet, so the formula is rejected at ingest (#REF!)
+    // and never materializes a value — on both the targeted and the prepare-all path.
+    assert!(target.evaluate_cell("Outputs", 1, 1).unwrap().is_none());
 }
 
 #[test]

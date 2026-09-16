@@ -293,11 +293,42 @@ impl DependencyGraph {
                                 .with_message(format!("Undefined table: {}", tref.name)));
                         }
                     }
-                    // 3D references parse correctly but aren't yet wired through
-                    // the dependency graph; treat them as no-op dependencies for
-                    // now so formulas containing them still load. Evaluation will
-                    // surface #N/IMPL! via the Resolver path.
-                    ReferenceType::Cell3D { .. } | ReferenceType::Range3D { .. } => {}
+                    // A 3-D reference depends on the same rectangle on every
+                    // sheet between its endpoints (tab order, inclusive).
+                    ReferenceType::Cell3D {
+                        sheet_first,
+                        sheet_last,
+                        row,
+                        col,
+                        ..
+                    } => {
+                        self.push_three_d_dependencies(
+                            sheet_first,
+                            sheet_last,
+                            (Some(*row), Some(*col), Some(*row), Some(*col)),
+                            dependencies,
+                            range_dependencies,
+                            created_placeholders,
+                        )?;
+                    }
+                    ReferenceType::Range3D {
+                        sheet_first,
+                        sheet_last,
+                        start_row,
+                        start_col,
+                        end_row,
+                        end_col,
+                        ..
+                    } => {
+                        self.push_three_d_dependencies(
+                            sheet_first,
+                            sheet_last,
+                            (*start_row, *start_col, *end_row, *end_col),
+                            dependencies,
+                            range_dependencies,
+                            created_placeholders,
+                        )?;
+                    }
                 }
             }
             super::super::arena::ast::AstNodeData::BinaryOp {
@@ -390,6 +421,74 @@ impl DependencyGraph {
             } => Some(self.data_store.resolve_ast_string(*name_id).to_string()),
             _ => None,
         }
+    }
+
+    /// Dependencies of a 3-D reference `first:last!<rect>`: the rectangle on
+    /// every sheet the span covers, each handled like the plain `Range` arm
+    /// (expanded to cells when small enough, kept compressed otherwise).
+    /// An endpoint that is not a sheet is `#REF!`, as for a bad sheet name.
+    fn push_three_d_dependencies(
+        &mut self,
+        sheet_first: &str,
+        sheet_last: &str,
+        bounds: (Option<u32>, Option<u32>, Option<u32>, Option<u32>),
+        dependencies: &mut FxHashSet<VertexId>,
+        range_dependencies: &mut Vec<SharedRangeRef<'static>>,
+        created_placeholders: &mut Vec<CellRef>,
+    ) -> Result<(), ExcelError> {
+        let span = self
+            .sheet_reg()
+            .active_span_ids(sheet_first, sheet_last)
+            .ok_or_else(|| {
+                ExcelError::new(ExcelErrorKind::Ref)
+                    .with_message(format!("Sheet not found: {sheet_first}:{sheet_last}"))
+            })?;
+        let (start_row, start_col, end_row, end_col) = bounds;
+        for sheet_id in span {
+            match (start_row, start_col, end_row, end_col) {
+                (Some(sr), Some(sc), Some(er), Some(ec)) => {
+                    if sr > er || sc > ec {
+                        return Err(ExcelError::new(ExcelErrorKind::Ref));
+                    }
+                    let size = ((ec - sc + 1) * (er - sr + 1)) as usize;
+                    if size <= self.config.range_expansion_limit {
+                        for row in sr..=er {
+                            for col in sc..=ec {
+                                let coord = Coord::from_excel(row, col, true, true);
+                                let addr = CellRef::new(sheet_id, coord);
+                                let vertex_id =
+                                    self.get_or_create_vertex(&addr, created_placeholders);
+                                dependencies.insert(vertex_id);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            let reference = ReferenceType::Range {
+                sheet: Some(self.sheet_name(sheet_id).to_string()),
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                start_row_abs: true,
+                start_col_abs: true,
+                end_row_abs: true,
+                end_col_abs: true,
+            };
+            if let Some(SharedRef::Range(range)) = reference.to_sheet_ref_lossy() {
+                let owned = range.into_owned();
+                range_dependencies.push(SharedRangeRef {
+                    sheet: SharedSheetLocator::Id(sheet_id),
+                    start_row: owned.start_row,
+                    start_col: owned.start_col,
+                    end_row: owned.end_row,
+                    end_col: owned.end_col,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn extract_dependencies_inner(
@@ -597,11 +696,42 @@ impl DependencyGraph {
                             .with_message(format!("Undefined table: {}", tref.name)));
                     }
                 }
-                // 3D references parse correctly but aren't yet wired through
-                // the dependency graph; treat them as no-op dependencies for
-                // now so formulas containing them still load. Evaluation will
-                // surface #N/IMPL! via the Resolver path.
-                ReferenceType::Cell3D { .. } | ReferenceType::Range3D { .. } => {}
+                // A 3-D reference depends on the same rectangle on every
+                // sheet between its endpoints (tab order, inclusive).
+                ReferenceType::Cell3D {
+                    sheet_first,
+                    sheet_last,
+                    row,
+                    col,
+                    ..
+                } => {
+                    self.push_three_d_dependencies(
+                        sheet_first,
+                        sheet_last,
+                        (Some(*row), Some(*col), Some(*row), Some(*col)),
+                        dependencies,
+                        range_dependencies,
+                        created_placeholders,
+                    )?;
+                }
+                ReferenceType::Range3D {
+                    sheet_first,
+                    sheet_last,
+                    start_row,
+                    start_col,
+                    end_row,
+                    end_col,
+                    ..
+                } => {
+                    self.push_three_d_dependencies(
+                        sheet_first,
+                        sheet_last,
+                        (*start_row, *start_col, *end_row, *end_col),
+                        dependencies,
+                        range_dependencies,
+                        created_placeholders,
+                    )?;
+                }
             },
             ASTNodeType::BinaryOp { left, right, .. } => {
                 self.extract_dependencies_recursive(

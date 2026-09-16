@@ -3841,20 +3841,25 @@ mod semantics_regressions {
         }
 
         #[test]
-        fn test_sheet_named_with_embedded_colon() {
-            // Excel forbids ':' in sheet names, so a quoted sheet whose name
-            // contains ':' must still parse as a single-sheet reference.
-            let r = ReferenceType::from_string("'Weird:Name'!A1").unwrap();
+        fn test_quoted_sheet_span_is_a_3d_reference() {
+            // Excel forbids ':' in sheet names and writes a 3-D span with a
+            // single pair of quotes around both endpoints: `'Sheet 1:Sheet 3'!A1`.
+            let r = ReferenceType::from_string("'Sheet 1:Sheet 3'!A1").unwrap();
             assert_eq!(
                 r,
-                ReferenceType::Cell {
-                    sheet: Some("Weird:Name".to_string()),
+                ReferenceType::Cell3D {
+                    sheet_first: "Sheet 1".to_string(),
+                    sheet_last: "Sheet 3".to_string(),
                     row: 1,
                     col: 1,
                     row_abs: false,
                     col_abs: false,
                 }
             );
+            // Only one endpoint needs quoting; Excel still quotes the whole span.
+            let r = ReferenceType::from_string("'Sheet1:Sheet 3'!A1:B2").unwrap();
+            assert!(matches!(r, ReferenceType::Range3D { .. }));
+            assert_eq!(format!("{r}"), "'Sheet1:Sheet 3'!A1:B2");
         }
 
         #[test]
@@ -3877,8 +3882,8 @@ mod semantics_regressions {
                 "=Sheet1:Sheet3!A1",
                 "=Sheet1:Sheet3!A1:B2",
                 "=Sheet1:Sheet3!$A$1:$B$2",
-                "='Sheet 1':'Sheet 3'!A1",
-                "='Bob''s Sheet':'End Sheet'!A1",
+                "='Sheet 1:Sheet 3'!A1",
+                "='Bob''s Sheet:End Sheet'!A1",
             ];
             for input in cases {
                 let ast = parse_both(input);
@@ -3911,9 +3916,8 @@ mod string_colon_interaction {
 
     #[test]
     fn test_cross_sheet_range_still_parses() {
-        // Single-quoted sheet continuation must still produce a single Range
-        // reference. Use a single-sheet form that exercises the `:`-glue path
-        // currently supported end-to-end by both parsers.
+        // A quoted sheet span with a range part is Excel's spelling of a 3-D
+        // range (`'Sheet 1:Sheet 3'!A1:C10`); both parsers must agree on it.
         let formula = "='Sheet 1:Sheet 3'!A1:C10";
 
         let mut parser = Parser::new(formula).unwrap();
@@ -3922,8 +3926,8 @@ mod string_colon_interaction {
             .expect("classic parser should accept formula");
         let reference = extract_reference(&ast);
         assert!(
-            matches!(reference, ReferenceType::Range { .. }),
-            "expected Range reference, got {reference:?}"
+            matches!(reference, ReferenceType::Range3D { .. }),
+            "expected Range3D reference, got {reference:?}"
         );
 
         let span_ast = crate::parser::parse(formula).expect("span parser should accept formula");

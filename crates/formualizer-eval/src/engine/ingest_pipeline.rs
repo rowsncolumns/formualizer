@@ -579,8 +579,96 @@ impl<'a> IngestPipeline<'a> {
                         .with_message(format!("Undefined table: {}", tref.name)))
                 }
             }
-            ReferenceType::Cell3D { .. } | ReferenceType::Range3D { .. } => Ok(()),
+            // A 3-D reference depends on the same rectangle on every sheet
+            // between its endpoints (tab order, inclusive); an endpoint that
+            // is not a sheet is #REF!, like any unknown sheet name.
+            ReferenceType::Cell3D {
+                sheet_first,
+                sheet_last,
+                row,
+                col,
+                ..
+            } => self.collect_three_d_dependencies(
+                sheet_first,
+                sheet_last,
+                (Some(*row), Some(*col), Some(*row), Some(*col)),
+                plan,
+            ),
+            ReferenceType::Range3D {
+                sheet_first,
+                sheet_last,
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                ..
+            } => self.collect_three_d_dependencies(
+                sheet_first,
+                sheet_last,
+                (*start_row, *start_col, *end_row, *end_col),
+                plan,
+            ),
         }
+    }
+
+    fn collect_three_d_dependencies(
+        &mut self,
+        sheet_first: &str,
+        sheet_last: &str,
+        bounds: (Option<u32>, Option<u32>, Option<u32>, Option<u32>),
+        plan: &mut DependencyPlanRow,
+    ) -> Result<(), ExcelError> {
+        let span = self
+            .sheet_registry
+            .active_span_ids(sheet_first, sheet_last)
+            .ok_or_else(|| {
+                ExcelError::new(ExcelErrorKind::Ref)
+                    .with_message(format!("Sheet not found: {sheet_first}:{sheet_last}"))
+            })?;
+        let (start_row, start_col, end_row, end_col) = bounds;
+        for sheet_id in span {
+            if let (Some(sr), Some(sc), Some(er), Some(ec)) =
+                (start_row, start_col, end_row, end_col)
+            {
+                if sr > er || sc > ec {
+                    return Err(ExcelError::new(ExcelErrorKind::Ref));
+                }
+                let size = ((ec - sc + 1) * (er - sr + 1)) as usize;
+                if self.policy.expand_small_ranges && size <= self.policy.range_expansion_limit {
+                    for row in sr..=er {
+                        for col in sc..=ec {
+                            plan.direct_cell_deps.push(CellRef::new(
+                                sheet_id,
+                                Coord::from_excel(row, col, true, true),
+                            ));
+                        }
+                    }
+                    continue;
+                }
+            }
+            let per_sheet = ReferenceType::Range {
+                sheet: None,
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                start_row_abs: true,
+                start_col_abs: true,
+                end_row_abs: true,
+                end_col_abs: true,
+            };
+            if let Some(SharedRef::Range(range)) = per_sheet.to_sheet_ref_lossy() {
+                let owned = range.into_owned();
+                plan.range_deps.push(SharedRangeRef {
+                    sheet: SharedSheetLocator::Id(sheet_id),
+                    start_row: owned.start_row,
+                    start_col: owned.start_col,
+                    end_row: owned.end_row,
+                    end_col: owned.end_col,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn resolve_reference_sheet(
