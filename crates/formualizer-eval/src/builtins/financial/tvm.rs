@@ -684,6 +684,55 @@ impl Function for RateFn {
     }
 }
 
+/// Excel's level payment and the interest charge of period `per` (1-based) for
+/// `IPMT` / `PPMT`, in Excel's sign convention (a positive `pv` is a loan, so the payment and
+/// the interest are negative).
+///
+/// * `pmt_type = 0` — payments at period end: interest accrues on the balance at the start of
+///   the period, `FV(rate, per − 1, pmt, pv, 0) · rate`.
+/// * `pmt_type = 1` — payments at period start: period 1 carries no interest and every later
+///   period accrues on the balance left after the previous payment, i.e.
+///   `(FV(rate, per − 2, pmt, pv, 1) − pmt) · rate`.
+///
+/// This is the same schedule `cumulative_schedule` walks for `CUMIPMT` / `CUMPRINC`, so
+/// `IPMT(…, per, …) == CUMIPMT(…, per, per, …)` for either timing.
+fn payment_and_interest(
+    rate: f64,
+    per: f64,
+    nper: f64,
+    pv: f64,
+    fv: f64,
+    pmt_type: i32,
+) -> (f64, f64) {
+    let due = pmt_type != 0;
+    let type_adj = if due { 1.0 + rate } else { 1.0 };
+    let pmt = if rate.abs() < 1e-10 {
+        -(pv + fv) / nper
+    } else {
+        let factor = (1.0 + rate).powf(nper);
+        -(rate * (pv * factor + fv)) / ((factor - 1.0) * type_adj)
+    };
+    if due && per == 1.0 {
+        return (pmt, 0.0);
+    }
+
+    // Future value of the loan after the payments that precede the balance interest accrues on
+    // (negative of the outstanding balance).
+    let periods = if due { per - 2.0 } else { per - 1.0 };
+    let fv_before = if rate.abs() < 1e-10 {
+        -pv - pmt * periods
+    } else {
+        let factor = (1.0 + rate).powf(periods);
+        -pv * factor - pmt * type_adj * (factor - 1.0) / rate
+    };
+    let ipmt = if due {
+        (fv_before - pmt) * rate
+    } else {
+        fv_before * rate
+    };
+    (pmt, ipmt)
+}
+
 /// Returns the interest-only component of a payment for a specific period.
 ///
 /// Use this with `PMT` or `PPMT` to break a fixed payment into interest and principal pieces.
@@ -776,32 +825,7 @@ impl Function for IpmtFn {
             ));
         }
 
-        // Calculate PMT first
-        let pmt = if rate.abs() < 1e-10 {
-            -(pv + fv) / nper
-        } else {
-            let factor = (1.0 + rate).powf(nper);
-            let type_adj = if pmt_type != 0 { 1.0 + rate } else { 1.0 };
-            -(rate * (pv * factor + fv)) / ((factor - 1.0) * type_adj)
-        };
-
-        // Calculate FV at start of period
-        let fv_at_start = if rate.abs() < 1e-10 {
-            -pv - pmt * (per - 1.0)
-        } else {
-            let factor = (1.0 + rate).powf(per - 1.0);
-            let type_adj = if pmt_type != 0 { 1.0 + rate } else { 1.0 };
-            -pv * factor - pmt * type_adj * (factor - 1.0) / rate
-        };
-
-        // Interest is rate * balance at start of period
-        // fv_at_start is negative of balance, so ipmt = fv_at_start * rate
-        let ipmt = if pmt_type != 0 && per == 1.0 {
-            0.0 // No interest in first period for annuity due
-        } else {
-            fv_at_start * rate
-        };
-
+        let (_, ipmt) = payment_and_interest(rate, per, nper, pv, fv, pmt_type);
         Ok(CalcValue::Scalar(LiteralValue::Number(ipmt)))
     }
 }
@@ -898,34 +922,8 @@ impl Function for PpmtFn {
             ));
         }
 
-        // Calculate PMT
-        let pmt = if rate.abs() < 1e-10 {
-            -(pv + fv) / nper
-        } else {
-            let factor = (1.0 + rate).powf(nper);
-            let type_adj = if pmt_type != 0 { 1.0 + rate } else { 1.0 };
-            -(rate * (pv * factor + fv)) / ((factor - 1.0) * type_adj)
-        };
-
-        // Calculate IPMT
-        let fv_at_start = if rate.abs() < 1e-10 {
-            -pv - pmt * (per - 1.0)
-        } else {
-            let factor = (1.0 + rate).powf(per - 1.0);
-            let type_adj = if pmt_type != 0 { 1.0 + rate } else { 1.0 };
-            -pv * factor - pmt * type_adj * (factor - 1.0) / rate
-        };
-
-        let ipmt = if pmt_type != 0 && per == 1.0 {
-            0.0
-        } else {
-            fv_at_start * rate
-        };
-
-        // PPMT = PMT - IPMT
-        let ppmt = pmt - ipmt;
-
-        Ok(CalcValue::Scalar(LiteralValue::Number(ppmt)))
+        let (pmt, ipmt) = payment_and_interest(rate, per, nper, pv, fv, pmt_type);
+        Ok(CalcValue::Scalar(LiteralValue::Number(pmt - ipmt)))
     }
 }
 
