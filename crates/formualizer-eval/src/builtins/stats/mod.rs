@@ -2317,7 +2317,18 @@ fn eval_maxminifs<'a, 'b>(
     let mut criteria_ranges = Vec::new();
     let mut predicates = Vec::new();
     for i in (1..args.len()).step_by(2) {
-        let crit_view = args[i].range_view().ok();
+        let crit_view = match args[i].range_view() {
+            Ok(v) => Some(v),
+            // A criteria range that is not a reference (`=MAXIFS(A1:A2,FOO,1)` with FOO
+            // undefined) produced an error value; Excel propagates it instead of matching
+            // nothing and answering 0.
+            Err(_) => match args[i].value()?.into_literal() {
+                LiteralValue::Error(e) => {
+                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+                }
+                _ => None,
+            },
+        };
         let pred = crate::args::parse_criteria(&args[i + 1].value()?.into_literal())?;
         criteria_ranges.push(crit_view);
         predicates.push(pred);
