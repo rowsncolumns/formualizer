@@ -82,6 +82,13 @@ fn multi_area_reference_error() -> ExcelError {
         .with_message("A multi-area reference cannot be used as a single reference")
 }
 
+/// Excel only accepts a multi-area reference as a FUNCTION ARGUMENT: `=(A1,B1)` in a cell,
+/// `(A1:A2,B1:B2)*2`, `-(A1,B1)` are all `#VALUE!`.
+fn multi_area_value_error() -> ExcelError {
+    ExcelError::new(ExcelErrorKind::Value)
+        .with_message("A multi-area reference can only be used as a function argument")
+}
+
 pub struct Interpreter<'a> {
     pub context: &'a dyn EvaluationContext,
     current_sheet: &'a str,
@@ -456,13 +463,18 @@ impl<'a> Interpreter<'a> {
     ) -> Result<ReferenceType, ExcelError> {
         match reference {
             ReferenceType::Cell { .. } | ReferenceType::Range { .. } => Ok(reference.clone()),
-            ReferenceType::NamedRange(name) => self
-                .context
-                .named_range_reference_definition(name)
-                .ok_or_else(|| {
-                    ExcelError::new(ExcelErrorKind::Value)
-                        .with_message(format!("{name} is not a range-valued name"))
-                }),
+            ReferenceType::NamedRange(name) => {
+                if let Some(concrete) = self.context.named_range_reference_definition(name) {
+                    return Ok(concrete);
+                }
+                // No concrete range behind the name: an UNDEFINED name (or an unknown sheet
+                // qualifier) reports its own error (`#NAME?` / `#REF!`); a name that exists but
+                // is a constant or a formula is not a reference — `#VALUE!`.
+                self.context
+                    .resolve_range_view(reference, self.current_sheet)?;
+                Err(ExcelError::new(ExcelErrorKind::Value)
+                    .with_message(format!("{name} is not a range-valued name")))
+            }
             ReferenceType::Table(tref) => {
                 let geom = self.context.table_geometry(&tref.name).ok_or_else(|| {
                     ExcelError::new(ExcelErrorKind::Value)
@@ -586,6 +598,48 @@ impl<'a> Interpreter<'a> {
             .map(|v| vec![v])
             .collect();
         Ok(LiteralValue::Array(column))
+    }
+
+    /// Evaluate a function ARGUMENT: the one position where a union `(A1:A2,B1:B2,C1)` is legal.
+    /// Every area of a (possibly nested) union is stacked for the consuming aggregate; any other
+    /// node evaluates normally. Outside an argument slot the union operator is `#VALUE!`.
+    pub(crate) fn evaluate_union_argument(
+        &self,
+        node: &ASTNode,
+    ) -> Result<crate::traits::CalcValue<'a>, ExcelError> {
+        match &node.node_type {
+            ASTNodeType::BinaryOp { op, left, right } if op == "," => {
+                let left = self.evaluate_union_argument(left)?;
+                let right = self.evaluate_union_argument(right)?;
+                self.union_calc_values(left, right)
+                    .map(crate::traits::CalcValue::Scalar)
+            }
+            _ => self.evaluate_ast(node),
+        }
+    }
+
+    /// Arena twin of [`Self::evaluate_union_argument`].
+    pub(crate) fn evaluate_union_argument_arena(
+        &self,
+        node_id: AstNodeId,
+        data_store: &DataStore,
+        sheet_registry: &SheetRegistry,
+    ) -> Result<crate::traits::CalcValue<'a>, ExcelError> {
+        if let Some(AstNodeData::BinaryOp {
+            op_id,
+            left_id,
+            right_id,
+        }) = data_store.get_node(node_id)
+            && data_store.resolve_ast_string(*op_id) == ","
+        {
+            let left = self.evaluate_union_argument_arena(*left_id, data_store, sheet_registry)?;
+            let right =
+                self.evaluate_union_argument_arena(*right_id, data_store, sheet_registry)?;
+            return self
+                .union_calc_values(left, right)
+                .map(crate::traits::CalcValue::Scalar);
+        }
+        self.evaluate_arena_ast(node_id, data_store, sheet_registry)
     }
 
     /* ===================  public  =================== */
@@ -780,11 +834,11 @@ impl<'a> Interpreter<'a> {
                     };
                 }
                 if op == "," {
-                    let left = self.evaluate_arena_ast(*left_id, data_store, sheet_registry)?;
-                    let right = self.evaluate_arena_ast(*right_id, data_store, sheet_registry)?;
-                    return self
-                        .union_calc_values(left, right)
-                        .map(crate::traits::CalcValue::Scalar);
+                    // Only `ArgumentHandle` (a function argument slot) stacks a union; anywhere
+                    // else the multi-area reference is being used as a value.
+                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                        multi_area_value_error(),
+                    )));
                 }
 
                 let left = self
@@ -1421,9 +1475,8 @@ impl<'a> Interpreter<'a> {
             };
         }
         if op == "," {
-            let l = self.evaluate_ast(left)?;
-            let r = self.evaluate_ast(right)?;
-            return self.union_calc_values(l, r);
+            // See `evaluate_union_argument`: a union is only legal as a function argument.
+            return Ok(LiteralValue::Error(multi_area_value_error()));
         }
 
         let l_val = self.evaluate_ast(left)?.into_literal();

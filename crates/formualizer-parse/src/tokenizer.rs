@@ -617,34 +617,6 @@ fn operand_subtype(value_str: &str) -> TokenSubType {
     }
 }
 
-fn is_cell_reference_like(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    let mut i = 0;
-
-    if i < bytes.len() && bytes[i] == b'$' {
-        i += 1;
-    }
-
-    let col_start = i;
-    while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
-        i += 1;
-    }
-    if i == col_start {
-        return false;
-    }
-
-    if i < bytes.len() && bytes[i] == b'$' {
-        i += 1;
-    }
-
-    let row_start = i;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-
-    i == bytes.len() && i > row_start
-}
-
 fn reference_value_contains_range_colon(value: &str) -> bool {
     let value_part = value
         .rsplit_once('!')
@@ -652,12 +624,13 @@ fn reference_value_contains_range_colon(value: &str) -> bool {
     value_part.contains(':')
 }
 
+/// A `Range`-subtype operand is anything that can denote a reference: a cell or range (`A1`,
+/// `$A$1:C3`, `B:B`), a sheet-qualified reference, a structured reference, or a defined NAME
+/// (`Rng`, `My_Data`). Names must count — Excel intersects `Rng B:B` just like `B:B Rng` — so the
+/// only operands excluded are literals (text, numbers, logicals, errors), which `operand_subtype`
+/// already classifies away from `Range`.
 fn is_reference_operand_value(value: &str) -> bool {
     operand_subtype(value) == TokenSubType::Range
-        && (reference_value_contains_range_colon(value)
-            || value.contains('!')
-            || value.contains('[')
-            || is_cell_reference_like(value))
 }
 
 fn next_starts_reference_expression(formula: &str, mut offset: usize) -> bool {

@@ -2032,6 +2032,41 @@ mod tests {
         }
 
         #[test]
+        fn space_after_a_defined_name_is_intersection_op() {
+            // A NAME is reference-producing too: `Rng B:B`, `My_Data A1:B2`, `Rng Rng`,
+            // `Rng 2:2` all intersect, exactly like the mirrored `B:B Rng`.
+            for (formula, left, right) in [
+                ("=Rng B:B", "Rng", "B:B"),
+                ("=My_Data A1:B2", "My_Data", "A1:B2"),
+                ("=Rng Rng", "Rng", "Rng"),
+                ("=Rng 2:2", "Rng", "2:2"),
+                ("=Rng $A$1", "Rng", "$A$1"),
+            ] {
+                let expected = vec![
+                    (TokenType::Operand, TokenSubType::Range, left.to_string()),
+                    (TokenType::OpInfix, TokenSubType::None, " ".to_string()),
+                    (TokenType::Operand, TokenSubType::Range, right.to_string()),
+                ];
+                assert_eq!(classic_non_ws(formula), expected, "{formula}");
+                assert_eq!(span_non_ws(formula), expected, "{formula}");
+            }
+        }
+
+        #[test]
+        fn space_after_a_name_before_a_non_reference_stays_whitespace() {
+            // `Rng + 1`, `Rng 2`: nothing reference-shaped follows, so no intersection.
+            for formula in ["=Rng + 1", "=Rng 2", "=Rng ", "=Rng & \"x\""] {
+                for toks in [classic_all(formula), span_all(formula)] {
+                    assert!(
+                        toks.iter()
+                            .all(|t| !(t.0 == TokenType::OpInfix && t.2 == " ")),
+                        "unexpected space-intersection in {formula}: {toks:?}"
+                    );
+                }
+            }
+        }
+
+        #[test]
         fn space_not_between_refs_is_whitespace() {
             // = 1 + 2 → all whitespace stays Whitespace.
             let classic = classic_all("= 1 + 2 ");

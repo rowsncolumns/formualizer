@@ -348,6 +348,10 @@ impl<'a, R: EvaluationContext> NamedRangeResolver for RecordingContext<'a, R> {
     ) -> Option<formualizer_parse::parser::ReferenceType> {
         self.engine.named_range_reference_definition(name)
     }
+
+    fn named_range_is_constant(&self, name: &str) -> bool {
+        self.engine.named_range_is_constant(name)
+    }
 }
 
 impl<'a, R: EvaluationContext> TableResolver for RecordingContext<'a, R> {

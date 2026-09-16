@@ -1023,6 +1023,14 @@ impl Function for IndirectFn {
         ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         match self.eval_reference(args, ctx) {
+            // A named CONSTANT is not a reference: `INDIRECT("MyRate")` is `#REF!` in Excel even
+            // though `=MyRate` evaluates.
+            Some(Ok(ReferenceType::NamedRange(name))) if ctx.named_range_is_constant(&name) => {
+                Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                    ExcelError::new(ExcelErrorKind::Ref)
+                        .with_message(format!("{name} is a named constant, not a reference")),
+                )))
+            }
             Some(Ok(r)) => {
                 let current_sheet = ctx.current_sheet();
                 match ctx.resolve_range_view(&r, current_sheet) {

@@ -1687,8 +1687,22 @@ mod tests {
         }
 
         #[test]
-        fn space_between_function_name_and_paren_is_error() {
-            assert_both_err("=SUM A1");
+        fn space_between_bare_identifier_and_reference_is_a_name_intersection() {
+            // `=SUM A1` is not a call: Excel reads `SUM` as a defined NAME and the space as the
+            // intersection operator (the name resolves — or fails with #NAME? — at evaluation).
+            for ast in parse_both("=SUM A1") {
+                match &ast.node_type {
+                    ASTNodeType::BinaryOp { op, left, right } => {
+                        assert_eq!(op, " ");
+                        assert!(matches!(
+                            &left.node_type,
+                            ASTNodeType::Reference { reference: ReferenceType::NamedRange(n), .. } if n == "SUM"
+                        ));
+                        assert!(matches!(&right.node_type, ASTNodeType::Reference { .. }));
+                    }
+                    other => panic!("expected an intersection, got {other:?}"),
+                }
+            }
         }
 
         #[test]
