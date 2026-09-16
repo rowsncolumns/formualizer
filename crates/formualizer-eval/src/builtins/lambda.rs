@@ -36,13 +36,6 @@ fn err_value(msg: impl Into<String>) -> CalcValue<'static> {
     CalcValue::Scalar(LiteralValue::Error(value_error(msg)))
 }
 
-#[derive(Clone, Debug)]
-struct LambdaParam {
-    name: String,
-    /// Declared as `[name]`: the caller may leave it out (`ISOMITTED`).
-    optional: bool,
-}
-
 fn local_name_from_ast(node: &ASTNode) -> Result<String, ExcelError> {
     match &node.node_type {
         ASTNodeType::Reference {
@@ -53,25 +46,21 @@ fn local_name_from_ast(node: &ASTNode) -> Result<String, ExcelError> {
     }
 }
 
-/// `LAMBDA` parameter: a bare name (`x`) is required, a bracketed name (`[y]`)
-/// is optional. The tokenizer classifies `[y]` as a bracketed structured
-/// reference with the column name and no table, which is the shape matched here.
-fn lambda_param_from_ast(node: &ASTNode) -> Result<LambdaParam, ExcelError> {
+/// `LAMBDA` parameter: a bare name (`x`) or Excel's optional spelling (`[y]`).
+/// The tokenizer classifies `[y]` as a bracketed structured reference with the
+/// column name and no table, which is the shape matched here. The brackets are
+/// documentation only: at call time Excel lets the caller leave out any trailing
+/// parameter, bracketed or not, and `ISOMITTED` reports it either way.
+fn lambda_param_from_ast(node: &ASTNode) -> Result<String, ExcelError> {
     match &node.node_type {
         ASTNodeType::Reference {
             reference: ReferenceType::NamedRange(name),
             ..
-        } => Ok(LambdaParam {
-            name: name.clone(),
-            optional: false,
-        }),
+        } => Ok(name.clone()),
         ASTNodeType::Reference {
             reference: ReferenceType::Table(table),
             ..
-        } if !table.name.is_empty() => Ok(LambdaParam {
-            name: table.name.clone(),
-            optional: true,
-        }),
+        } if !table.name.is_empty() => Ok(table.name.clone()),
         _ => Err(value_error("Expected a LAMBDA parameter name")),
     }
 }
@@ -226,15 +215,9 @@ impl Function for LetFn {
 
 #[derive(Clone)]
 struct LambdaClosure {
-    params: Vec<LambdaParam>,
+    params: Vec<String>,
     body: ASTNode,
     captured_env: LocalEnv,
-}
-
-impl LambdaClosure {
-    fn required(&self) -> usize {
-        self.params.iter().filter(|p| !p.optional).count()
-    }
 }
 
 struct DepthGuard;
@@ -268,15 +251,13 @@ impl CustomCallable for LambdaClosure {
         interp: &crate::interpreter::Interpreter<'ctx>,
         args: &[LiteralValue],
     ) -> Result<CalcValue<'ctx>, ExcelError> {
-        let required = self.required();
-        if args.len() < required || args.len() > self.params.len() {
-            let expected = if required == self.params.len() {
-                format!("{required}")
-            } else {
-                format!("{required} to {}", self.params.len())
-            };
+        // Excel rejects surplus arguments but accepts a call with fewer
+        // arguments than parameters: the missing ones are bound as omitted,
+        // so `ISOMITTED(p)` is TRUE and reading `p` as a value is `#VALUE!`.
+        if args.len() > self.params.len() {
             return Ok(err_value(format!(
-                "LAMBDA expected {expected} argument(s), got {}",
+                "LAMBDA expected at most {} argument(s), got {}",
+                self.params.len(),
                 args.len()
             )));
         }
@@ -295,7 +276,7 @@ impl CustomCallable for LambdaClosure {
                 Some(value) => LocalBinding::Value(value.clone()),
                 None => LocalBinding::Omitted,
             };
-            env = env.with_binding(&param.name, binding);
+            env = env.with_binding(param, binding);
         }
 
         let scoped = interp.with_local_env(env);
@@ -312,9 +293,10 @@ pub struct LambdaFn;
 ///
 /// # Remarks
 /// - All arguments except the last are parameter names; the last argument is the body expression.
-/// - A parameter written in brackets (`[name]`) is optional; `ISOMITTED(name)` tells whether the caller supplied it.
+/// - A parameter may be written in brackets (`[name]`) to document it as optional; `ISOMITTED(name)` tells whether the caller supplied it.
 /// - Parameter names must be unique (case-insensitive), or `#VALUE!` is returned.
-/// - Invocation must supply every required parameter and no more than the declared count.
+/// - Invocation may supply fewer arguments than parameters (the rest are omitted) but never more than the declared count.
+/// - Reading an omitted parameter as a value yields `#VALUE!`; `ISOMITTED` is the only function that accepts one.
 /// - Returning an uninvoked lambda as a final cell value yields a `#CALC!` in evaluation.
 ///
 /// # Examples
@@ -355,7 +337,7 @@ pub struct LambdaFn;
 ///   - q: "Does a LAMBDA read outer LET variables at call time or definition time?"
 ///     a: "Definition time. The closure captures its lexical environment when created."
 ///   - q: "Can I call a LAMBDA with fewer or extra arguments?"
-///     a: "Required parameters must all be supplied and extra arguments are rejected with #VALUE!; parameters declared as [name] may be omitted."
+///     a: "Fewer is allowed: the trailing parameters are omitted, ISOMITTED(param) is TRUE and using one as a value is #VALUE!. Extra arguments are rejected with #VALUE!."
 /// ```
 ///
 /// [formualizer-docgen:schema:start]
@@ -426,7 +408,7 @@ impl Function for LambdaFn {
                 Ok(param) => param,
                 Err(e) => return Ok(CalcValue::Scalar(LiteralValue::Error(e))),
             };
-            let key = param.name.to_ascii_uppercase();
+            let key = param.to_ascii_uppercase();
             if !seen.insert(key) {
                 return Ok(err_value("LAMBDA parameter names must be unique"));
             }
@@ -446,12 +428,13 @@ impl Function for LambdaFn {
 #[derive(Debug)]
 pub struct IsOmittedFn;
 
-/// Reports whether an optional `LAMBDA` parameter was left out by the caller.
+/// Reports whether a `LAMBDA` parameter was left out by the caller.
 ///
-/// `ISOMITTED` inspects the binding of a `LAMBDA` parameter declared as `[name]`.
+/// `ISOMITTED` inspects the binding of a `LAMBDA` parameter, whether it was
+/// declared as `[name]` or as a bare `name`.
 ///
 /// # Remarks
-/// - Returns `TRUE` when the parameter was declared optional and the call did not supply it.
+/// - Returns `TRUE` when the call did not supply the parameter (any trailing parameter may be left out).
 /// - Returns `FALSE` for a supplied parameter, and for any argument that is not a parameter name.
 /// - A name that is not bound by an enclosing `LAMBDA` or `LET` returns `#NAME?`.
 ///
@@ -1307,7 +1290,13 @@ mod tests {
             eval("=LET(inc,LAMBDA(n,n+1),inc(1,2))"),
             ExcelErrorKind::Value,
         );
+        // Fewer arguments is a legal call; the error comes from reading the
+        // omitted `n` as a value, not from the call itself.
         assert_error(eval("=LET(inc,LAMBDA(n,n+1),inc())"), ExcelErrorKind::Value);
+        assert_eq!(
+            eval("=LET(inc,LAMBDA(n,ISOMITTED(n)),inc())"),
+            LiteralValue::Boolean(true)
+        );
     }
 
     #[test]
@@ -1442,9 +1431,75 @@ mod tests {
     }
 
     #[test]
-    fn required_parameters_still_enforced_with_optionals() {
-        assert_error(eval("=LAMBDA(x,[y],x)()"), ExcelErrorKind::Value);
+    fn surplus_arguments_are_rejected_omitted_ones_are_bound() {
         assert_error(eval("=LAMBDA(x,[y],x)(1,2,3)"), ExcelErrorKind::Value);
+        // `x` is omitted and read as a value → #VALUE! (the call itself is fine).
+        assert_error(eval("=LAMBDA(x,[y],x)()"), ExcelErrorKind::Value);
+        assert_eq!(
+            eval("=LAMBDA(x,[y],ISOMITTED(x))()"),
+            LiteralValue::Boolean(true)
+        );
+    }
+
+    /* ── fewer arguments than parameters (rowsncolumns/spreadsheet#546 W5-C) ── */
+
+    #[test]
+    fn unbracketed_parameters_can_be_omitted_too() {
+        assert_eq!(
+            eval("=LAMBDA(x,ISOMITTED(x))()"),
+            LiteralValue::Boolean(true)
+        );
+        assert_eq!(
+            eval("=LAMBDA(x,y,ISOMITTED(y))(1)"),
+            LiteralValue::Boolean(true)
+        );
+        assert_eq!(
+            eval("=LAMBDA(x,y,ISOMITTED(x))(1)"),
+            LiteralValue::Boolean(false)
+        );
+        // An omitted parameter that the body never reads is harmless.
+        assert_eq!(eval("=LAMBDA(x,y,x*2)(4)"), LiteralValue::Number(8.0));
+        assert_eq!(
+            eval("=LAMBDA(x,y,IF(ISOMITTED(y),x,x+y))(1)"),
+            LiteralValue::Number(1.0)
+        );
+        assert_eq!(
+            eval("=LAMBDA(x,y,IF(ISOMITTED(y),x,x+y))(1,2)"),
+            LiteralValue::Number(3.0)
+        );
+        // LET-bound and named-call paths share the closure invocation.
+        assert_eq!(
+            eval("=LET(f,LAMBDA(x,y,ISOMITTED(y)),f(1))"),
+            LiteralValue::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn omitted_parameter_used_as_a_value_is_value_error() {
+        assert_error(eval("=LAMBDA(x,y,x+y)(1)"), ExcelErrorKind::Value);
+        assert_error(eval("=LAMBDA(x,x+1)()"), ExcelErrorKind::Value);
+        assert_error(eval("=LET(f,LAMBDA(x,y,x+y),f(1))"), ExcelErrorKind::Value);
+    }
+
+    #[test]
+    fn hofs_call_lambdas_that_declare_more_parameters_than_supplied() {
+        assert_eq!(
+            eval("=SUM(MAP({1,2,3},LAMBDA(v,k,IF(ISOMITTED(k),v,v+k))))"),
+            LiteralValue::Number(6.0)
+        );
+        assert_eq!(
+            eval("=REDUCE(0,{1,2,3},LAMBDA(a,v,w,a+v))"),
+            LiteralValue::Number(6.0)
+        );
+        assert_eq!(
+            eval("=SUM(BYROW({1,2;3,4},LAMBDA(r,extra,SUM(r))))"),
+            LiteralValue::Number(10.0)
+        );
+        // …but the body still fails if it actually uses the missing value.
+        assert_error(
+            eval("=SUM(MAP({1,2,3},LAMBDA(v,k,v+k)))"),
+            ExcelErrorKind::Value,
+        );
     }
 
     /* ── LET / LAMBDA locals bound to arrays (C-R06) ── */
