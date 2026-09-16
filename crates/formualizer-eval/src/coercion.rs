@@ -219,6 +219,25 @@ pub fn to_logical(value: &LiteralValue) -> Result<bool, ExcelError> {
     }
 }
 
+/// Excel carries 15 significant decimal digits: `ROUND`, comparisons and
+/// number→text all act on that decimal view of the double rather than on its
+/// full binary expansion (`0.1+0.2` compares equal to `0.3`, `1.005` rounds to
+/// `1.01`). Returns the nearest double to the 15-digit decimal.
+pub fn to_excel_precision(n: f64) -> f64 {
+    if n == 0.0 || !n.is_finite() {
+        return n;
+    }
+    format!("{n:.14e}").parse().unwrap_or(n)
+}
+
+/// A number as Excel's General format spells it in text (`&`, `LEN`, `TEXT`
+/// coercions): at most 15 significant digits, no trailing zeros, scientific
+/// notation once the exponent leaves `-5 < exp < 15` (`1E+15`, `1.23E-05`).
+pub fn number_to_text(n: f64) -> String {
+    // Single source of truth for Excel's 15-significant-digit General text form.
+    formualizer_common::number_to_excel_text(n)
+}
+
 /// Invariant textification for comparisons/concatenation.
 pub fn to_text_invariant(value: &LiteralValue) -> String {
     match value {
@@ -261,6 +280,36 @@ pub fn to_datetime_serial(value: &LiteralValue) -> Result<f64, ExcelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excel_precision_is_fifteen_significant_digits() {
+        assert_eq!(to_excel_precision(0.1 + 0.2), 0.3);
+        assert_eq!(to_excel_precision(1.005 * 100.0), 100.5);
+        assert_eq!(to_excel_precision(0.0), 0.0);
+        assert_eq!(to_excel_precision(-2.5), -2.5);
+        assert_eq!(
+            to_excel_precision(123456789012345680.0),
+            123456789012346000.0
+        );
+    }
+
+    #[test]
+    fn number_to_text_matches_excel_general() {
+        assert_eq!(number_to_text(1.0 / 3.0), "0.333333333333333");
+        assert_eq!(number_to_text(0.1 + 0.2), "0.3");
+        assert_eq!(number_to_text(1.0), "1");
+        assert_eq!(number_to_text(-1.5), "-1.5");
+        assert_eq!(number_to_text(0.0), "0");
+        assert_eq!(number_to_text(1234.5), "1234.5");
+        assert_eq!(number_to_text(100000000000000.0), "100000000000000");
+        assert_eq!(number_to_text(1e15), "1E+15");
+        assert_eq!(number_to_text(123456789012345678.0), "1.23456789012346E+17");
+        assert_eq!(number_to_text(0.0001), "0.0001");
+        assert_eq!(number_to_text(0.00001), "1E-05");
+        assert_eq!(number_to_text(0.0000123), "1.23E-05");
+        assert_eq!(number_to_text(-0.000000000123), "-1.23E-10");
+        assert_eq!(number_to_text(999999999999999.9), "1E+15");
+    }
 
     #[test]
     fn number_lenient_parses_text_and_booleans() {

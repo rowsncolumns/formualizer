@@ -1429,9 +1429,16 @@ impl<'a> Interpreter<'a> {
                 (Ok(a), Ok(b)) => (a, b),
                 (Err(e), _) | (_, Err(e)) => return Ok(LiteralValue::Error(e)),
             };
-            // Excel domain: negative base with non-integer exponent -> #NUM!
+            // Excel domain: negative base with non-integer exponent -> #NUM!,
+            // 0^0 -> #NUM!, 0 to a negative power -> #DIV/0!
             if a < 0.0 && b.fract() != 0.0 {
                 return Ok(LiteralValue::Error(ExcelError::new_num()));
+            }
+            if a == 0.0 && b == 0.0 {
+                return Ok(LiteralValue::Error(ExcelError::new_num()));
+            }
+            if a == 0.0 && b < 0.0 {
+                return Ok(LiteralValue::Error(ExcelError::new_div()));
             }
             match crate::coercion::sanitize_numeric(a.powf(b)) {
                 Ok(n) => Ok(LiteralValue::Number(n)),
@@ -1623,8 +1630,14 @@ impl<'a> Interpreter<'a> {
                 };
                 let res = match (Self::compare_rank(&l), Self::compare_rank(&r)) {
                     (Some(1), Some(1)) => {
-                        let a = crate::coercion::to_number_strict(&l)?;
-                        let b = crate::coercion::to_number_strict(&r)?;
+                        // Excel compares numbers at 15 significant digits, so
+                        // `=0.1+0.2=0.3` is TRUE.
+                        let a = crate::coercion::to_excel_precision(
+                            crate::coercion::to_number_strict(&l)?,
+                        );
+                        let b = crate::coercion::to_excel_precision(
+                            crate::coercion::to_number_strict(&r)?,
+                        );
                         self.cmp_f64(a, b, op)
                     }
                     (Some(2), Some(2)) => match (&l, &r) {
