@@ -1,6 +1,6 @@
 //! DATE and TIME functions
 
-use super::serial::{create_date_normalized, time_to_fraction};
+use super::serial::{date_parts_to_serial_for, time_to_fraction};
 use crate::args::ArgSchema;
 use crate::function::Function;
 use crate::traits::{ArgumentHandle, FunctionContext};
@@ -31,7 +31,9 @@ fn coerce_to_int(arg: &ArgumentHandle) -> Result<i32, ExcelError> {
 /// # Remarks
 /// - Years in the range `0..=1899` are interpreted as `1900..=3799` for Excel compatibility.
 /// - The returned serial is date-system aware and depends on the active workbook system (`1900` vs `1904`).
-/// - In the `1900` system, serial mapping preserves Excel's historical phantom `1900-02-29` behavior.
+/// - In the `1900` system, serial mapping preserves Excel's historical phantom `1900-02-29` behavior:
+///   `DATE(1900,2,29)` is 60 and `DATE(1900,3,1)` is 61.
+/// - Results before serial 0 or after 9999-12-31 return `#NUM!`.
 ///
 /// # Examples
 /// ```yaml,sandbox
@@ -108,8 +110,7 @@ impl Function for DateFn {
             year
         };
 
-        let date = create_date_normalized(adjusted_year, month, day)?;
-        let serial = super::serial::date_to_serial_for(ctx.date_system(), &date);
+        let serial = date_parts_to_serial_for(ctx.date_system(), adjusted_year, month, day)?;
 
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
             serial,
