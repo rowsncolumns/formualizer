@@ -220,6 +220,13 @@ pub fn validate_and_prepare<'a, 'b>(
             }
         };
 
+        // A skipped slot (`INDEX(rng,,2)`) is an omitted argument: leave it to the function's
+        // per-slot default instead of coercing the parser's empty-text marker to `#VALUE!`.
+        if arg.is_skipped() {
+            items.push(PreparedArg::Value(Cow::Owned(LiteralValue::Empty)));
+            continue;
+        }
+
         // By-ref argument: prefer a reference (AST literal or function-returned). Range/array
         // shaped by-ref slots (`FILTER`'s include, `SORT`/`UNIQUE`'s array, …) also accept a
         // computed array such as `B1:B4>0` or a nested `FILTER(...)` — those fall through to the

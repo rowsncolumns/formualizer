@@ -450,7 +450,8 @@ impl Function for XLookupFn {
             ));
         }
 
-        if args.len() >= 4 {
+        // `XLOOKUP(v,rng,ret,,-1)` skips if_not_found: no match is `#N/A`, not the empty marker.
+        if args.len() >= 4 && !args[3].is_skipped() {
             return args[3].value();
         }
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
@@ -3242,8 +3243,13 @@ impl Function for TakeFn {
                 _ => 0,
             })
         };
-        let take_rows = num(&args[1])?;
-        let take_cols = if args.len() >= 3 {
+        // `TAKE(rng,,2)`: a skipped rows slot keeps every row; a skipped cols slot keeps every column.
+        let take_rows = if args[1].is_skipped() {
+            height
+        } else {
+            num(&args[1])?
+        };
+        let take_cols = if args.len() >= 3 && !args[2].is_skipped() {
             Some(num(&args[2])?)
         } else {
             None
@@ -3426,8 +3432,13 @@ impl Function for DropFn {
                 _ => 0,
             })
         };
-        let drop_rows = num(&args[1])?;
-        let drop_cols = if args.len() >= 3 {
+        // `DROP(rng,,-2)`: a skipped rows slot drops nothing.
+        let drop_rows = if args[1].is_skipped() {
+            0
+        } else {
+            num(&args[1])?
+        };
+        let drop_cols = if args.len() >= 3 && !args[2].is_skipped() {
             Some(num(&args[2])?)
         } else {
             None
