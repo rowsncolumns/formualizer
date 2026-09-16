@@ -560,6 +560,10 @@ impl<'a> IngestPipeline<'a> {
                 }
                 if self.names.resolve(name, current_sheet_id).is_some() {
                     plan.resolved_named_refs.push(name.to_string());
+                } else if self.tables.resolve(name).is_some() {
+                    // A bare table name (`=ROWS(Table1)`) is the table's data body: it depends
+                    // on the table exactly like a structured reference.
+                    plan.table_refs.push(name.to_string());
                 } else if self.sources.resolve_scalar(name).is_some() {
                     plan.source_refs.push(name.to_string());
                 } else {

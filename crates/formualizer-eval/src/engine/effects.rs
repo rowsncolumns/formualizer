@@ -30,6 +30,10 @@ pub enum Effect {
     },
     /// Clear a previous spill region (before resize or scalar downgrade).
     SpillClear { anchor_vertex: VertexId },
+    /// Clear ANOTHER anchor's committed spill that the planning array outranks (see
+    /// `Engine::spill_contenders`); the preempted anchor re-evaluates in the respill pass and,
+    /// finding its region taken, lands on `#SPILL!`.
+    SpillPreempt { anchor_vertex: VertexId },
 }
 
 /// A batch of effects from evaluating a single layer.

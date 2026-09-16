@@ -915,6 +915,13 @@ impl EvalConfig {
         self
     }
 
+    /// Cap the cells one dynamic array may spill (see [`SpillConfig::max_spill_cells`]).
+    #[inline]
+    pub fn with_max_spill_cells(mut self, max_spill_cells: u64) -> Self {
+        self.spill.max_spill_cells = max_spill_cells;
+        self
+    }
+
     #[inline]
     pub fn with_case_sensitive_names(mut self, enable: bool) -> Self {
         self.case_sensitive_names = enable;
@@ -1062,13 +1069,18 @@ impl CycleConfig {
     }
 
     /// Whether ingest may accept formulas whose dependencies include the
-    /// formula's own cell (`=B1+A1` in B1). Excel accepts these only with
-    /// iterative calculation enabled; everywhere else the edit-time
-    /// "Self-reference detected" rejection stands.
+    /// formula's own cell (`=B1+A1` in B1). Excel accepts these with
+    /// iterative calculation enabled (`Iterate`) AND with it disabled
+    /// (`Zero`: the cell installs, becomes a single-vertex SCC and displays
+    /// 0 with a circular-reference warning). Only `Error` keeps the
+    /// edit-time "Self-reference detected" rejection.
     #[inline]
     pub(crate) fn allows_self_dependency(&self) -> bool {
-        self.detection == CycleDetection::Runtime
-            && matches!(self.policy, CyclePolicy::Iterate { .. })
+        match self.policy {
+            CyclePolicy::Iterate { .. } => self.detection == CycleDetection::Runtime,
+            CyclePolicy::Zero => true,
+            CyclePolicy::Error => false,
+        }
     }
 }
 
@@ -1085,12 +1097,21 @@ pub enum CycleDetection {
     Runtime,
 }
 
-/// What happens to witnessed (live) cycles under `CycleDetection::Runtime`.
+/// What happens to cyclic SCCs: every static SCC under `CycleDetection::Static`,
+/// only witnessed (live) cycles under `CycleDetection::Runtime`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum CyclePolicy {
     /// Live cycles produce `#CIRC!`.
     #[default]
     Error,
+    /// Excel with iterative calculation OFF: cycle members are stamped `0` —
+    /// the value Excel displays for them and the value their dependents
+    /// compute with (`=A1+1` → 1, `ISERROR(A1)` → FALSE) — instead of an
+    /// error value that would propagate and leak into exports. The cycle is
+    /// reported out of band through [`super::Engine::last_cycle_cells`] so
+    /// hosts can raise Excel's circular-reference warning. Self-references
+    /// are accepted at ingest under this policy (Excel accepts them too).
+    Zero,
     /// Excel-style iterative calculation (RFC #113, spec §3.5/§6):
     /// live cycles keep running full passes over all SCC members in member
     /// order (Gauss–Seidel: each result is committed before the next member
@@ -1121,6 +1142,22 @@ impl CyclePolicy {
         CyclePolicy::Iterate {
             max_iterations: Self::EXCEL_DEFAULT_MAX_ITERATIONS,
             max_change: Self::EXCEL_DEFAULT_MAX_CHANGE,
+        }
+    }
+
+    /// The value stamped on a cycle member that receives the cycle verdict:
+    /// `0` under [`CyclePolicy::Zero`], `#CIRC!` otherwise (including the
+    /// conservative §7.9 array-anchor and defensive settle-cap stamps under
+    /// `Iterate`).
+    pub(crate) fn cycle_stamp_value(&self) -> formualizer_common::LiteralValue {
+        match self {
+            CyclePolicy::Zero => formualizer_common::LiteralValue::Number(0.0),
+            CyclePolicy::Error | CyclePolicy::Iterate { .. } => {
+                formualizer_common::LiteralValue::Error(
+                    ExcelError::new(ExcelErrorKind::Circ)
+                        .with_message("Circular dependency detected".to_string()),
+                )
+            }
         }
     }
 }
@@ -1163,11 +1200,15 @@ pub struct SpillConfig {
     /// Visibility policy for staged writes.
     pub visibility: SpillVisibility,
 
-    /// Hard cap on the number of cells a single spill may project.
-    ///
-    /// This prevents pathological vertex explosions from very large dynamic arrays.
-    pub max_spill_cells: u32,
+    /// Hard cap on the number of cells a single spill may project; a larger array resolves to
+    /// `#SPILL!` ("SpillTooLarge"). Defaults to a full Excel sheet (1,048,576 × 16,384), so only
+    /// the sheet's edges limit a spill — the Excel behaviour. Hosts that cannot afford the
+    /// vertices a sheet-sized spill creates lower it via [`EvalConfig::with_max_spill_cells`].
+    pub max_spill_cells: u64,
 }
+
+/// Cells in a full Excel sheet — the default [`SpillConfig::max_spill_cells`].
+pub const EXCEL_SHEET_CELLS: u64 = 1_048_576 * 16_384;
 
 impl Default for SpillConfig {
     fn default() -> Self {
@@ -1179,8 +1220,7 @@ impl Default for SpillConfig {
             memory_budget_bytes: None,
             cancellation: SpillCancellationPolicy::Cooperative,
             visibility: SpillVisibility::OnCommit,
-            // Conservative: enough for common UI patterns, small enough to avoid graph blowups.
-            max_spill_cells: 10_000,
+            max_spill_cells: EXCEL_SHEET_CELLS,
         }
     }
 }

@@ -28,7 +28,7 @@ fn to_text<'a, 'b>(a: &ArgumentHandle<'a, 'b>) -> Result<String, ExcelError> {
             }
         }
         LiteralValue::Int(i) => i.to_string(),
-        LiteralValue::Number(f) => f.to_string(),
+        LiteralValue::Number(f) => formualizer_common::number_to_excel_text(f),
         LiteralValue::Error(e) => return Err(e),
         other => other.to_string(),
     })
@@ -338,12 +338,12 @@ impl Function for TextFn {
                     return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(t)));
                 }
             },
+            // Booleans are not numbers to TEXT: Excel returns them as the text "TRUE"/"FALSE"
+            // whatever the format code (`TEXT(TRUE,"0")` → "TRUE").
             LiteralValue::Boolean(b) => {
-                if b {
-                    1.0
-                } else {
-                    0.0
-                }
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(
+                    if b { "TRUE" } else { "FALSE" }.to_string(),
+                )));
             }
             LiteralValue::Empty => 0.0,
             LiteralValue::Error(e) => {

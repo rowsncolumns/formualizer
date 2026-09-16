@@ -995,6 +995,11 @@ pub struct Engine<R> {
 
     // Runtime-cycle SCC evaluation telemetry (RFC #112, Stage 2)
     last_cycle_telemetry: CycleTelemetry,
+    /// Cells stamped with the cycle verdict (`#CIRC!` or, under
+    /// `CyclePolicy::Zero`, `0`) during the most recent evaluation request —
+    /// the host-facing "circular reference detected" signal. Reset per request
+    /// like `last_cycle_telemetry`.
+    last_cycle_cells: Vec<CellRef>,
 
     // C0 evaluation-resource observability. IDs are never reset or reused.
     next_evaluation_resource_request_id: u64,
@@ -2575,6 +2580,7 @@ where
             last_virtual_dep_telemetry: VirtualDepTelemetry::default(),
             virtual_dep_fallback_activations: 0,
             last_cycle_telemetry: CycleTelemetry::default(),
+            last_cycle_cells: Vec::new(),
             next_evaluation_resource_request_id: 1,
             evaluation_resource_request_depth: 0,
             active_evaluation_resource_request: None,
@@ -2711,6 +2717,7 @@ where
             last_virtual_dep_telemetry: VirtualDepTelemetry::default(),
             virtual_dep_fallback_activations: 0,
             last_cycle_telemetry: CycleTelemetry::default(),
+            last_cycle_cells: Vec::new(),
             next_evaluation_resource_request_id: 1,
             evaluation_resource_request_depth: 0,
             active_evaluation_resource_request: None,
@@ -2787,6 +2794,15 @@ where
     /// or when `enable_virtual_dep_telemetry` is off).
     pub fn last_cycle_telemetry(&self) -> &CycleTelemetry {
         &self.last_cycle_telemetry
+    }
+
+    /// Cells stamped with the cycle verdict during the most recent evaluation
+    /// request, in stamp order (a member may repeat when it was re-stamped
+    /// within the request). Populated under every detection mode and policy:
+    /// this is how a host learns WHICH cells form a circular reference when
+    /// [`CyclePolicy::Zero`] leaves no error value in the grid to find.
+    pub fn last_cycle_cells(&self) -> &[CellRef] {
+        &self.last_cycle_cells
     }
 
     /// Resource observations for the most recently completed public evaluation request.
@@ -3389,6 +3405,7 @@ where
     /// every evaluation request that walks schedule units.
     fn begin_evaluation_request(&mut self) {
         self.last_cycle_telemetry = CycleTelemetry::default();
+        self.last_cycle_cells.clear();
         // Defensive: consumed at the end of the previous request; a request
         // that errored out mid-walk must not leak its members into this one.
         self.pending_iterative_redirty.clear();
@@ -3712,10 +3729,11 @@ where
                 return Err(ExcelError::new(ExcelErrorKind::NImpl)
                     .with_message("Complex structured references not yet supported".to_string()));
             }
-            None => {
-                return Err(ExcelError::new(ExcelErrorKind::NImpl)
-                    .with_message("Table reference without specifier is unsupported".to_string()));
-            }
+            // A bare table name (`Table1`) is its data body, as in Excel.
+            None => table
+                .data_body()
+                .map(|r| r.materialise().into_owned())
+                .unwrap_or_default(),
         };
 
         Ok(RangeView::from_owned_rows(owned, self.config.date_system))
@@ -3841,8 +3859,33 @@ where
             });
     }
 
+    /// Declare the cells on `sheet_id` no dynamic array may spill into. A spreadsheet host
+    /// passes its merged ranges: Excel refuses to spill over a merged cell (`#SPILL!`), but the
+    /// engine's grid carries no merge information, so the host owns the list and replaces it
+    /// whenever the sheet's merges change (an empty list clears it). `regions` are 0-based,
+    /// inclusive `(row_start, row_end, col_start, col_end)` rectangles. Only spill PLANNING
+    /// consults them: an anchor whose committed spill now reaches a blocker — or whose blocker
+    /// went away — must be re-evaluated by the host (mark it dirty, or rebuild) to pick up the
+    /// change. The anchor's own cell is never a blocker: a 1×1 result is not a spill.
+    pub fn set_spill_blockers(&mut self, sheet_id: SheetId, regions: &[(u32, u32, u32, u32)]) {
+        let regions = regions
+            .iter()
+            .map(
+                |&(row_start, row_end, col_start, col_end)| crate::engine::spill::Region {
+                    sheet_id: sheet_id as u32,
+                    row_start,
+                    row_end,
+                    col_start,
+                    col_end,
+                },
+            )
+            .collect();
+        self.spill_mgr.set_blockers(sheet_id as u32, regions);
+    }
+
     pub fn remove_sheet(&mut self, sheet_id: SheetId) -> Result<(), ExcelError> {
         let name = self.graph.sheet_name(sheet_id).to_string();
+        self.spill_mgr.set_blockers(sheet_id as u32, Vec::new());
         // Removing a sheet only affects spans on that sheet and spans reading
         // from that sheet. Preserve spans on unrelated sheets so sheet
         // lifecycle operations do not collapse the whole FormulaPlane.
@@ -17024,7 +17067,7 @@ where
             let value = self
                 .evaluate_vertex_immutable(vertex_id)
                 .unwrap_or_else(LiteralValue::Error);
-            let effects = self.plan_vertex_effects(vertex_id, value.clone(), None)?;
+            let effects = self.plan_vertex_effects(vertex_id, value.clone())?;
             // Do not publish the selected result until the outer request's deadline succeeds.
             self.resource_checkpoint(0)?;
             let mut delta = delta;
@@ -17107,7 +17150,7 @@ where
 
                         // Hard cap to avoid vertex explosion from huge dynamic arrays.
                         let spill_cells = (h as u64).saturating_mul(w as u64);
-                        if spill_cells > self.config.spill.max_spill_cells as u64 {
+                        if spill_cells > self.config.spill.max_spill_cells {
                             self.clear_spill_projection_and_mirror(vertex_id, delta.as_deref_mut());
                             let spill_err = ExcelError::new(ExcelErrorKind::Spill)
                                 .with_message("SpillTooLarge")
@@ -17203,16 +17246,31 @@ where
                             }
                         }
 
-                        // Plan spill via spill manager shim
-                        match self.spill_mgr.reserve(
-                            vertex_id,
-                            anchor,
-                            SpillShape { rows: h, cols: w },
-                            SpillMeta {
-                                epoch: self.recalc_epoch,
-                                config: self.config.spill,
-                            },
-                        ) {
+                        // Settle contention with other committed spills by anchor order (see
+                        // `spill_contenders`), vacating the anchors this one outranks, then
+                        // plan the spill via the spill manager shim.
+                        let reserved = match self.spill_contenders(vertex_id, anchor, h, w) {
+                            Ok(preempted) => {
+                                for other in preempted {
+                                    self.clear_spill_projection_and_mirror(
+                                        other,
+                                        delta.as_deref_mut(),
+                                    );
+                                    self.graph.redirty_preempted_spill_anchor(other);
+                                }
+                                self.spill_mgr.reserve(
+                                    vertex_id,
+                                    anchor,
+                                    SpillShape { rows: h, cols: w },
+                                    SpillMeta {
+                                        epoch: self.recalc_epoch,
+                                        config: self.config.spill,
+                                    },
+                                )
+                            }
+                            Err(e) => Err(e),
+                        };
+                        match reserved {
                             Ok(()) => {
                                 // Commit: write values to grid
                                 // Default conflict policy is Error + FirstWins; reserve() enforces in-flight locks
@@ -17603,7 +17661,7 @@ where
                 let h = (er0 - sr0 + 1) as usize;
                 let w = (ec0 - sc0 + 1) as usize;
                 let cell_count = (h as u64).saturating_mul(w as u64);
-                if cell_count > self.config.spill.max_spill_cells as u64 {
+                if cell_count > self.config.spill.max_spill_cells {
                     return Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
                         "Named range too large to materialize as an array".to_string(),
                     ));
@@ -21556,7 +21614,7 @@ where
         vertex_id: VertexId,
         result: LiteralValue,
         mut delta: Option<&mut DeltaCollector>,
-        overwritable_formulas: Option<&rustc_hash::FxHashSet<VertexId>>,
+        preempted_spills: Option<&rustc_hash::FxHashSet<VertexId>>,
     ) -> Result<(), ExcelError> {
         // If this vertex's cell is currently covered by a spill from a different anchor,
         // ignore the computed result. The spill's committed values own the grid.
@@ -21578,7 +21636,7 @@ where
                         vertex_id,
                         rows,
                         delta.as_deref_mut(),
-                        overwritable_formulas,
+                        preempted_spills,
                     )?;
                 }
                 other => {
@@ -21680,7 +21738,7 @@ where
         vertex_id: VertexId,
         rows: Vec<Vec<LiteralValue>>,
         mut delta: Option<&mut DeltaCollector>,
-        overwritable_formulas: Option<&rustc_hash::FxHashSet<VertexId>>,
+        preempted_spills: Option<&rustc_hash::FxHashSet<VertexId>>,
     ) -> Result<(), ExcelError> {
         // Keep behavior consistent with the sequential spill path in `evaluate_vertex_impl`.
         self.graph
@@ -21696,7 +21754,7 @@ where
 
         // Hard cap to avoid vertex explosion from huge dynamic arrays.
         let spill_cells = (h as u64).saturating_mul(w as u64);
-        if spill_cells > self.config.spill.max_spill_cells as u64 {
+        if spill_cells > self.config.spill.max_spill_cells {
             self.clear_spill_projection_and_mirror(vertex_id, delta.as_deref_mut());
             let spill_err = ExcelError::new(ExcelErrorKind::Spill)
                 .with_message("SpillTooLarge")
@@ -21783,7 +21841,7 @@ where
                     &targets,
                     rows.clone(),
                     delta.as_deref_mut(),
-                    overwritable_formulas,
+                    preempted_spills,
                 ) {
                     self.clear_spill_projection_and_mirror(vertex_id, delta.as_deref_mut());
                     let err_val = LiteralValue::Error(e.clone());
@@ -21937,7 +21995,7 @@ where
                         let h = (er0 - sr0 + 1) as usize;
                         let w = (ec0 - sc0 + 1) as usize;
                         let cell_count = (h as u64).saturating_mul(w as u64);
-                        if cell_count > self.config.spill.max_spill_cells as u64 {
+                        if cell_count > self.config.spill.max_spill_cells {
                             return Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
                                 "Named range too large to materialize as an array".to_string(),
                             ));
@@ -22155,6 +22213,9 @@ impl UsedAxisBoundsCache {
 pub struct ShimSpillManager {
     region_locks: RegionLockManager,
     pub(crate) active_locks: rustc_hash::FxHashMap<VertexId, u64>,
+    /// Host-declared cells no spill may project into, per sheet id — merged cells for a
+    /// spreadsheet host (see [`Engine::set_spill_blockers`]).
+    blockers: rustc_hash::FxHashMap<u32, Vec<crate::engine::spill::Region>>,
 }
 
 impl ShimSpillManager {
@@ -22165,7 +22226,7 @@ impl ShimSpillManager {
         shape: SpillShape,
         _meta: SpillMeta,
     ) -> Result<(), ExcelError> {
-        // Derive region from anchor + shape; enforce in-flight exclusivity only.
+        // Derive region from anchor + shape; enforce host blockers + in-flight exclusivity only.
         let region = crate::engine::spill::Region {
             sheet_id: anchor_cell.sheet_id as u32,
             row_start: anchor_cell.coord.row(),
@@ -22181,6 +22242,9 @@ impl ShimSpillManager {
                 .saturating_add(shape.cols)
                 .saturating_sub(1),
         };
+        if self.blocked_by_host(&region, anchor_cell) {
+            return Err(ExcelError::new(ExcelErrorKind::Spill).with_message("BlockedByHostRegion"));
+        }
         match self.region_locks.reserve(region, owner) {
             Ok(id) => {
                 if id != 0 {
@@ -22190,6 +22254,41 @@ impl ShimSpillManager {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Replace the host-declared blockers of one sheet (an empty list clears them).
+    pub(crate) fn set_blockers(
+        &mut self,
+        sheet_id: u32,
+        regions: Vec<crate::engine::spill::Region>,
+    ) {
+        if regions.is_empty() {
+            self.blockers.remove(&sheet_id);
+        } else {
+            self.blockers.insert(sheet_id, regions);
+        }
+    }
+
+    /// Does `region` reach a host-declared blocker in any cell other than the anchor's own?
+    /// (The anchor may itself be a blocked cell — a merged cell holding the formula — a 1×1
+    /// result there is not a spill.)
+    fn blocked_by_host(&self, region: &crate::engine::spill::Region, anchor_cell: CellRef) -> bool {
+        let Some(blockers) = self.blockers.get(&region.sheet_id) else {
+            return false;
+        };
+        let (anchor_row, anchor_col) = (anchor_cell.coord.row(), anchor_cell.coord.col());
+        blockers.iter().any(|b| {
+            let row_start = region.row_start.max(b.row_start);
+            let row_end = region.row_end.min(b.row_end);
+            let col_start = region.col_start.max(b.col_start);
+            let col_end = region.col_end.min(b.col_end);
+            let overlaps = row_start <= row_end && col_start <= col_end;
+            let only_anchor = row_start == row_end
+                && col_start == col_end
+                && row_start == anchor_row
+                && col_start == anchor_col;
+            overlaps && !only_anchor
+        })
     }
 
     /// Release any in-flight region reservation still held for `owner`.
@@ -22209,7 +22308,7 @@ impl ShimSpillManager {
         anchor_vertex: VertexId,
         targets: &[CellRef],
         rows: Vec<Vec<LiteralValue>>,
-        overwritable_formulas: Option<&rustc_hash::FxHashSet<VertexId>>,
+        preempted_spills: Option<&rustc_hash::FxHashSet<VertexId>>,
         mut value_probe: F,
     ) -> Result<(), ExcelError>
     where
@@ -22220,11 +22319,7 @@ impl ShimSpillManager {
         // Re-run plan on concrete targets before committing to respect blockers.
         // This plan checks formula/spill ownership in the graph, but when the graph value cache
         // is disabled (Arrow-canonical mode), it cannot see non-empty value blockers.
-        let plan_res = graph.plan_spill_region_allowing_formula_overwrite(
-            anchor_vertex,
-            targets,
-            overwritable_formulas,
-        );
+        let plan_res = graph.plan_spill_region_preempting(anchor_vertex, targets, preempted_spills);
         if let Err(e) = plan_res {
             if let Some(id) = self.active_locks.remove(&anchor_vertex) {
                 self.region_locks.release(id);
@@ -22317,14 +22412,13 @@ impl ShimSpillManager {
         anchor_vertex: VertexId,
         targets: &[CellRef],
         rows: Vec<Vec<LiteralValue>>,
-        overwritable_formulas: Option<&rustc_hash::FxHashSet<VertexId>>,
+        preempted_spills: Option<&rustc_hash::FxHashSet<VertexId>>,
     ) -> Result<(), ExcelError> {
         // Re-run plan on concrete targets before committing to respect blockers.
-        let plan_res = engine.graph.plan_spill_region_allowing_formula_overwrite(
-            anchor_vertex,
-            targets,
-            overwritable_formulas,
-        );
+        let plan_res =
+            engine
+                .graph
+                .plan_spill_region_preempting(anchor_vertex, targets, preempted_spills);
         if let Err(e) = plan_res {
             if let Some(id) = self.active_locks.remove(&anchor_vertex) {
                 self.region_locks.release(id);
@@ -22577,9 +22671,30 @@ where
     ) -> Option<formualizer_parse::parser::ReferenceType> {
         use crate::engine::named_range::NamedDefinition;
         use formualizer_parse::parser::ReferenceType;
-        let entry = self
+        let Some(entry) = self
             .graph
-            .resolve_name_entry(name, self.graph.default_sheet_id())?;
+            .resolve_name_entry(name, self.graph.default_sheet_id())
+        else {
+            // A bare table name is the table's data body.
+            let table = self.graph.resolve_table_entry(name)?;
+            let (start, end) = (table.range.start, table.range.end);
+            let data_start_row = start.coord.row() + 1 + u32::from(table.header_row);
+            let data_end_row = (end.coord.row() + 1).saturating_sub(u32::from(table.totals_row));
+            if data_end_row < data_start_row {
+                return None;
+            }
+            return Some(ReferenceType::Range {
+                sheet: Some(self.graph.sheet_name(start.sheet_id).to_string()),
+                start_row: Some(data_start_row),
+                start_col: Some(start.coord.col() + 1),
+                end_row: Some(data_end_row),
+                end_col: Some(end.coord.col() + 1),
+                start_row_abs: true,
+                start_col_abs: true,
+                end_row_abs: true,
+                end_col_abs: true,
+            });
+        };
         match &entry.definition {
             NamedDefinition::Cell(c) => Some(ReferenceType::Cell {
                 sheet: Some(self.graph.sheet_name(c.sheet_id).to_string()),
@@ -22875,10 +22990,26 @@ where
                     .graph
                     .sheet_id(current_sheet)
                     .ok_or_else(|| ExcelError::new(ExcelErrorKind::Ref))?;
-                let named = self
-                    .graph
-                    .resolve_name_entry(name, current_id)
-                    .ok_or_else(|| ExcelError::new(ExcelErrorKind::Ref))?;
+                let Some(named) = self.graph.resolve_name_entry(name, current_id) else {
+                    // A bare table name is the table's data body.
+                    let table = self
+                        .graph
+                        .resolve_table_entry(name)
+                        .ok_or_else(|| ExcelError::new(ExcelErrorKind::Ref))?;
+                    let first_data_row =
+                        table.range.start.coord.row() + u32::from(table.header_row);
+                    return Ok(Some(ReferenceInfo {
+                        first_sheet_index: self
+                            .graph
+                            .sheet_reg()
+                            .active_position_by_id(table.range.start.sheet_id),
+                        sheet_count: Some(1),
+                        first_cell: Some(CellRef::new(
+                            table.range.start.sheet_id,
+                            Coord::new(first_data_row, table.range.start.coord.col(), true, true),
+                        )),
+                    }));
+                };
                 match &named.definition {
                     NamedDefinition::Cell(cell) => ReferenceInfo {
                         first_sheet_index: self
@@ -23024,6 +23155,38 @@ where
         }
 
         computed
+    }
+
+    fn spill_range_of_anchor(
+        &self,
+        sheet: &str,
+        row: u32,
+        col: u32,
+    ) -> Option<(u32, u32, u32, u32)> {
+        let sheet_id = self.graph.sheet_id(sheet)?;
+        let anchor = CellRef::new(sheet_id, Coord::from_excel(row, col, true, true));
+        let region = self.graph.spill_region_of(anchor);
+        if region.is_empty() {
+            // A formula that produced a single value is a 1×1 "spill"; a plain value is not an
+            // anchor at all.
+            let vertex = self.graph.get_vertex_for_cell(&anchor)?;
+            return matches!(
+                self.graph.get_vertex_kind(vertex),
+                VertexKind::FormulaScalar | VertexKind::FormulaArray
+            )
+            .then_some((row, col, row, col));
+        }
+        let mut bounds = (u32::MAX, u32::MAX, 0u32, 0u32);
+        for cell in region {
+            let (r, c) = (cell.coord.row() + 1, cell.coord.col() + 1);
+            bounds = (
+                bounds.0.min(r),
+                bounds.1.min(c),
+                bounds.2.max(r),
+                bounds.3.max(c),
+            );
+        }
+        Some(bounds)
     }
 
     fn sheet_bounds(&self, sheet: &str) -> Option<(u32, u32)> {
@@ -23215,7 +23378,7 @@ where
                     let h = (er - sr + 1) as u64;
                     let w = (ec - sc + 1) as u64;
                     let cell_count = h.saturating_mul(w);
-                    if cell_count <= self.config.spill.max_spill_cells as u64 {
+                    if cell_count <= self.config.spill.max_spill_cells {
                         let mut rows: Vec<Vec<LiteralValue>> = Vec::with_capacity(h as usize);
                         for r in sr..=er {
                             let mut rowv: Vec<LiteralValue> = Vec::with_capacity(w as usize);
@@ -23326,7 +23489,7 @@ where
                                 let h = (er.saturating_sub(sr) + 1) as u64;
                                 let w = (ec.saturating_sub(sc) + 1) as u64;
                                 let cell_count = h.saturating_mul(w);
-                                if cell_count <= self.config.spill.max_spill_cells as u64 {
+                                if cell_count <= self.config.spill.max_spill_cells {
                                     let mut rows: Vec<Vec<LiteralValue>> =
                                         Vec::with_capacity(h as usize);
                                     for r in sr..=er {
@@ -23372,6 +23535,17 @@ where
                             }
                         }
                     }
+                }
+
+                // A bare table name (`=ROWS(Table1)`, `=SUM(Table1)`) parses as a name; it is
+                // the table's data body, exactly like `Table1[#Data]`.
+                if self.graph.resolve_table_entry(name).is_some() {
+                    let table_ref =
+                        ReferenceType::Table(formualizer_parse::parser::TableReference {
+                            name: name.clone(),
+                            specifier: Some(formualizer_parse::parser::TableSpecifier::Data),
+                        });
+                    return self.resolve_range_view(&table_ref, current_sheet);
                 }
 
                 if let Some(source) = self.graph.resolve_source_scalar_entry(name) {
@@ -23423,11 +23597,8 @@ where
                     };
 
                     let av = match &tref.specifier {
-                        None => {
-                            return Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
-                                "Table reference without specifier is unsupported".to_string(),
-                            ));
-                        }
+                        // A bare table name (`Table1`) is its data body, as in Excel.
+                        None => select(data_sr, sc0, data_er, ec0),
                         Some(formualizer_parse::parser::TableSpecifier::Column(col)) => {
                             let Some(idx) = table.col_index(col) else {
                                 return Err(ExcelError::new(ExcelErrorKind::Ref).with_message(
@@ -23471,21 +23642,22 @@ where
                         | Some(formualizer_parse::parser::TableSpecifier::SpecialItem(
                             formualizer_parse::parser::SpecialItem::Headers,
                         )) => {
+                            // Excel: selecting a band the table does not have is #REF!.
                             if !has_headers {
-                                asheet.range_view(1, 1, 0, 0)
-                            } else {
-                                select(sr0, sc0, sr0, ec0)
+                                return Err(ExcelError::new(ExcelErrorKind::Ref)
+                                    .with_message("Table has no header row".to_string()));
                             }
+                            select(sr0, sc0, sr0, ec0)
                         }
                         Some(formualizer_parse::parser::TableSpecifier::Totals)
                         | Some(formualizer_parse::parser::TableSpecifier::SpecialItem(
                             formualizer_parse::parser::SpecialItem::Totals,
                         )) => {
                             if !has_totals {
-                                asheet.range_view(1, 1, 0, 0)
-                            } else {
-                                select(er0, sc0, er0, ec0)
+                                return Err(ExcelError::new(ExcelErrorKind::Ref)
+                                    .with_message("Table has no totals row".to_string()));
                             }
+                            select(er0, sc0, er0, ec0)
                         }
                         Some(
                             spec @ (formualizer_parse::parser::TableSpecifier::SpecialItem(
@@ -23663,7 +23835,8 @@ where
         }
     }
 
-    /// Apply the evaluation outcome for one cyclic SCC: stamp `#CIRC!` on its
+    /// Apply the evaluation outcome for one cyclic SCC: stamp the policy's
+    /// cycle verdict (`#CIRC!`, or `0` under `CyclePolicy::Zero`) on its
     /// (optionally filtered) members via `stamp_cycle_error`.
     ///
     /// This is the single per-SCC application point used by every schedule
@@ -23682,10 +23855,7 @@ where
         mut delta: Option<&mut DeltaCollector>,
         dirty_filter: Option<&FxHashSet<VertexId>>,
     ) -> usize {
-        let circ_error = LiteralValue::Error(
-            ExcelError::new(ExcelErrorKind::Circ)
-                .with_message("Circular dependency detected".to_string()),
-        );
+        let circ_error = self.config.cycle.policy.cycle_stamp_value();
         let mut stamped = 0usize;
         for &vertex_id in cycle {
             if let Some(filter) = dirty_filter
@@ -23744,6 +23914,9 @@ where
         self.graph
             .update_vertex_value(vertex_id, circ_error.clone());
         self.mirror_vertex_value_to_overlay(vertex_id, circ_error);
+        if let Some(cell) = self.graph.get_cell_ref_for_vertex(vertex_id) {
+            self.last_cycle_cells.push(cell);
+        }
     }
 
     /// Dispatch point for one `ScheduleUnit::Cycle` (RFC #112, Stage 2).
@@ -23870,10 +24043,7 @@ where
         // members can be neither edge sources nor targets.
         let recordable = cell_refs.len() + name_keys.len();
 
-        let circ_error = LiteralValue::Error(
-            ExcelError::new(ExcelErrorKind::Circ)
-                .with_message("Circular dependency detected".to_string()),
-        );
+        let circ_error = self.config.cycle.policy.cycle_stamp_value();
 
         // ── 0b. Spec-§4 persistence repair: structural edits clear computed
         // overlays wholesale (`clear_computed_overlay_after_row/_col`), but
@@ -24105,8 +24275,8 @@ where
                 // accumulating so the count stays "distinct live cycles".
                 witnessed_cycles = witnessed_cycles.max(analysis.cycle_count);
                 match policy {
-                    CyclePolicy::Error => {
-                        // POLICY (Error): stamp every member of a live cycle,
+                    CyclePolicy::Error | CyclePolicy::Zero => {
+                        // POLICY (Error / Zero): stamp every member of a live cycle,
                         // then one settling pass over the remaining members in
                         // live-topological order so error propagation
                         // downstream is consistent (spec §3.4). Blast radius =
@@ -24445,7 +24615,7 @@ where
         targets: &[CellRef],
         rows: Vec<Vec<LiteralValue>>,
         delta: Option<&mut DeltaCollector>,
-        overwritable_formulas: Option<&rustc_hash::FxHashSet<VertexId>>,
+        preempted_spills: Option<&rustc_hash::FxHashSet<VertexId>>,
     ) -> Result<(), ExcelError> {
         let prev_spill_cells = self
             .graph
@@ -24515,7 +24685,7 @@ where
             anchor_vertex,
             targets,
             rows.clone(),
-            overwritable_formulas,
+            preempted_spills,
             |g, cell| {
                 let sheet_name = g.sheet_name(cell.sheet_id);
                 let asheet = arrow_sheets.sheet(sheet_name)?;
@@ -24600,7 +24770,6 @@ where
         &mut self,
         vertex_id: VertexId,
         computed_value: LiteralValue,
-        overwritable_formulas: Option<&rustc_hash::FxHashSet<VertexId>>,
     ) -> Result<Vec<Effect>, ExcelError> {
         let kind = self.graph.get_vertex_kind(vertex_id);
         let is_formula = matches!(kind, VertexKind::FormulaScalar | VertexKind::FormulaArray);
@@ -24623,9 +24792,7 @@ where
         }
 
         match computed_value {
-            LiteralValue::Array(rows) => {
-                self.plan_array_effects(vertex_id, rows, overwritable_formulas)
-            }
+            LiteralValue::Array(rows) => self.plan_array_effects(vertex_id, rows),
             other => self.plan_scalar_effects(vertex_id, other),
         }
     }
@@ -24642,6 +24809,16 @@ where
             .is_some_and(|c| !c.is_empty());
 
         let mut effects = Vec::new();
+        // This formula sits on another array's projection (a formula typed into a spilled cell):
+        // the cell is content now, so that array is preempted and re-plans to `#SPILL!`.
+        if let Some(cell) = self.graph.get_cell_ref(vertex_id)
+            && let Some(owner) = self.graph.spill_registry_anchor_for_cell(cell)
+            && owner != vertex_id
+        {
+            effects.push(Effect::SpillPreempt {
+                anchor_vertex: owner,
+            });
+        }
         if has_spill {
             effects.push(Effect::SpillClear {
                 anchor_vertex: vertex_id,
@@ -24656,7 +24833,6 @@ where
         &mut self,
         vertex_id: VertexId,
         rows: Vec<Vec<LiteralValue>>,
-        overwritable_formulas: Option<&rustc_hash::FxHashSet<VertexId>>,
     ) -> Result<Vec<Effect>, ExcelError> {
         // Lightweight mutation needed for correct spill-blocking checks.
         self.graph.set_kind(vertex_id, VertexKind::FormulaArray);
@@ -24671,7 +24847,7 @@ where
 
         // Hard cap to avoid vertex explosion from huge dynamic arrays.
         let spill_cells = (h as u64).saturating_mul(w as u64);
-        if spill_cells > self.config.spill.max_spill_cells as u64 {
+        if spill_cells > self.config.spill.max_spill_cells {
             return self.plan_spill_error_effects(vertex_id, "SpillTooLarge", h, w);
         }
 
@@ -24695,6 +24871,16 @@ where
             }
         }
 
+        // Settle contention with other committed spills by anchor order, not evaluation order.
+        let preempted: rustc_hash::FxHashSet<VertexId> =
+            match self.spill_contenders(vertex_id, anchor, h, w) {
+                Ok(preempted) => preempted.into_iter().collect(),
+                Err(e) => {
+                    let msg = e.message.unwrap_or_else(|| "Spill blocked".to_string());
+                    return self.plan_spill_error_effects(vertex_id, &msg, h, w);
+                }
+            };
+
         // Region lock via spill manager.
         match self.spill_mgr.reserve(
             vertex_id,
@@ -24706,13 +24892,17 @@ where
             },
         ) {
             Ok(()) => {
-                // Validate spill region is available.
-                if let Err(_e) = self.graph.plan_spill_region_allowing_formula_overwrite(
-                    vertex_id,
-                    &targets,
-                    overwritable_formulas,
-                ) {
-                    return self.plan_spill_error_effects(vertex_id, "Spill blocked", h, w);
+                // Validate spill region is available. A blocked plan must give its in-flight
+                // region lock back: the lock is only released on commit, and a leaked one blocks
+                // every later array whose region overlaps it ("Region reserved by another spill")
+                // — the same layer's A3 `SEQUENCE(2)` after A1 `SEQUENCE(3)` was blocked by A3.
+                if let Err(e) =
+                    self.graph
+                        .plan_spill_region_preempting(vertex_id, &targets, Some(&preempted))
+                {
+                    self.spill_mgr.release_owner(vertex_id);
+                    let msg = e.message.unwrap_or_else(|| "Spill blocked".to_string());
+                    return self.plan_spill_error_effects(vertex_id, &msg, h, w);
                 }
 
                 // Arrow-canonical mode: graph planning cannot see non-empty value blockers because
@@ -24747,6 +24937,7 @@ where
                                 cell.coord.col() as usize,
                             );
                             if !matches!(v, LiteralValue::Empty) {
+                                self.spill_mgr.release_owner(vertex_id);
                                 return self.plan_spill_error_effects(
                                     vertex_id,
                                     "BlockedByValue",
@@ -24765,6 +24956,12 @@ where
                     .unwrap_or(LiteralValue::Empty);
 
                 let mut effects = Vec::new();
+                // Preempted anchors vacate first, so the commit's own plan finds their cells free.
+                let mut preempted: Vec<VertexId> = preempted.into_iter().collect();
+                preempted.sort_unstable();
+                for anchor_vertex in preempted {
+                    effects.push(Effect::SpillPreempt { anchor_vertex });
+                }
                 // Clear previous spill if any.
                 let has_prev = self
                     .graph
@@ -24792,6 +24989,67 @@ where
                 self.plan_spill_error_effects(vertex_id, &msg, h, w)
             }
         }
+    }
+
+    /// Excel's rule for dynamic arrays contending for the same cells. `anchor` wants to spill a
+    /// `rows × cols` block from `anchor_cell`; any cell there already owned by another anchor's
+    /// committed spill is a conflict, settled by anchor POSITION rather than evaluation order so
+    /// the outcome never depends on which formula was entered — or scheduled — first:
+    /// - the other anchor's own cell lies inside the block: that cell is a formula, content, and
+    ///   blocks this spill (`#SPILL!`) exactly like a literal would;
+    /// - the other array's spill covers THIS anchor's cell: it is the one lying over a formula,
+    ///   so it is preempted and re-plans to `#SPILL!` (a formula typed into a projection);
+    /// - otherwise the anchor earlier in row-major order wins: this anchor PREEMPTS a later one
+    ///   (its region is cleared and it re-evaluates to `#SPILL!` in the respill pass) and is
+    ///   blocked by an earlier one.
+    ///
+    /// Returns the anchors this spill preempts, or the `#SPILL!` that blocks it.
+    fn spill_contenders(
+        &self,
+        anchor: VertexId,
+        anchor_cell: CellRef,
+        rows: u32,
+        cols: u32,
+    ) -> Result<Vec<VertexId>, ExcelError> {
+        let (row0, col0) = (anchor_cell.coord.row(), anchor_cell.coord.col());
+        let end_row = row0.saturating_add(rows).saturating_sub(1);
+        let end_col = col0.saturating_add(cols).saturating_sub(1);
+        let inside = |c: &CellRef| {
+            c.sheet_id == anchor_cell.sheet_id
+                && (row0..=end_row).contains(&c.coord.row())
+                && (col0..=end_col).contains(&c.coord.col())
+        };
+        let mut preempted = Vec::new();
+        for other in
+            self.graph
+                .spill_anchors_in_region(anchor_cell.sheet_id, row0, col0, end_row, end_col)
+        {
+            if other == anchor {
+                continue;
+            }
+            let Some(other_cell) = self.graph.get_cell_ref(other) else {
+                continue;
+            };
+            if inside(&other_cell) {
+                return Err(ExcelError::new(ExcelErrorKind::Spill).with_message("BlockedByFormula"));
+            }
+            if self.graph.spill_registry_anchor_for_cell(anchor_cell) == Some(other) {
+                preempted.push(other);
+                continue;
+            }
+            let earlier = (anchor_cell.sheet_id, row0, col0)
+                < (
+                    other_cell.sheet_id,
+                    other_cell.coord.row(),
+                    other_cell.coord.col(),
+                );
+            if earlier {
+                preempted.push(other);
+            } else {
+                return Err(ExcelError::new(ExcelErrorKind::Spill).with_message("BlockedBySpill"));
+            }
+        }
+        Ok(preempted)
     }
 
     /// Build the effect list for a spill that failed validation.
@@ -24845,6 +25103,10 @@ where
             }
             Effect::SpillClear { anchor_vertex } => {
                 self.apply_spill_clear(*anchor_vertex, delta, log, computed_writes)?;
+            }
+            Effect::SpillPreempt { anchor_vertex } => {
+                self.apply_spill_clear(*anchor_vertex, delta, log, computed_writes)?;
+                self.graph.redirty_preempted_spill_anchor(*anchor_vertex);
             }
             Effect::SpillCommit {
                 anchor_vertex,
@@ -24999,7 +25261,7 @@ where
             target_cells,
             values.clone(),
             delta,
-            None, // overwritable_formulas already validated in plan phase
+            None, // preempted spills were cleared by their SpillPreempt effects before this commit
         )?;
 
         // ChangeLog.
@@ -25086,13 +25348,12 @@ where
         &mut self,
         vertex_id: VertexId,
         computed_value: LiteralValue,
-        overwritable_formulas: Option<&rustc_hash::FxHashSet<VertexId>>,
         computed_writes: &mut ComputedWriteBuffer,
     ) -> Result<Vec<Effect>, ExcelError> {
         if matches!(&computed_value, LiteralValue::Array(_)) {
             self.flush_computed_write_buffer(computed_writes)?;
         }
-        self.plan_vertex_effects(vertex_id, computed_value, overwritable_formulas)
+        self.plan_vertex_effects(vertex_id, computed_value)
     }
 
     // ── Layer evaluation via effects pipeline ──────────────────────────────
@@ -25118,7 +25379,7 @@ where
                 Ok(v) => v,
                 Err(e) => LiteralValue::Error(e),
             };
-            let effects = self.plan_vertex_effects(vertex_id, value, None)?;
+            let effects = self.plan_vertex_effects(vertex_id, value)?;
             for effect in &effects {
                 self.apply_effect_with_computed_writes(
                     effect,
@@ -25157,7 +25418,6 @@ where
             let effects = match self.plan_vertex_effects_with_computed_flush(
                 vertex_id,
                 value,
-                None,
                 &mut computed_writes,
             ) {
                 Ok(effects) => effects,
@@ -25209,7 +25469,6 @@ where
             let effects = match self.plan_vertex_effects_with_computed_flush(
                 vertex_id,
                 value,
-                None,
                 &mut computed_writes,
             ) {
                 Ok(effects) => effects,
@@ -25266,7 +25525,6 @@ where
             let effects = match self.plan_vertex_effects_with_computed_flush(
                 vertex_id,
                 value,
-                None,
                 &mut computed_writes,
             ) {
                 Ok(effects) => effects,
@@ -25323,7 +25581,6 @@ where
             let effects = match self.plan_vertex_effects_with_computed_flush(
                 vertex_id,
                 value,
-                None,
                 &mut computed_writes,
             ) {
                 Ok(effects) => effects,
@@ -25367,7 +25624,6 @@ where
             }
         }
 
-        let inflight: rustc_hash::FxHashSet<VertexId> = layer.vertices.iter().copied().collect();
         let mut applied = 0usize;
 
         for group in [&phase1[..], &phase2[..]] {
@@ -25406,7 +25662,6 @@ where
                         let effects = match self.plan_vertex_effects_with_computed_flush(
                             vertex_id,
                             result,
-                            Some(&inflight),
                             &mut computed_writes,
                         ) {
                             Ok(effects) => effects,
@@ -25434,7 +25689,6 @@ where
                         let effects = match self.plan_vertex_effects_with_computed_flush(
                             vertex_id,
                             result,
-                            Some(&inflight),
                             &mut computed_writes,
                         ) {
                             Ok(effects) => effects,
@@ -25489,7 +25743,6 @@ where
             }
         }
 
-        let inflight: rustc_hash::FxHashSet<VertexId> = layer.vertices.iter().copied().collect();
         let mut applied = 0usize;
 
         for group in [&phase1[..], &phase2[..]] {
@@ -25525,7 +25778,6 @@ where
                         let effects = match self.plan_vertex_effects_with_computed_flush(
                             vertex_id,
                             result,
-                            Some(&inflight),
                             &mut computed_writes,
                         ) {
                             Ok(effects) => effects,
@@ -25552,7 +25804,6 @@ where
                         let effects = match self.plan_vertex_effects_with_computed_flush(
                             vertex_id,
                             result,
-                            Some(&inflight),
                             &mut computed_writes,
                         ) {
                             Ok(effects) => effects,
@@ -25611,7 +25862,6 @@ where
             }
         }
 
-        let inflight: rustc_hash::FxHashSet<VertexId> = layer.vertices.iter().copied().collect();
         let mut applied = 0usize;
 
         for group in [&phase1[..], &phase2[..]] {
@@ -25655,7 +25905,6 @@ where
                         let effects = match self.plan_vertex_effects_with_computed_flush(
                             vertex_id,
                             result,
-                            Some(&inflight),
                             &mut computed_writes,
                         ) {
                             Ok(effects) => effects,
@@ -25682,7 +25931,6 @@ where
                         let effects = match self.plan_vertex_effects_with_computed_flush(
                             vertex_id,
                             result,
-                            Some(&inflight),
                             &mut computed_writes,
                         ) {
                             Ok(effects) => effects,
@@ -25878,7 +26126,6 @@ where
             let effects = match self.plan_vertex_effects_with_computed_flush(
                 vertex_id,
                 value,
-                None,
                 &mut computed_writes,
             ) {
                 Ok(effects) => effects,

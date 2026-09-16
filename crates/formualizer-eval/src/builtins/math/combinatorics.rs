@@ -541,6 +541,76 @@ impl Function for PermutFn {
     }
 }
 
+/// Returns the number of permutations with repetition: `number ^ number_chosen`.
+///
+/// # Remarks
+/// - Both arguments are truncated toward zero before use.
+/// - A negative argument returns `#NUM!`.
+/// - `PERMUTATIONA(0, 0)` is 1.
+///
+/// ```yaml,sandbox
+/// title: "Permutations with repetition"
+/// formula: "=PERMUTATIONA(3, 2)"
+/// expected: 9
+/// ```
+///
+/// ```yaml,sandbox
+/// title: "Fractional inputs are truncated"
+/// formula: "=PERMUTATIONA(2.9, 3.1)"
+/// expected: 8
+/// ```
+#[derive(Debug)]
+pub struct PermutationaFn;
+/// [formualizer-docgen:schema:start]
+/// Name: PERMUTATIONA
+/// Type: PermutationaFn
+/// Min args: 2
+/// Max args: 2
+/// Variadic: false
+/// Signature: PERMUTATIONA(arg1: number@scalar, arg2: number@scalar)
+/// Arg schema: arg1{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
+/// Caps: PURE, ELEMENTWISE
+/// [formualizer-docgen:schema:end]
+impl Function for PermutationaFn {
+    func_caps!(PURE, ELEMENTWISE);
+    fn name(&self) -> &'static str {
+        "PERMUTATIONA"
+    }
+    fn min_args(&self) -> usize {
+        2
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        &ARG_NUM_LENIENT_TWO[..]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        _: &dyn FunctionContext<'b>,
+    ) -> Result<CalcValue<'b>, ExcelError> {
+        let mut nums = [0_f64; 2];
+        for (slot, arg) in nums.iter_mut().zip(args.iter().take(2)) {
+            *slot = match arg.value()?.into_literal() {
+                LiteralValue::Error(e) => return Ok(CalcValue::Scalar(LiteralValue::Error(e))),
+                other => coerce_num(&other)?,
+            }
+            .trunc();
+        }
+        let [n, k] = nums;
+        if n < 0.0 || k < 0.0 {
+            return Ok(CalcValue::Scalar(
+                LiteralValue::Error(ExcelError::new_num()),
+            ));
+        }
+        let result = if n == 0.0 && k == 0.0 { 1.0 } else { n.powf(k) };
+        if !result.is_finite() {
+            return Ok(CalcValue::Scalar(
+                LiteralValue::Error(ExcelError::new_num()),
+            ));
+        }
+        Ok(CalcValue::Scalar(LiteralValue::Number(result)))
+    }
+}
+
 #[derive(Debug)]
 pub struct FactDoubleFn;
 /// Returns the double factorial of a number.
@@ -712,6 +782,7 @@ pub fn register_builtins() {
     crate::function_registry::register_builtin(Arc::new(CombinFn));
     crate::function_registry::register_builtin(Arc::new(CombinaFn));
     crate::function_registry::register_builtin(Arc::new(PermutFn));
+    crate::function_registry::register_builtin(Arc::new(PermutationaFn));
 }
 
 #[cfg(test)]

@@ -1204,14 +1204,21 @@ impl Function for NFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.len() != 1 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
         }
-        let v = args[0].value()?.into_literal();
+        let v = match args[0].value()? {
+            // N takes one scalar: a multi-cell range intersects with the formula's own row /
+            // column, exactly as the `@` operator does (`=N(A1:A3)` in row 2 reads A2).
+            crate::traits::CalcValue::Range(rv) if rv.as_1x1().is_none() => {
+                implicit_intersect(&rv, ctx.current_cell())
+            }
+            other => other.into_literal(),
+        };
         match v {
             LiteralValue::Int(i) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(i))),
             LiteralValue::Number(n) => {
@@ -1239,13 +1246,64 @@ impl Function for NFn {
             }
             LiteralValue::Text(_) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(0))),
             LiteralValue::Empty => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(0))),
-            LiteralValue::Array(_) => {
-                // Array-to-scalar implicit intersection is not implemented here; returns 0.
-                Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(0)))
+            LiteralValue::Array(rows) => {
+                // N does not lift over arrays: like Excel, an array constant (or a multi-cell
+                // range that survived implicit intersection) reduces to its top-left element.
+                let first = rows
+                    .into_iter()
+                    .next()
+                    .and_then(|row| row.into_iter().next())
+                    .unwrap_or(LiteralValue::Empty);
+                Ok(crate::traits::CalcValue::Scalar(n_of_scalar(first)))
             }
             LiteralValue::Error(e) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
             LiteralValue::Pending => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(0))),
         }
+    }
+}
+
+/// Implicit intersection of a multi-cell range with the formula cell: an Nx1 range picks by
+/// row, a 1xM range by column, a block by both; no intersection is `#VALUE!`. A materialised
+/// array (the `__tmp` backing sheet) is anchored at the formula cell, so its top-left wins.
+fn implicit_intersect(
+    rv: &crate::engine::range_view::RangeView<'_>,
+    current: Option<crate::reference::CellRef>,
+) -> LiteralValue {
+    if rv.is_empty() {
+        return LiteralValue::Error(ExcelError::new_value());
+    }
+    if rv.sheet_name() == "__tmp" {
+        return rv.get_cell(0, 0);
+    }
+    let Some(cell) = current else {
+        return rv.get_cell(0, 0);
+    };
+    let (row, col) = (cell.coord.row() as usize, cell.coord.col() as usize);
+    let (rows, cols) = rv.dims();
+    let (sr, sc) = (rv.start_row(), rv.start_col());
+    let in_rows = (sr..sr + rows).contains(&row);
+    let in_cols = (sc..sc + cols).contains(&col);
+    match (cols == 1, rows == 1) {
+        (true, _) if in_rows => rv.get_cell(row - sr, 0),
+        (_, true) if in_cols => rv.get_cell(0, col - sc),
+        (false, false) if in_rows && in_cols => rv.get_cell(row - sr, col - sc),
+        _ => LiteralValue::Error(ExcelError::new_value()),
+    }
+}
+
+/// `N` of one already-scalar value (the top-left element of an array argument).
+fn n_of_scalar(v: LiteralValue) -> LiteralValue {
+    match v {
+        LiteralValue::Int(_) | LiteralValue::Number(_) | LiteralValue::Error(_) => v,
+        LiteralValue::Boolean(b) => LiteralValue::Int(if b { 1 } else { 0 }),
+        LiteralValue::Date(_)
+        | LiteralValue::DateTime(_)
+        | LiteralValue::Time(_)
+        | LiteralValue::Duration(_) => v
+            .as_serial_number()
+            .map(LiteralValue::Number)
+            .unwrap_or(LiteralValue::Int(0)),
+        _ => LiteralValue::Int(0),
     }
 }
 
@@ -1599,12 +1657,14 @@ impl Function for ErrorTypeFn {
                     ExcelErrorKind::Num => 6,
                     ExcelErrorKind::Na => 7,
                     ExcelErrorKind::Error => 8,
-                    // Non-standard extensions (codes 9-13)
-                    ExcelErrorKind::NImpl => 9,
-                    ExcelErrorKind::Spill => 10,
-                    ExcelErrorKind::Calc => 11,
-                    ExcelErrorKind::Circ => 12,
-                    ExcelErrorKind::Cancelled => 13,
+                    // Excel: #GETTING_DATA 8, #SPILL! 9, #CONNECT! 10, #BLOCKED! 11,
+                    // #UNKNOWN! 12, #FIELD! 13, #CALC! 14.
+                    ExcelErrorKind::Spill => 9,
+                    ExcelErrorKind::Calc => 14,
+                    // Non-Excel kinds map onto #UNKNOWN! and codes past Excel's table.
+                    ExcelErrorKind::NImpl => 12,
+                    ExcelErrorKind::Circ => 15,
+                    ExcelErrorKind::Cancelled => 16,
                 };
                 Ok(crate::traits::CalcValue::Scalar(LiteralValue::Int(code)))
             }

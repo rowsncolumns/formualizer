@@ -276,7 +276,23 @@ impl DependencyGraph {
         self.sheet_named_ranges.iter()
     }
 
+    /// Resolve a name as written in a formula. `Sheet2!Local` (or `'My Sheet'!Local`) is looked
+    /// up as the sheet-scoped name of THAT sheet first and the workbook name second — Excel lets a
+    /// sheet qualifier reach a name scoped to another sheet, and also accepts it in front of a
+    /// workbook-level name. An unqualified name resolves against `current_sheet`.
     pub fn resolve_name_entry(&self, name: &str, current_sheet: SheetId) -> Option<&NamedRange> {
+        if let Some((sheet_name, bare_name)) = split_sheet_qualified_name(name) {
+            let sheet_id = self.sheet_id(&sheet_name)?;
+            return self.resolve_name_entry_in_scope(bare_name, sheet_id);
+        }
+        self.resolve_name_entry_in_scope(name, current_sheet)
+    }
+
+    fn resolve_name_entry_in_scope(
+        &self,
+        name: &str,
+        current_sheet: SheetId,
+    ) -> Option<&NamedRange> {
         if self.config.case_sensitive_names {
             self.sheet_named_ranges
                 .get(&(current_sheet, name.to_string()))
@@ -432,6 +448,15 @@ impl DependencyGraph {
                     if names.is_empty() {
                         self.vertex_to_names.remove(&vertex_id);
                     }
+                }
+                // The formula still spells this name. Park it as a pending reference so a
+                // re-definition (`define_name` → `resolve_pending_name_references`) rebuilds its
+                // dependencies onto the NEW name vertex; otherwise the formula re-evaluates once
+                // (it is dirty) and then never hears about the name's cells again — a redefined
+                // `Data` no longer propagates edits inside its range to `=SUM(Data)`.
+                if self.get_formula(vertex_id).is_some() {
+                    let sheet_id = self.get_sheet_id(vertex_id);
+                    self.record_pending_name_reference(sheet_id, &canon_name, vertex_id);
                 }
             }
             self.mark_named_vertex_deleted(&named_range);
@@ -763,4 +788,38 @@ impl DependencyGraph {
         self.vertex_to_names.remove(&named_range.vertex);
         self.name_vertex_lookup.remove(&named_range.vertex);
     }
+}
+
+/// Split `Sheet!Name` / `'My Sheet'!Name` into the sheet title (quotes removed, `''` unescaped)
+/// and the bare name. `None` when there is no qualifier or either side is empty.
+fn split_sheet_qualified_name(name: &str) -> Option<(String, &str)> {
+    if let Some(quoted) = name.strip_prefix('\'') {
+        // Walk to the closing quote: a doubled `''` is an escaped apostrophe inside the title.
+        let bytes = quoted.as_bytes();
+        let mut i = 0;
+        let mut title = String::new();
+        while i < bytes.len() {
+            if bytes[i] == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    title.push('\'');
+                    i += 2;
+                    continue;
+                }
+                let bare = quoted.get(i + 1..)?.strip_prefix('!')?;
+                if title.is_empty() || bare.is_empty() || bare.contains('!') {
+                    return None;
+                }
+                return Some((title, bare));
+            }
+            let ch = quoted[i..].chars().next()?;
+            title.push(ch);
+            i += ch.len_utf8();
+        }
+        return None;
+    }
+    let (sheet, bare) = name.split_once('!')?;
+    if sheet.is_empty() || bare.is_empty() || bare.contains('!') {
+        return None;
+    }
+    Some((sheet.to_string(), bare))
 }

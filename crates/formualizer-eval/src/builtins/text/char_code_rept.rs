@@ -1,4 +1,4 @@
-//! CHAR, CODE, REPT text functions
+//! CHAR, CODE, ASC, DBCS/JIS, PHONETIC, REPT text functions
 
 use super::super::utils::{ARG_ANY_ONE, ARG_ANY_TWO, coerce_num};
 use crate::args::ArgSchema;
@@ -342,6 +342,139 @@ impl Function for AscFn {
 }
 
 /// REPT(text, number_times) - Repeats text a given number of times
+/// Inverse of [`asc_convert`]: half-width ASCII (`!`..`~`) and the space become their full-width
+/// forms; every other character is unchanged.
+fn dbcs_convert(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            let cp = c as u32;
+            if cp == 0x20 {
+                '\u{3000}'
+            } else if (0x21..=0x7E).contains(&cp) {
+                char::from_u32(cp - 0x21 + 0xFF01).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Text of one scalar-like argument; errors propagate as `Err`.
+fn text_arg(arg: &ArgumentHandle<'_, '_>) -> Result<String, ExcelError> {
+    Ok(match scalar_like_value(arg)? {
+        LiteralValue::Text(t) => t,
+        LiteralValue::Empty => String::new(),
+        LiteralValue::Error(e) => return Err(e),
+        LiteralValue::Number(n) => formualizer_common::number_to_excel_text(n),
+        other => other.to_string(),
+    })
+}
+
+/// Converts half-width (single-byte) characters to full-width (double-byte) characters.
+///
+/// `JIS` is the same function under its Japanese-locale name.
+///
+/// # Remarks
+/// - Maps half-width ASCII punctuation, digits, letters and the space to the full-width block;
+///   other characters are unchanged.
+/// - Errors propagate unchanged.
+///
+/// ```yaml,sandbox
+/// title: "Convert half-width letters and digits"
+/// formula: '=DBCS("ABC123")'
+/// expected: "ＡＢＣ１２３"
+/// ```
+///
+/// ```yaml,sandbox
+/// title: "Japanese-locale alias"
+/// formula: '=JIS("A B")'
+/// expected: "Ａ　Ｂ"
+/// ```
+#[derive(Debug)]
+pub struct DbcsFn;
+/// [formualizer-docgen:schema:start]
+/// Name: DBCS
+/// Type: DbcsFn
+/// Min args: 1
+/// Max args: 1
+/// Variadic: false
+/// Signature: DBCS(arg1: any@scalar)
+/// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
+/// Caps: PURE
+/// [formualizer-docgen:schema:end]
+impl Function for DbcsFn {
+    func_caps!(PURE);
+    fn name(&self) -> &'static str {
+        "DBCS"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["JIS"]
+    }
+    fn min_args(&self) -> usize {
+        1
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        &ARG_ANY_ONE[..]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        _: &dyn FunctionContext<'b>,
+    ) -> Result<CalcValue<'b>, ExcelError> {
+        match text_arg(&args[0]) {
+            Ok(s) => Ok(CalcValue::Scalar(LiteralValue::Text(dbcs_convert(&s)))),
+            Err(e) => Ok(CalcValue::Scalar(LiteralValue::Error(e))),
+        }
+    }
+}
+
+/// Extracts the phonetic (furigana) characters from a text string.
+///
+/// # Remarks
+/// - Cells on this engine carry no furigana metadata, so the text itself is returned — which is
+///   also what Excel does for cells without phonetic guides.
+/// - Errors propagate unchanged.
+///
+/// ```yaml,sandbox
+/// title: "No furigana recorded"
+/// formula: '=PHONETIC("東京")'
+/// expected: "東京"
+/// ```
+#[derive(Debug)]
+pub struct PhoneticFn;
+/// [formualizer-docgen:schema:start]
+/// Name: PHONETIC
+/// Type: PhoneticFn
+/// Min args: 1
+/// Max args: 1
+/// Variadic: false
+/// Signature: PHONETIC(arg1: any@scalar)
+/// Arg schema: arg1{kinds=any,required=true,shape=scalar,by_ref=false,coercion=None,max=None,repeating=None,default=false}
+/// Caps: PURE
+/// [formualizer-docgen:schema:end]
+impl Function for PhoneticFn {
+    func_caps!(PURE);
+    fn name(&self) -> &'static str {
+        "PHONETIC"
+    }
+    fn min_args(&self) -> usize {
+        1
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        &ARG_ANY_ONE[..]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        _: &dyn FunctionContext<'b>,
+    ) -> Result<CalcValue<'b>, ExcelError> {
+        match text_arg(&args[0]) {
+            Ok(s) => Ok(CalcValue::Scalar(LiteralValue::Text(s))),
+            Err(e) => Ok(CalcValue::Scalar(LiteralValue::Error(e))),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ReptFn;
 /// Repeats a text string a specified number of times.
@@ -443,6 +576,8 @@ pub fn register_builtins() {
     crate::function_registry::register_builtin(Arc::new(CharFn));
     crate::function_registry::register_builtin(Arc::new(CodeFn));
     crate::function_registry::register_builtin(Arc::new(AscFn));
+    crate::function_registry::register_builtin(Arc::new(DbcsFn));
+    crate::function_registry::register_builtin(Arc::new(PhoneticFn));
     crate::function_registry::register_builtin(Arc::new(ReptFn));
 }
 

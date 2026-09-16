@@ -125,6 +125,39 @@ impl Function for ChooseFn {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
         }
 
+        // Excel: an array `index_num` selects element-wise — `CHOOSE({1,3},"a","b","c")` spills
+        // `{"a","c"}`; each pick is a scalar (a range choice contributes its top-left cell).
+        if let LiteralValue::Array(rows) = index_val {
+            let choices = args.len() - 1;
+            let out: Vec<Vec<LiteralValue>> = rows
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|idx| {
+                            let index = match idx {
+                                LiteralValue::Number(n) => n as i64,
+                                LiteralValue::Int(i) => i,
+                                LiteralValue::Error(e) => return LiteralValue::Error(e),
+                                _ => {
+                                    return LiteralValue::Error(ExcelError::new(
+                                        ExcelErrorKind::Value,
+                                    ));
+                                }
+                            };
+                            if index < 1 || index as usize > choices {
+                                return LiteralValue::Error(ExcelError::new(ExcelErrorKind::Value));
+                            }
+                            match args[index as usize].value() {
+                                Ok(v) => v.into_literal(),
+                                Err(e) => LiteralValue::Error(e),
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Array(out)));
+        }
+
         // NumberStrict index semantics (previously enforced by eager dispatch
         // validation): only genuine numbers are accepted; numeric text,
         // booleans, etc. yield #VALUE!.

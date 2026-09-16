@@ -75,6 +75,13 @@ pub(crate) struct InterpreterParameterBindings<'a> {
     pub(crate) literal_values: &'a [LiteralValue],
 }
 
+/// A union `(A1:A2,B1:B2)` has no single rectangle; by-reference consumers fall back to the value
+/// path, which stacks the areas (see `Interpreter::union_calc_values`).
+fn multi_area_reference_error() -> ExcelError {
+    ExcelError::new(ExcelErrorKind::Ref)
+        .with_message("A multi-area reference cannot be used as a single reference")
+}
+
 pub struct Interpreter<'a> {
     pub context: &'a dyn EvaluationContext,
     current_sheet: &'a str,
@@ -283,7 +290,7 @@ impl<'a> Interpreter<'a> {
                         args.iter().map(|n| ArgumentHandle::new(n, self)).collect();
                     let fctx = DefaultFunctionContext::new_with_sheet(
                         self.context,
-                        None,
+                        self.current_cell,
                         self.current_sheet,
                     );
                     if let Some(res) = fun.eval_reference(&handles, &fctx) {
@@ -301,6 +308,16 @@ impl<'a> Interpreter<'a> {
                 let lref = self.evaluate_ast_as_reference(left)?;
                 let rref = self.evaluate_ast_as_reference(right)?;
                 crate::reference::combine_references(&lref, &rref)
+            }
+            ASTNodeType::BinaryOp { op, left, right } if op == " " => {
+                let lref = self.evaluate_ast_as_reference(left)?;
+                let rref = self.evaluate_ast_as_reference(right)?;
+                self.intersect_reference_operands(&lref, &rref)
+            }
+            ASTNodeType::BinaryOp { op, .. } if op == "," => Err(multi_area_reference_error()),
+            ASTNodeType::UnaryOp { op, expr } if op == "#" => {
+                let anchor = self.evaluate_ast_as_reference(expr)?;
+                self.spill_range_of_anchor_reference(&anchor)
             }
             ASTNodeType::Array(_)
             | ASTNodeType::UnaryOp { .. }
@@ -346,8 +363,11 @@ impl<'a> Interpreter<'a> {
                     })
                     .collect();
 
-                let fctx =
-                    DefaultFunctionContext::new_with_sheet(self.context, None, self.current_sheet);
+                let fctx = DefaultFunctionContext::new_with_sheet(
+                    self.context,
+                    self.current_cell,
+                    self.current_sheet,
+                );
 
                 fun.eval_reference(&handles, &fctx).ok_or_else(|| {
                     ExcelError::new(ExcelErrorKind::Ref)
@@ -360,7 +380,10 @@ impl<'a> Interpreter<'a> {
                 right_id,
             } => {
                 let op = data_store.resolve_ast_string(*op_id);
-                if op != ":" {
+                if op == "," {
+                    return Err(multi_area_reference_error());
+                }
+                if op != ":" && op != " " {
                     return Err(ExcelError::new(ExcelErrorKind::Ref)
                         .with_message("Expression cannot be used as a reference"));
                 }
@@ -368,11 +391,201 @@ impl<'a> Interpreter<'a> {
                     self.evaluate_arena_ast_as_reference(*left_id, data_store, sheet_registry)?;
                 let rref =
                     self.evaluate_arena_ast_as_reference(*right_id, data_store, sheet_registry)?;
-                crate::reference::combine_references(&lref, &rref)
+                if op == ":" {
+                    crate::reference::combine_references(&lref, &rref)
+                } else {
+                    self.intersect_reference_operands(&lref, &rref)
+                }
+            }
+            AstNodeData::UnaryOp { op_id, expr_id }
+                if data_store.resolve_ast_string(*op_id) == "#" =>
+            {
+                let anchor =
+                    self.evaluate_arena_ast_as_reference(*expr_id, data_store, sheet_registry)?;
+                self.spill_range_of_anchor_reference(&anchor)
             }
             _ => Err(ExcelError::new(ExcelErrorKind::Ref)
                 .with_message("Expression cannot be used as a reference")),
         }
+    }
+
+    /// An intersection operand read in value context: a literal or array constant is not a
+    /// reference at all (`#VALUE!`, as in Excel); anything else resolves as a reference and
+    /// keeps its own error (`INDIRECT("bad") A1:B2` stays `#REF!`).
+    fn set_operand_reference(&self, node: &ASTNode) -> Result<ReferenceType, ExcelError> {
+        match &node.node_type {
+            ASTNodeType::Literal(_) | ASTNodeType::Array(_) => {
+                Err(ExcelError::new(ExcelErrorKind::Value)
+                    .with_message("Intersection operands must be references"))
+            }
+            _ => self.evaluate_ast_as_reference(node),
+        }
+    }
+
+    fn set_operand_arena_reference(
+        &self,
+        node_id: AstNodeId,
+        data_store: &DataStore,
+        sheet_registry: &SheetRegistry,
+    ) -> Result<ReferenceType, ExcelError> {
+        match data_store.get_node(node_id) {
+            Some(AstNodeData::Literal(_)) | Some(AstNodeData::Array { .. }) => {
+                Err(ExcelError::new(ExcelErrorKind::Value)
+                    .with_message("Intersection operands must be references"))
+            }
+            _ => self.evaluate_arena_ast_as_reference(node_id, data_store, sheet_registry),
+        }
+    }
+
+    /// `A1:B2 B1:C3` — the rectangle both operands share (`#NULL!` when disjoint). Named ranges
+    /// and structured references take part through their concrete definition; anything that is
+    /// not a reference is `#VALUE!`, as in Excel.
+    fn intersect_reference_operands(
+        &self,
+        left: &ReferenceType,
+        right: &ReferenceType,
+    ) -> Result<ReferenceType, ExcelError> {
+        let left = self.concrete_reference_for_set_op(left)?;
+        let right = self.concrete_reference_for_set_op(right)?;
+        crate::reference::intersect_references(&left, &right, self.current_sheet)
+    }
+
+    fn concrete_reference_for_set_op(
+        &self,
+        reference: &ReferenceType,
+    ) -> Result<ReferenceType, ExcelError> {
+        match reference {
+            ReferenceType::Cell { .. } | ReferenceType::Range { .. } => Ok(reference.clone()),
+            ReferenceType::NamedRange(name) => self
+                .context
+                .named_range_reference_definition(name)
+                .ok_or_else(|| {
+                    ExcelError::new(ExcelErrorKind::Value)
+                        .with_message(format!("{name} is not a range-valued name"))
+                }),
+            ReferenceType::Table(tref) => {
+                let geom = self.context.table_geometry(&tref.name).ok_or_else(|| {
+                    ExcelError::new(ExcelErrorKind::Value)
+                        .with_message(format!("Unknown table: {}", tref.name))
+                })?;
+                let current_row = self.current_cell.map(|c| c.coord.row() + 1);
+                let rect = crate::structured::lower_structured_rect(
+                    &geom,
+                    tref.specifier.as_ref(),
+                    current_row,
+                )?;
+                Ok(crate::structured::rect_to_reference(&rect, geom.sheet))
+            }
+            _ => Err(ExcelError::new(ExcelErrorKind::Value)
+                .with_message("Intersection operands must be references")),
+        }
+    }
+
+    /// The range the spilled-range operator `A1#` denotes: the dynamic-array spill anchored at
+    /// the operand cell (a formula that does not spill is its own 1×1 region). A non-formula
+    /// anchor is `#REF!`, as in Excel.
+    fn spill_range_of_anchor_reference(
+        &self,
+        anchor: &ReferenceType,
+    ) -> Result<ReferenceType, ExcelError> {
+        let (sheet, row, col) = match anchor {
+            ReferenceType::Cell {
+                sheet, row, col, ..
+            } => (sheet.clone(), *row, *col),
+            ReferenceType::Range {
+                sheet,
+                start_row: Some(sr),
+                start_col: Some(sc),
+                end_row: Some(er),
+                end_col: Some(ec),
+                ..
+            } if sr == er && sc == ec => (sheet.clone(), *sr, *sc),
+            _ => {
+                return Err(ExcelError::new(ExcelErrorKind::Ref)
+                    .with_message("The spilled-range operator # needs a single anchor cell"));
+            }
+        };
+        let sheet_name = sheet.as_deref().unwrap_or(self.current_sheet);
+        let (sr, sc, er, ec) = self
+            .context
+            .spill_range_of_anchor(sheet_name, row, col)
+            .ok_or_else(|| {
+                ExcelError::new(ExcelErrorKind::Ref)
+                    .with_message("The # operand does not anchor a spilled array")
+            })?;
+        Ok(ReferenceType::Range {
+            sheet: Some(sheet_name.to_string()),
+            start_row: Some(sr),
+            start_col: Some(sc),
+            end_row: Some(er),
+            end_col: Some(ec),
+            start_row_abs: true,
+            start_col_abs: true,
+            end_row_abs: true,
+            end_col_abs: true,
+        })
+    }
+
+    /// The union operator `(A1:A2,B1:B2)` in VALUE context: the areas stacked into one array so
+    /// aggregate consumers (`SUM`, `COUNT`, `MAX`, …) see every cell of every area. Equal-width
+    /// areas stack vertically, equal-height areas side by side, anything else flattens into a
+    /// single column — the shape only matters to the aggregate's cell walk.
+    fn union_calc_values(
+        &self,
+        left: crate::traits::CalcValue<'a>,
+        right: crate::traits::CalcValue<'a>,
+    ) -> Result<LiteralValue, ExcelError> {
+        fn rows_of(cv: crate::traits::CalcValue<'_>) -> Result<Vec<Vec<LiteralValue>>, ExcelError> {
+            match cv {
+                crate::traits::CalcValue::Scalar(LiteralValue::Array(rows)) => Ok(rows),
+                crate::traits::CalcValue::Scalar(v) => Ok(vec![vec![v]]),
+                crate::traits::CalcValue::Range(view) => {
+                    let (rows, cols) = view.dims();
+                    let mut out: Vec<Vec<LiteralValue>> = Vec::with_capacity(rows);
+                    view.for_each_row(&mut |row| {
+                        out.push(
+                            (0..cols)
+                                .map(|c| row.get(c).cloned().unwrap_or(LiteralValue::Empty))
+                                .collect(),
+                        );
+                        Ok(())
+                    })?;
+                    Ok(out)
+                }
+                crate::traits::CalcValue::Callable(_) => {
+                    Err(ExcelError::new(ExcelErrorKind::Value)
+                        .with_message("Union operands must be references"))
+                }
+            }
+        }
+        let mut left = rows_of(left)?;
+        let mut right = rows_of(right)?;
+        let width = |rows: &[Vec<LiteralValue>]| rows.iter().map(Vec::len).max().unwrap_or(0);
+        if left.is_empty() {
+            return Ok(LiteralValue::Array(right));
+        }
+        if right.is_empty() {
+            return Ok(LiteralValue::Array(left));
+        }
+        if width(&left) == width(&right) {
+            left.append(&mut right);
+            return Ok(LiteralValue::Array(left));
+        }
+        if left.len() == right.len() {
+            let lw = width(&left);
+            for (l, mut r) in left.iter_mut().zip(right.into_iter()) {
+                l.resize(lw, LiteralValue::Empty);
+                l.append(&mut r);
+            }
+            return Ok(LiteralValue::Array(left));
+        }
+        let column: Vec<Vec<LiteralValue>> = left
+            .into_iter()
+            .chain(right)
+            .flatten()
+            .map(|v| vec![v])
+            .collect();
+        Ok(LiteralValue::Array(column))
     }
 
     /* ===================  public  =================== */
@@ -489,9 +702,15 @@ impl<'a> Interpreter<'a> {
                 }
             }
             AstNodeData::UnaryOp { op_id, expr_id } => {
+                let op = data_store.resolve_ast_string(*op_id);
+                if op == "#" {
+                    let anchor =
+                        self.evaluate_arena_ast_as_reference(*expr_id, data_store, sheet_registry)?;
+                    let spill = self.spill_range_of_anchor_reference(&anchor)?;
+                    return self.eval_reference_to_calc(&spill);
+                }
                 let expr = self.evaluate_arena_ast(*expr_id, data_store, sheet_registry)?;
 
-                let op = data_store.resolve_ast_string(*op_id);
                 if op == "@" {
                     // Prefer reference-aware implicit intersection so we don't depend on
                     // RangeView absolute coordinates (important for lightweight test contexts).
@@ -540,6 +759,32 @@ impl<'a> Interpreter<'a> {
                         ))),
                         Err(e) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
                     };
+                }
+                if op == " " {
+                    let intersection = self
+                        .set_operand_arena_reference(*left_id, data_store, sheet_registry)
+                        .and_then(|lref| {
+                            Ok((
+                                lref,
+                                self.set_operand_arena_reference(
+                                    *right_id,
+                                    data_store,
+                                    sheet_registry,
+                                )?,
+                            ))
+                        })
+                        .and_then(|(lref, rref)| self.intersect_reference_operands(&lref, &rref));
+                    return match intersection {
+                        Ok(reference) => self.eval_reference_to_calc(&reference),
+                        Err(e) => Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
+                    };
+                }
+                if op == "," {
+                    let left = self.evaluate_arena_ast(*left_id, data_store, sheet_registry)?;
+                    let right = self.evaluate_arena_ast(*right_id, data_store, sheet_registry)?;
+                    return self
+                        .union_calc_values(left, right)
+                        .map(crate::traits::CalcValue::Scalar);
                 }
 
                 let left = self
@@ -643,8 +888,12 @@ impl<'a> Interpreter<'a> {
                     return callable.invoke(self, &eval_args);
                 }
 
-                Err(ExcelError::new(ExcelErrorKind::Name)
-                    .with_message(format!("Unknown function: {name}")))
+                // Same contract as `eval_function_to_calc`: an unknown function is a
+                // `#NAME?` value that IS*/IFERROR can catch, not a hard failure.
+                Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                    ExcelError::new(ExcelErrorKind::Name)
+                        .with_message(format!("Unknown function: {name}")),
+                )))
             }
         }
     }
@@ -903,10 +1152,21 @@ impl<'a> Interpreter<'a> {
 
         let lowered = self.lower_structured_table_ref(reference, self.current_sheet)?;
         let target = lowered.as_ref().unwrap_or(reference);
-        let view = self
-            .context
-            .resolve_range_view(target, self.current_sheet)?
-            .with_cancel_token(self.context.cancellation_token());
+        let view = match self.context.resolve_range_view(target, self.current_sheet) {
+            Ok(view) => view,
+            // A defined name that does not resolve is Excel's `#NAME?` *value*, not a
+            // failure of the formula: `=ISERROR(FOO)` is TRUE, `=IFERROR(FOO,1)` is 1 and
+            // `=ERROR.TYPE(FOO)` is 5. Surfacing it as `Err` would bypass every
+            // argument-level handler. Cancellation is the one genuine abort.
+            Err(e)
+                if matches!(target, ReferenceType::NamedRange(_))
+                    && e.kind != ExcelErrorKind::Cancelled =>
+            {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+            }
+            Err(e) => return Err(e),
+        };
+        let view = view.with_cancel_token(self.context.cancellation_token());
         Ok(crate::traits::CalcValue::Range(view))
     }
 
@@ -917,6 +1177,11 @@ impl<'a> Interpreter<'a> {
 
     /* ===================  unary ops  =================== */
     fn eval_unary(&self, op: &str, expr: &ASTNode) -> Result<LiteralValue, ExcelError> {
+        if op == "#" {
+            let anchor = self.evaluate_ast_as_reference(expr)?;
+            let spill = self.spill_range_of_anchor_reference(&anchor)?;
+            return Ok(self.eval_reference_to_calc(&spill)?.into_literal());
+        }
         if op == "@" {
             if let ASTNodeType::Reference { reference, .. } = &expr.node_type {
                 let reference = self.effective_reference(reference)?;
@@ -1142,6 +1407,23 @@ impl<'a> Interpreter<'a> {
             let l = self.evaluate_ast(left)?.into_literal();
             let r = self.evaluate_ast(right)?.into_literal();
             return self.compare(op, l, r);
+        }
+        // Reference set operators: intersection yields a reference (read like any range),
+        // union stacks its areas for the consuming aggregate.
+        if op == " " {
+            let intersection = self
+                .set_operand_reference(left)
+                .and_then(|lref| Ok((lref, self.set_operand_reference(right)?)))
+                .and_then(|(lref, rref)| self.intersect_reference_operands(&lref, &rref));
+            return match intersection {
+                Ok(reference) => Ok(self.eval_reference_to_calc(&reference)?.into_literal()),
+                Err(e) => Ok(LiteralValue::Error(e)),
+            };
+        }
+        if op == "," {
+            let l = self.evaluate_ast(left)?;
+            let r = self.evaluate_ast(right)?;
+            return self.union_calc_values(l, r);
         }
 
         let l_val = self.evaluate_ast(left)?.into_literal();
@@ -1414,9 +1696,16 @@ impl<'a> Interpreter<'a> {
                 (Ok(a), Ok(b)) => (a, b),
                 (Err(e), _) | (_, Err(e)) => return Ok(LiteralValue::Error(e)),
             };
-            // Excel domain: negative base with non-integer exponent -> #NUM!
+            // Excel domain: negative base with non-integer exponent -> #NUM!,
+            // 0^0 -> #NUM!, 0 to a negative power -> #DIV/0!
             if a < 0.0 && b.fract() != 0.0 {
                 return Ok(LiteralValue::Error(ExcelError::new_num()));
+            }
+            if a == 0.0 && b == 0.0 {
+                return Ok(LiteralValue::Error(ExcelError::new_num()));
+            }
+            if a == 0.0 && b < 0.0 {
+                return Ok(LiteralValue::Error(ExcelError::new_div()));
             }
             match crate::coercion::sanitize_numeric(a.powf(b)) {
                 Ok(n) => Ok(LiteralValue::Number(n)),
@@ -1608,8 +1897,14 @@ impl<'a> Interpreter<'a> {
                 };
                 let res = match (Self::compare_rank(&l), Self::compare_rank(&r)) {
                     (Some(1), Some(1)) => {
-                        let a = crate::coercion::to_number_strict(&l)?;
-                        let b = crate::coercion::to_number_strict(&r)?;
+                        // Excel compares numbers at 15 significant digits, so
+                        // `=0.1+0.2=0.3` is TRUE.
+                        let a = crate::coercion::to_excel_precision(
+                            crate::coercion::to_number_strict(&l)?,
+                        );
+                        let b = crate::coercion::to_excel_precision(
+                            crate::coercion::to_number_strict(&r)?,
+                        );
                         self.cmp_f64(a, b, op)
                     }
                     (Some(2), Some(2)) => match (&l, &r) {
