@@ -67,6 +67,21 @@ enum AggregationType {
     Average,
 }
 
+/// `false` for whole-column / whole-row references (`A:A`, `1:1`), whose views are trimmed to
+/// the used region and therefore legitimately differ in size between arguments.
+fn is_bounded_range_arg(arg: &ArgumentHandle<'_, '_>) -> bool {
+    match arg.as_reference_or_eval() {
+        Ok(formualizer_parse::parser::ReferenceType::Range {
+            start_row,
+            end_row,
+            start_col,
+            end_col,
+            ..
+        }) => start_row.is_some() && end_row.is_some() && start_col.is_some() && end_col.is_some(),
+        _ => true,
+    }
+}
+
 fn eval_if_family<'a, 'b>(
     args: &[ArgumentHandle<'a, 'b>],
     ctx: &dyn FunctionContext<'b>,
@@ -76,6 +91,10 @@ fn eval_if_family<'a, 'b>(
     let mut sum_view: Option<crate::engine::range_view::RangeView<'_>> = None;
     let mut sum_scalar: Option<LiteralValue> = None;
     let mut crit_specs = Vec::new();
+    // Shapes of the bounded (non whole-column/row) ranges of a *IFS call; Excel requires them
+    // to be identical. Open-ended references are trimmed to their used regions and padded
+    // instead, so they are excluded from the check.
+    let mut bounded_shapes: Vec<(usize, usize)> = Vec::new();
 
     if !multi {
         // Single criterion: IF(range, criteria, [target_range])
@@ -128,8 +147,11 @@ fn eval_if_family<'a, 'b>(
                 let mut rv = args[i].range_view().ok();
                 let mut val: Option<LiteralValue> = None;
 
-                // Broadcast semantics: treat 1x1 criteria ranges as scalar criteria.
                 if let Some(ref view) = rv {
+                    if is_bounded_range_arg(&args[i]) {
+                        bounded_shapes.push(view.dims());
+                    }
+                    // Broadcast semantics: treat 1x1 criteria ranges as scalar criteria.
                     let (r, c) = view.dims();
                     if r == 1 && c == 1 {
                         val = Some(view.as_1x1().unwrap_or(LiteralValue::Empty));
@@ -154,6 +176,9 @@ fn eval_if_family<'a, 'b>(
                 )));
             }
             if let Ok(v) = args[0].range_view() {
+                if is_bounded_range_arg(&args[0]) {
+                    bounded_shapes.push(v.dims());
+                }
                 sum_view = Some(v);
             } else {
                 sum_scalar = Some(args[0].value()?.into_literal());
@@ -162,8 +187,11 @@ fn eval_if_family<'a, 'b>(
                 let mut rv = args[i].range_view().ok();
                 let mut val: Option<LiteralValue> = None;
 
-                // Broadcast semantics: treat 1x1 criteria ranges as scalar criteria.
                 if let Some(ref view) = rv {
+                    if is_bounded_range_arg(&args[i]) {
+                        bounded_shapes.push(view.dims());
+                    }
+                    // Broadcast semantics: treat 1x1 criteria ranges as scalar criteria.
                     let (r, c) = view.dims();
                     if r == 1 && c == 1 {
                         val = Some(view.as_1x1().unwrap_or(LiteralValue::Empty));
@@ -179,6 +207,18 @@ fn eval_if_family<'a, 'b>(
                 crit_specs.push((rv, pred, val));
             }
         }
+    }
+
+    // Excel: every criteria_range of the *IFS family must have the same shape as the
+    // target range (and as each other) — otherwise `#VALUE!`.
+    if multi && bounded_shapes.windows(2).any(|w| w[0] != w[1]) {
+        let (a, b) = (bounded_shapes[0], bounded_shapes[bounded_shapes.len() - 1]);
+        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+            ExcelError::new_value().with_message(format!(
+                "*IFS ranges must have the same shape: {}x{} vs {}x{}",
+                a.0, a.1, b.0, b.1
+            )),
+        )));
     }
 
     // Determine union dimensions
@@ -347,8 +387,8 @@ fn eval_if_family<'a, 'b>(
                                         if m0.null_count() == 0 {
                                             m0
                                         } else {
-                                            // Fill nulls using per-cell matching so blanks can still match numeric
-                                            // criteria (e.g. blank == 0 in Excel criteria semantics).
+                                            // Fill nulls using per-cell matching so numeric text ("1") can still match
+                                            // a numeric criterion (blanks never do).
                                             let view = crit_specs[j].0.as_ref().unwrap();
                                             let mut bb =
                                                 arrow_array::builder::BooleanBuilder::with_capacity(
@@ -1596,7 +1636,7 @@ mod tests {
     }
 
     #[test]
-    fn sumif_numeric_zero_matches_blank_in_text_column() {
+    fn sumif_numeric_zero_does_not_match_blank_in_text_column() {
         // Regression test: if the criteria range is text-typed (no numeric fast-path column),
         // numeric criteria should still match blanks (Excel semantics: blank coerces to 0).
         let wb = TestWorkbook::new().with_function(std::sync::Arc::new(SumIfFn));
@@ -1623,7 +1663,8 @@ mod tests {
             f.dispatch(&args, &ctx.function_context(None))
                 .unwrap()
                 .into_literal(),
-            LiteralValue::Number(5.0)
+            LiteralValue::Number(0.0),
+            "Excel: a blank cell never satisfies a numeric criterion"
         );
     }
 
@@ -1894,7 +1935,7 @@ mod tests {
     }
 
     #[test]
-    fn sumifs_mismatched_ranges_now_pad_with_empty() {
+    fn sumifs_mismatched_ranges_are_value_error() {
         let wb = TestWorkbook::new().with_function(std::sync::Arc::new(SumIfsFn));
         let ctx = interp(&wb);
         // sum_range: 2x2
@@ -1916,17 +1957,19 @@ mod tests {
             ArgumentHandle::new(&crit, &ctx),
         ];
         let f = ctx.context.get_function("", "SUMIFS").unwrap();
-        // With padding, sum_range gets padded with empties for row 3
-        // Rows 1-2 match criteria (all 1s), row 3 has empties which don't match =1
-        // So we sum: 1 + 2 + 3 + 4 = 10
-        assert_eq!(
-            f.dispatch(&args, &ctx.function_context(None)).unwrap(),
-            LiteralValue::Number(10.0)
+        // Excel: bounded ranges of different shapes are a #VALUE! error.
+        let out = f
+            .dispatch(&args, &ctx.function_context(None))
+            .unwrap()
+            .into_literal();
+        assert!(
+            matches!(out, LiteralValue::Error(ref e) if e.kind == formualizer_common::ExcelErrorKind::Value),
+            "expected #VALUE!, got {out:?}"
         );
     }
 
     #[test]
-    fn countifs_mismatched_ranges_pad_and_broadcast() {
+    fn countifs_mismatched_ranges_are_value_error() {
         let wb = TestWorkbook::new().with_function(std::sync::Arc::new(CountIfsFn));
         let ctx = interp(&wb);
         // criteria_range1: 2x1 -> [1,1]
@@ -1951,15 +1994,19 @@ mod tests {
             ArgumentHandle::new(&c2, &ctx),
         ];
         let f = ctx.context.get_function("", "COUNTIFS").unwrap();
-        // Union rows = 3; row3 has r1=Empty (padded), which doesn't match =1; expect 2
-        assert_eq!(
-            f.dispatch(&args, &ctx.function_context(None)).unwrap(),
-            LiteralValue::Number(2.0)
+        // Excel: bounded ranges of different shapes are a #VALUE! error.
+        let out = f
+            .dispatch(&args, &ctx.function_context(None))
+            .unwrap()
+            .into_literal();
+        assert!(
+            matches!(out, LiteralValue::Error(ref e) if e.kind == formualizer_common::ExcelErrorKind::Value),
+            "expected #VALUE!, got {out:?}"
         );
     }
 
     #[test]
-    fn averageifs_mismatched_ranges_pad() {
+    fn averageifs_mismatched_ranges_are_value_error() {
         let wb = TestWorkbook::new().with_function(std::sync::Arc::new(AverageIfsFn));
         let ctx = interp(&wb);
         // avg_range: 2x1 -> [10,20]
@@ -1980,10 +2027,14 @@ mod tests {
             ArgumentHandle::new(&c1, &ctx),
         ];
         let f = ctx.context.get_function("", "AVERAGEIFS").unwrap();
-        // Only first two rows match; expect (10+20)/2 = 15
-        assert_eq!(
-            f.dispatch(&args, &ctx.function_context(None)).unwrap(),
-            LiteralValue::Number(15.0)
+        // Excel: bounded ranges of different shapes are a #VALUE! error.
+        let out = f
+            .dispatch(&args, &ctx.function_context(None))
+            .unwrap()
+            .into_literal();
+        assert!(
+            matches!(out, LiteralValue::Error(ref e) if e.kind == formualizer_common::ExcelErrorKind::Value),
+            "expected #VALUE!, got {out:?}"
         );
     }
 
