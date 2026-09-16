@@ -603,3 +603,95 @@ fn too_few_arguments_is_na_like_the_js_engine_and_sheets() {
         LiteralValue::Text("bad".into())
     );
 }
+
+// ───────────── W4-A follow-up (review of rowsncolumns/spreadsheet#609) ─────────────
+
+/// An error anywhere in `values` or `timeline` is the result (`series_number` propagates it; the
+/// JS engine skipped the pair and forecast from the remaining points). Text and blanks are skipped.
+#[test]
+fn forecast_ets_family_propagates_an_error_in_the_series() {
+    let mut e = engine_with_series("linear");
+    e.set_cell_formula("Sheet1", 5, 1, parse("=1/0").unwrap())
+        .unwrap();
+    for formula in [
+        "=FORECAST.ETS(11,A1:A10,B1:B10)",
+        "=FORECAST.ETS.CONFINT(11,A1:A10,B1:B10)",
+        "=FORECAST.ETS.SEASONALITY(A1:A10,B1:B10)",
+        "=FORECAST.ETS.STAT(A1:A10,B1:B10,1)",
+        // …and in the timeline.
+        "=FORECAST.ETS(11,B1:B10,A1:A10)",
+    ] {
+        assert_error(eval_in(&mut e, formula), ExcelErrorKind::Div, formula);
+    }
+    // A text entry in the series is skipped, not an error.
+    e.set_cell_value("Sheet1", 5, 1, LiteralValue::Text("n/a".into()))
+        .unwrap();
+    let skipped = eval_in(&mut e, "=FORECAST.ETS(11,A1:A10,B1:B10,0)");
+    assert!(
+        matches!(skipped, LiteralValue::Number(_) | LiteralValue::Int(_)),
+        "text is skipped: {skipped:?}"
+    );
+}
+
+/// C-J17's real defect was in the JS engine's `ROWS` / `COLUMNS`, which rejected every array
+/// argument (`ROWS(RANDARRAY(3,2))*10+COLUMNS(RANDARRAY(3,2))` was `#VALUE!`). Pin the Rust
+/// engine's shape reporting for arrays, dynamic-array results and scalars — and, new here, that
+/// an error argument is the result (`ROWS(NA())` was 1).
+#[test]
+fn rows_and_columns_report_array_shapes_and_propagate_errors() {
+    let mut e = Engine::new(TestWorkbook::new(), EvalConfig::default());
+    for (formula, expected) in [
+        ("=ROWS({1,2;3,4})", 2.0),
+        ("=COLUMNS({1,2;3,4})", 2.0),
+        ("=ROWS(SEQUENCE(3,2))", 3.0),
+        ("=COLUMNS(SEQUENCE(3,2))", 2.0),
+        ("=ROWS(RANDARRAY(3,2))", 3.0),
+        ("=COLUMNS(RANDARRAY(3,2))", 2.0),
+        ("=ROWS(SORT(RANDARRAY(3,2)))", 3.0),
+        ("=ROWS(RANDARRAY(3,2))*10+COLUMNS(RANDARRAY(3,2))", 32.0),
+        ("=ROWS(5)", 1.0),
+        ("=COLUMNS(\"x\")", 1.0),
+        ("=ROWS(TRUE)", 1.0),
+        ("=ROWS(A1)", 1.0),
+        ("=ROWS(A1:B3)", 3.0),
+        ("=COLUMNS(A1:B3)", 2.0),
+    ] {
+        assert_eq!(as_num(&eval_in(&mut e, formula), formula), expected, "{formula}");
+    }
+    assert_error(eval_in(&mut e, "=ROWS(NA())"), ExcelErrorKind::Na, "ROWS(NA())");
+    assert_error(eval_in(&mut e, "=ROWS(1/0)"), ExcelErrorKind::Div, "ROWS(1/0)");
+    assert_error(
+        eval_in(&mut e, "=COLUMNS(#REF!)"),
+        ExcelErrorKind::Ref,
+        "COLUMNS(#REF!)",
+    );
+}
+
+/// The too-few-arguments contract beyond the five cases #609 pinned — the JS engine now agrees on
+/// each of these (it surfaced `#NAME?`, a parse-level `#ERROR!` or `#VALUE!` before).
+#[test]
+fn too_few_arguments_contract_covers_lambda_helpers_index_and_criteria_functions() {
+    let mut e = Engine::new(TestWorkbook::new(), EvalConfig::default());
+    for formula in [
+        "=LET(x)",
+        "=LET(x,1)",
+        "=LAMBDA()",
+        "=INDEX()",
+        "=SUMIF()",
+        "=SUMIF(A1:A5)",
+        "=COUNTIF(A1:A3)",
+        "=COUNTIFS(A1:A3)",
+        "=MAP(LAMBDA(v,v))",
+        "=MAP(A1:A3)",
+        "=BYROW(A1:A3)",
+        "=BYCOL(A1:A3)",
+        "=MAKEARRAY(2,2)",
+    ] {
+        assert_error(eval_in(&mut e, formula), ExcelErrorKind::Na, formula);
+    }
+    // Enough arguments of the wrong kind is a different error: an even LET count / a non-lambda.
+    assert_error(eval_in(&mut e, "=LET(x,1,2,y)"), ExcelErrorKind::Value, "LET(x,1,2,y)");
+    assert_error(eval_in(&mut e, "=REDUCE(0,A1:A3)"), ExcelErrorKind::Value, "REDUCE(0,A1:A3)");
+    // A body-less LAMBDA is a lambda value as the cell result.
+    assert_error(eval_in(&mut e, "=LAMBDA(x)"), ExcelErrorKind::Calc, "LAMBDA(x)");
+}
