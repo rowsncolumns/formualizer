@@ -209,8 +209,26 @@ impl Function for AndFn {
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         let mut first_error: Option<LiteralValue> = None;
         for h in args {
+            let from_range = h.range_view().is_ok();
             let it = h.lazy_values_owned()?;
             for v in it {
+                let v = match v {
+                    LiteralValue::Text(_) => match logical_text_arg(&v, from_range) {
+                        None => continue,
+                        Some(Ok(b)) => LiteralValue::Boolean(b),
+                        Some(Err(_)) => {
+                            if first_error.is_none() {
+                                first_error = Some(LiteralValue::Error(
+                                    ExcelError::new_value().with_message(
+                                        "AND expects logical/numeric inputs; text is not coercible",
+                                    ),
+                                ));
+                            }
+                            continue;
+                        }
+                    },
+                    v => v,
+                };
                 match v {
                     LiteralValue::Error(_) => {
                         if first_error.is_none() {
@@ -334,8 +352,26 @@ impl Function for OrFn {
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         let mut first_error: Option<LiteralValue> = None;
         for h in args {
+            let from_range = h.range_view().is_ok();
             let it = h.lazy_values_owned()?;
             for v in it {
+                let v = match v {
+                    LiteralValue::Text(_) => match logical_text_arg(&v, from_range) {
+                        None => continue,
+                        Some(Ok(b)) => LiteralValue::Boolean(b),
+                        Some(Err(_)) => {
+                            if first_error.is_none() {
+                                first_error = Some(LiteralValue::Error(
+                                    ExcelError::new_value().with_message(
+                                        "OR expects logical/numeric inputs; text is not coercible",
+                                    ),
+                                ));
+                            }
+                            continue;
+                        }
+                    },
+                    v => v,
+                };
                 match v {
                     LiteralValue::Error(_) => {
                         if first_error.is_none() {
@@ -496,10 +532,28 @@ fn if_truthy(v: &LiteralValue) -> Result<bool, ExcelError> {
         LiteralValue::Number(n) => Ok(*n != 0.0),
         LiteralValue::Int(i) => Ok(*i != 0),
         LiteralValue::Empty => Ok(false),
-        // An error or text condition surfaces as #VALUE! (the engine's documented
+        // Excel coerces the text booleans ("TRUE"/"FALSE", any case) in a
+        // direct condition; any other text is #VALUE!.
+        LiteralValue::Text(_) => crate::coercion::to_logical(v).map_err(|_| {
+            ExcelError::new_value().with_message("IF condition must be boolean or number")
+        }),
+        // An error condition surfaces as #VALUE! (the engine's documented
         // contract, pinned by the SCC runtime oracle for settled #CIRC reads).
         _ => Err(ExcelError::new_value().with_message("IF condition must be boolean or number")),
     }
+}
+
+/// Text handed to AND/OR/XOR: Excel ignores text inside references and arrays
+/// but coerces a direct text argument (`AND("TRUE")` is TRUE, `AND("a")` is
+/// #VALUE!). `None` means "skip this value".
+pub(crate) fn logical_text_arg(
+    text_value: &LiteralValue,
+    from_range: bool,
+) -> Option<Result<bool, ExcelError>> {
+    if from_range {
+        return None;
+    }
+    Some(crate::coercion::to_logical(text_value))
 }
 
 /// `IF` over an array condition: element `(i, j)` takes the matching element of the

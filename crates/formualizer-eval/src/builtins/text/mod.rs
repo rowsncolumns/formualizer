@@ -6,8 +6,9 @@
 //! REGEXTEST, REGEXEXTRACT, REGEXREPLACE (Excel 2024 regex functions)
 
 mod array_text; // TEXTSPLIT, VALUETOTEXT, ARRAYTOTEXT
+mod bahttext; // BAHTTEXT
 mod byte; // FINDB, LEFTB, LENB, MIDB, REPLACEB, RIGHTB, SEARCHB
-mod char_code_rept; // CHAR, CODE, REPT
+mod char_code_rept; // CHAR, CODE, ASC, DBCS/JIS, PHONETIC, REPT
 mod extended; // CLEAN, UNICHAR, UNICODE, TEXTBEFORE, TEXTAFTER, DOLLAR, FIXED
 mod find_search_exact; // FIND, SEARCH, EXACT
 mod len_left_right; // LEN, LEFT, RIGHT
@@ -20,6 +21,7 @@ mod value_text; // VALUE, TEXT
 mod text_tests; // Comprehensive test suite
 
 pub use array_text::*;
+pub use bahttext::*;
 pub use byte::*;
 pub use char_code_rept::*;
 pub use extended::*;
@@ -32,6 +34,7 @@ pub use value_text::*;
 
 pub fn register_builtins() {
     array_text::register_builtins();
+    bahttext::register_builtins();
     byte::register_builtins();
     char_code_rept::register_builtins();
     extended::register_builtins();

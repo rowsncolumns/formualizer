@@ -50,14 +50,7 @@ fn to_text<'a, 'b>(a: &ArgumentHandle<'a, 'b>) -> Result<String, ExcelError> {
             }
         }
         LiteralValue::Int(i) => i.to_string(),
-        LiteralValue::Number(f) => {
-            let s = f.to_string();
-            if s.ends_with(".0") {
-                s[..s.len() - 2].into()
-            } else {
-                s
-            }
-        }
+        LiteralValue::Number(f) => formualizer_common::number_to_excel_text(f),
         LiteralValue::Error(e) => return Err(e),
         other => other.to_string(),
     })
@@ -65,11 +58,11 @@ fn to_text<'a, 'b>(a: &ArgumentHandle<'a, 'b>) -> Result<String, ExcelError> {
 
 #[derive(Debug)]
 pub struct TrimFn;
-/// Removes leading/trailing whitespace and collapses internal runs to single spaces.
+/// Removes leading/trailing spaces and collapses internal runs of spaces to single spaces.
 ///
 /// # Remarks
-/// - Leading and trailing whitespace is removed.
-/// - Consecutive whitespace inside the text is collapsed to one ASCII space.
+/// - Only the ASCII space character (32) is trimmed and collapsed, as in Excel; tabs, line
+///   breaks and the non-breaking space (160) are left in place (use CLEAN / SUBSTITUTE).
 /// - Non-text inputs are coerced to text before trimming.
 /// - Errors are propagated unchanged.
 ///
@@ -94,7 +87,7 @@ pub struct TrimFn;
 ///   - SUBSTITUTE
 /// faq:
 ///   - q: "What whitespace does TRIM normalize?"
-///     a: "It trims edges and collapses internal whitespace runs to single spaces."
+///     a: "Only ASCII spaces: it trims them from both ends and collapses internal runs to one space. Non-breaking spaces, tabs and line breaks are kept, matching Excel."
 /// ```
 /// [formualizer-docgen:schema:start]
 /// Name: TRIM
@@ -123,10 +116,10 @@ impl Function for TrimFn {
         _: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         let s = to_text(&args[0])?;
-        let mut out = String::new();
+        let mut out = String::with_capacity(s.len());
         let mut prev_space = false;
         for ch in s.chars() {
-            if ch.is_whitespace() {
+            if ch == ' ' {
                 prev_space = true;
             } else {
                 if prev_space && !out.is_empty() {
@@ -136,9 +129,7 @@ impl Function for TrimFn {
                 prev_space = false;
             }
         }
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(
-            out.trim().into(),
-        )))
+        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(out)))
     }
 }
 
@@ -147,7 +138,7 @@ pub struct UpperFn;
 /// Converts text to uppercase.
 ///
 /// # Remarks
-/// - Uses ASCII uppercasing semantics in this implementation.
+/// - Full Unicode uppercasing (`UPPER("aé")` → `"AÉ"`), as in Excel.
 /// - Numbers and booleans are first converted to text.
 /// - Errors are propagated unchanged.
 ///
@@ -172,7 +163,7 @@ pub struct UpperFn;
 ///   - EXACT
 /// faq:
 ///   - q: "Is uppercasing fully Unicode-aware?"
-///     a: "This implementation uses ASCII uppercasing semantics, so non-ASCII case rules are limited."
+///     a: "Yes — accented and non-Latin letters are uppercased with Unicode case mapping, like Excel."
 /// ```
 /// [formualizer-docgen:schema:start]
 /// Name: UPPER
@@ -201,7 +192,7 @@ impl Function for UpperFn {
         _: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(
-            to_text(&args[0])?.to_ascii_uppercase(),
+            to_text(&args[0])?.to_uppercase(),
         )))
     }
 }
@@ -210,7 +201,7 @@ pub struct LowerFn;
 /// Converts text to lowercase.
 ///
 /// # Remarks
-/// - Uses ASCII lowercasing semantics in this implementation.
+/// - Full Unicode lowercasing (`LOWER("AÉ")` → `"aé"`), as in Excel.
 /// - Numbers and booleans are first converted to text.
 /// - Errors are propagated unchanged.
 ///
@@ -264,7 +255,7 @@ impl Function for LowerFn {
         _: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Text(
-            to_text(&args[0])?.to_ascii_lowercase(),
+            to_text(&args[0])?.to_lowercase(),
         )))
     }
 }
@@ -299,7 +290,7 @@ pub struct ProperFn;
 ///   - TRIM
 /// faq:
 ///   - q: "How are word boundaries determined?"
-///     a: "Any non-alphanumeric character starts a new word boundary for capitalization."
+///     a: "Any non-letter character — punctuation, spaces and digits alike — starts a new word, so PROPER(\"2nd\") is \"2Nd\" as in Excel."
 /// ```
 /// [formualizer-docgen:schema:start]
 /// Name: PROPER
@@ -331,7 +322,7 @@ impl Function for ProperFn {
         let mut out = String::new();
         let mut new_word = true;
         for ch in s.chars() {
-            if ch.is_alphanumeric() {
+            if ch.is_alphabetic() {
                 if new_word {
                     for c in ch.to_uppercase() {
                         out.push(c);
@@ -599,13 +590,7 @@ impl Function for TextJoinFn {
                                 }
                             }
                             LiteralValue::Int(i) => i.to_string(),
-                            LiteralValue::Number(f) => {
-                                let s = f.to_string();
-                                match s.strip_suffix(".0") {
-                                    Some(trimmed) => trimmed.to_string(),
-                                    None => s,
-                                }
-                            }
+                            LiteralValue::Number(f) => formualizer_common::number_to_excel_text(f),
                             _ => v.to_string(),
                         };
                         if !ignore_empty || !s.is_empty() {

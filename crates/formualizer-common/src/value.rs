@@ -209,6 +209,102 @@ impl LiteralValue {
     }
 }
 
+/// Excel's number → text conversion, as used by `&`, `LEN`, `TEXT`-family argument coercion and
+/// every other place a number is read as text: at most 15 significant digits (so `1/3` is
+/// `0.333333333333333`, not the 16–17 digits a shortest-round-trip `f64` print produces), trailing
+/// zeros dropped, and scientific notation with a signed two-digit exponent when the rounded
+/// magnitude is below 1E-4 or at least 1E+15 (`1E-05`, `1.23456789012346E+17`).
+pub fn number_to_excel_text(n: f64) -> String {
+    if n == 0.0 {
+        return "0".to_string();
+    }
+    if !n.is_finite() {
+        return n.to_string();
+    }
+    // `{:.14e}` rounds to 15 significant digits on the exact decimal expansion and exposes the
+    // decimal exponent of the *rounded* value (9.99999999999999999E14 → 1e15).
+    let sci = format!("{n:.14e}");
+    let (mantissa, exp) = sci
+        .split_once('e')
+        .expect("f64 `{:e}` always has an exponent");
+    let exp: i32 = exp.parse().expect("f64 `{:e}` exponent is an integer");
+    let mantissa = match mantissa.find('.') {
+        Some(_) => mantissa.trim_end_matches('0').trim_end_matches('.'),
+        None => mantissa,
+    };
+    if exp < -4 || exp >= 15 {
+        let sign = if exp < 0 { '-' } else { '+' };
+        return format!("{mantissa}E{sign}{:02}", exp.abs());
+    }
+    let (negative, mantissa) = match mantissa.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, mantissa),
+    };
+    // 1–15 significant digits, the first non-zero; the value is `d₁.d₂…dₖ × 10^exp`.
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let int_digits = exp + 1;
+    let body = if int_digits <= 0 {
+        format!("0.{}{digits}", "0".repeat((-int_digits) as usize))
+    } else if int_digits as usize >= digits.len() {
+        format!("{digits}{}", "0".repeat(int_digits as usize - digits.len()))
+    } else {
+        let (int_part, frac_part) = digits.split_at(int_digits as usize);
+        format!("{int_part}.{frac_part}")
+    };
+    if negative { format!("-{body}") } else { body }
+}
+
+#[cfg(test)]
+mod number_to_excel_text_tests {
+    use super::number_to_excel_text;
+
+    #[test]
+    fn rounds_to_fifteen_significant_digits() {
+        assert_eq!(number_to_excel_text(1.0 / 3.0), "0.333333333333333");
+        assert_eq!(number_to_excel_text(2.0 / 3.0), "0.666666666666667");
+        assert_eq!(number_to_excel_text(0.1 + 0.2), "0.3");
+        assert_eq!(number_to_excel_text(-1.0 / 3.0), "-0.333333333333333");
+        assert_eq!(number_to_excel_text(1234.5), "1234.5");
+        assert_eq!(number_to_excel_text(123456789012.0), "123456789012");
+        assert_eq!(number_to_excel_text(100000000000000.0), "100000000000000");
+        assert_eq!(number_to_excel_text(999999999999999.0), "999999999999999");
+        assert_eq!(
+            number_to_excel_text(1234567890.123456789),
+            "1234567890.12346"
+        );
+    }
+
+    #[test]
+    fn integers_and_zero() {
+        assert_eq!(number_to_excel_text(0.0), "0");
+        assert_eq!(number_to_excel_text(-0.0), "0");
+        assert_eq!(number_to_excel_text(42.0), "42");
+        assert_eq!(number_to_excel_text(-7.0), "-7");
+        assert_eq!(number_to_excel_text(0.0001), "0.0001");
+        assert_eq!(number_to_excel_text(0.00012345), "0.00012345");
+    }
+
+    #[test]
+    fn scientific_outside_excel_general_range() {
+        assert_eq!(number_to_excel_text(1e15), "1E+15");
+        assert_eq!(
+            number_to_excel_text(1234567890123456.0),
+            "1.23456789012346E+15"
+        );
+        assert_eq!(
+            number_to_excel_text(123456789012345678.0),
+            "1.23456789012346E+17"
+        );
+        assert_eq!(number_to_excel_text(-1e20), "-1E+20");
+        assert_eq!(number_to_excel_text(1e-5), "1E-05");
+        assert_eq!(number_to_excel_text(0.000012345), "1.2345E-05");
+        assert_eq!(number_to_excel_text(1e-7), "1E-07");
+        assert_eq!(number_to_excel_text(1.5e100), "1.5E+100");
+        // Rounding to 15 digits can carry into the next decade
+        assert_eq!(number_to_excel_text(999999999999999.9), "1E+15");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

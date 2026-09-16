@@ -173,6 +173,7 @@ mod live_edges;
 mod scc_iterate;
 mod scc_runtime_cycles;
 mod scc_runtime_property;
+mod scc_zero_policy;
 mod short_circuit_dispatch;
 mod zz_sumproduct_abs_repro;
 mod zz_sumproduct_search_repro;

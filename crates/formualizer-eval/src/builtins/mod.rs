@@ -1,6 +1,7 @@
 pub mod database; // Phase 4 database functions (DSUM, DAVERAGE, etc.)
 pub mod datetime; // Phase 3 date and time functions
 pub mod engineering; // Phase 2 engineering functions (bitwise, base conversion, complex numbers, etc.)
+pub mod external; // External-service functions (CUBE*, RTD, STOCKHISTORY, WEBSERVICE, …) + FILTERXML
 pub mod financial; // Phase 5 financial functions
 pub mod info; // Sprint 9 info / error introspection
 pub mod lambda;
@@ -21,6 +22,7 @@ pub fn load_builtins() {
     database::register_builtins();
     datetime::register_builtins();
     engineering::register_builtins();
+    external::register_builtins();
     financial::register_builtins();
     lambda::register_builtins();
     logical::register_builtins();

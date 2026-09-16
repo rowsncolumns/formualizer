@@ -3333,23 +3333,61 @@ impl Function for LognormDistFn {
         let mean = coerce_num(&scalar_like_value(&args[1])?)?;
         let std_dev = coerce_num(&scalar_like_value(&args[2])?)?;
         let cumulative = coerce_num(&scalar_like_value(&args[3])?)? != 0.0;
+        Ok(scalar_result(lognorm_dist(x, mean, std_dev, cumulative)))
+    }
+}
 
-        if x <= 0.0 || std_dev <= 0.0 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_num(),
-            )));
-        }
+/// Wrap a computed value (or its Excel error) as a scalar cell value.
+fn scalar_result(v: Result<f64, ExcelError>) -> crate::traits::CalcValue<'static> {
+    crate::traits::CalcValue::Scalar(match v {
+        Ok(n) => LiteralValue::Number(n),
+        Err(e) => LiteralValue::Error(e),
+    })
+}
 
-        let z = (x.ln() - mean) / std_dev;
+fn lognorm_dist(x: f64, mean: f64, std_dev: f64, cumulative: bool) -> Result<f64, ExcelError> {
+    if x <= 0.0 || std_dev <= 0.0 {
+        return Err(ExcelError::new_num());
+    }
+    let z = (x.ln() - mean) / std_dev;
+    Ok(if cumulative {
+        std_norm_cdf(z)
+    } else {
+        std_norm_pdf(z) / (x * std_dev)
+    })
+}
 
-        let result = if cumulative {
-            std_norm_cdf(z)
-        } else {
-            std_norm_pdf(z) / (x * std_dev)
-        };
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            result,
-        )))
+/// `LOGNORMDIST(x, mean, standard_dev)` — Excel 2007 name for the cumulative `LOGNORM.DIST`.
+#[derive(Debug)]
+pub struct LognormdistFn;
+impl Function for LognormdistFn {
+    func_caps!(PURE);
+    fn name(&self) -> &'static str {
+        "LOGNORMDIST"
+    }
+    fn min_args(&self) -> usize {
+        3
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        use std::sync::LazyLock;
+        static SCHEMA: LazyLock<Vec<ArgSchema>> = LazyLock::new(|| {
+            vec![
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+            ]
+        });
+        &SCHEMA[..]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        _ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        let x = coerce_num(&scalar_like_value(&args[0])?)?;
+        let mean = coerce_num(&scalar_like_value(&args[1])?)?;
+        let std_dev = coerce_num(&scalar_like_value(&args[2])?)?;
+        Ok(scalar_result(lognorm_dist(x, mean, std_dev, true)))
     }
 }
 
@@ -3392,6 +3430,9 @@ impl Function for LognormInvFn {
     func_caps!(PURE);
     fn name(&self) -> &'static str {
         "LOGNORM.INV"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["LOGINV"]
     }
     fn min_args(&self) -> usize {
         3
@@ -4498,6 +4539,9 @@ impl Function for BinomDistFn {
     fn name(&self) -> &'static str {
         "BINOM.DIST"
     }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["BINOMDIST"]
+    }
     fn min_args(&self) -> usize {
         4
     }
@@ -4590,6 +4634,9 @@ impl Function for PoissonDistFn {
     fn name(&self) -> &'static str {
         "POISSON.DIST"
     }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["POISSON"]
+    }
     fn min_args(&self) -> usize {
         3
     }
@@ -4676,6 +4723,9 @@ impl Function for ExponDistFn {
     fn name(&self) -> &'static str {
         "EXPON.DIST"
     }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["EXPONDIST"]
+    }
     fn min_args(&self) -> usize {
         3
     }
@@ -4758,6 +4808,9 @@ impl Function for GammaDistFn {
     func_caps!(PURE);
     fn name(&self) -> &'static str {
         "GAMMA.DIST"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["GAMMADIST"]
     }
     fn min_args(&self) -> usize {
         4
@@ -4844,6 +4897,9 @@ impl Function for WeibullDistFn {
     func_caps!(PURE);
     fn name(&self) -> &'static str {
         "WEIBULL.DIST"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["WEIBULL"]
     }
     fn min_args(&self) -> usize {
         4
@@ -4982,54 +5038,108 @@ impl Function for BetaDistFn {
         } else {
             1.0
         };
-
-        if alpha <= 0.0 || beta_param <= 0.0 || a >= b {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_num(),
-            )));
-        }
-
-        // x must be in [a, b]
-        if x < a || x > b {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_num(),
-            )));
-        }
-
-        // Transform x to standard [0,1] interval
-        let x_std = (x - a) / (b - a);
-
-        let result = if cumulative {
-            // CDF: I_x(alpha, beta) - regularized incomplete beta function
-            beta_i(x_std, alpha, beta_param)
-        } else {
-            // PDF: (x-A)^(alpha-1) * (B-x)^(beta-1) / ((B-A)^(alpha+beta-1) * B(alpha, beta))
-            let ln_beta = ln_gamma(alpha) + ln_gamma(beta_param) - ln_gamma(alpha + beta_param);
-            let scale = b - a;
-            if (x_std == 0.0 && alpha < 1.0) || (x_std == 1.0 && beta_param < 1.0) {
-                f64::INFINITY
-            } else if x_std == 0.0 {
-                if alpha == 1.0 {
-                    (1.0 - x_std).powf(beta_param - 1.0) / (scale * ln_beta.exp())
-                } else {
-                    0.0
-                }
-            } else if x_std == 1.0 {
-                if beta_param == 1.0 {
-                    x_std.powf(alpha - 1.0) / (scale * ln_beta.exp())
-                } else {
-                    0.0
-                }
-            } else {
-                let ln_pdf =
-                    (alpha - 1.0) * x_std.ln() + (beta_param - 1.0) * (1.0 - x_std).ln() - ln_beta;
-                ln_pdf.exp() / scale
-            }
-        };
-
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            result,
+        Ok(scalar_result(beta_dist(
+            x, alpha, beta_param, cumulative, a, b,
         )))
+    }
+}
+
+fn beta_dist(
+    x: f64,
+    alpha: f64,
+    beta_param: f64,
+    cumulative: bool,
+    a: f64,
+    b: f64,
+) -> Result<f64, ExcelError> {
+    if alpha <= 0.0 || beta_param <= 0.0 || a >= b {
+        return Err(ExcelError::new_num());
+    }
+
+    // x must be in [a, b]
+    if x < a || x > b {
+        return Err(ExcelError::new_num());
+    }
+
+    // Transform x to standard [0,1] interval
+    let x_std = (x - a) / (b - a);
+
+    Ok(if cumulative {
+        // CDF: I_x(alpha, beta) - regularized incomplete beta function
+        beta_i(x_std, alpha, beta_param)
+    } else {
+        // PDF: (x-A)^(alpha-1) * (B-x)^(beta-1) / ((B-A)^(alpha+beta-1) * B(alpha, beta))
+        let ln_beta = ln_gamma(alpha) + ln_gamma(beta_param) - ln_gamma(alpha + beta_param);
+        let scale = b - a;
+        if (x_std == 0.0 && alpha < 1.0) || (x_std == 1.0 && beta_param < 1.0) {
+            f64::INFINITY
+        } else if x_std == 0.0 {
+            if alpha == 1.0 {
+                (1.0 - x_std).powf(beta_param - 1.0) / (scale * ln_beta.exp())
+            } else {
+                0.0
+            }
+        } else if x_std == 1.0 {
+            if beta_param == 1.0 {
+                x_std.powf(alpha - 1.0) / (scale * ln_beta.exp())
+            } else {
+                0.0
+            }
+        } else {
+            let ln_pdf =
+                (alpha - 1.0) * x_std.ln() + (beta_param - 1.0) * (1.0 - x_std).ln() - ln_beta;
+            ln_pdf.exp() / scale
+        }
+    })
+}
+
+/// `BETADIST(x, alpha, beta, [A], [B])` — Excel 2007 name for the cumulative `BETA.DIST`; the
+/// optional bounds follow `beta` directly (there is no `cumulative` argument).
+#[derive(Debug)]
+pub struct BetadistFn;
+impl Function for BetadistFn {
+    func_caps!(PURE);
+    fn name(&self) -> &'static str {
+        "BETADIST"
+    }
+    fn min_args(&self) -> usize {
+        3
+    }
+    fn variadic(&self) -> bool {
+        true
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        use std::sync::LazyLock;
+        static SCHEMA: LazyLock<Vec<ArgSchema>> = LazyLock::new(|| {
+            vec![
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+            ]
+        });
+        &SCHEMA[..]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        _ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        let x = coerce_num(&scalar_like_value(&args[0])?)?;
+        let alpha = coerce_num(&scalar_like_value(&args[1])?)?;
+        let beta_param = coerce_num(&scalar_like_value(&args[2])?)?;
+        let a = if args.len() > 3 {
+            coerce_num(&scalar_like_value(&args[3])?)?
+        } else {
+            0.0
+        };
+        let b = if args.len() > 4 {
+            coerce_num(&scalar_like_value(&args[4])?)?
+        } else {
+            1.0
+        };
+        Ok(scalar_result(beta_dist(x, alpha, beta_param, true, a, b)))
     }
 }
 
@@ -5097,28 +5207,69 @@ impl Function for NegbinomDistFn {
         let number_s = coerce_num(&scalar_like_value(&args[1])?)?.trunc() as i64; // number of successes
         let prob_s = coerce_num(&scalar_like_value(&args[2])?)?; // probability of success
         let cumulative = coerce_num(&scalar_like_value(&args[3])?)? != 0.0;
+        Ok(scalar_result(negbinom_dist(
+            number_f, number_s, prob_s, cumulative,
+        )))
+    }
+}
 
-        if number_f < 0 || number_s < 1 || prob_s <= 0.0 || prob_s >= 1.0 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_num(),
-            )));
-        }
+fn negbinom_dist(
+    number_f: i64,
+    number_s: i64,
+    prob_s: f64,
+    cumulative: bool,
+) -> Result<f64, ExcelError> {
+    if number_f < 0 || number_s < 1 || prob_s <= 0.0 || prob_s >= 1.0 {
+        return Err(ExcelError::new_num());
+    }
 
-        let result = if cumulative {
-            // CDF: sum from i=0 to number_f of P(X=i)
-            // This is equivalent to I_{prob_s}(number_s, number_f + 1) using regularized beta
-            beta_i(prob_s, number_s as f64, (number_f + 1) as f64)
-        } else {
-            // PMF: C(number_f + number_s - 1, number_s - 1) * prob_s^number_s * (1-prob_s)^number_f
-            // = C(k + r - 1, r - 1) * p^r * (1-p)^k where k = number_f, r = number_s
-            let ln_prob = ln_binom(number_f + number_s - 1, number_s - 1)
-                + (number_s as f64) * prob_s.ln()
-                + (number_f as f64) * (1.0 - prob_s).ln();
-            ln_prob.exp()
-        };
+    Ok(if cumulative {
+        // CDF: sum from i=0 to number_f of P(X=i)
+        // This is equivalent to I_{prob_s}(number_s, number_f + 1) using regularized beta
+        beta_i(prob_s, number_s as f64, (number_f + 1) as f64)
+    } else {
+        // PMF: C(number_f + number_s - 1, number_s - 1) * prob_s^number_s * (1-prob_s)^number_f
+        // = C(k + r - 1, r - 1) * p^r * (1-p)^k where k = number_f, r = number_s
+        let ln_prob = ln_binom(number_f + number_s - 1, number_s - 1)
+            + (number_s as f64) * prob_s.ln()
+            + (number_f as f64) * (1.0 - prob_s).ln();
+        ln_prob.exp()
+    })
+}
 
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            result,
+/// `NEGBINOMDIST(number_f, number_s, probability_s)` — Excel 2007 name for the probability-mass
+/// form of `NEGBINOM.DIST`.
+#[derive(Debug)]
+pub struct NegbinomdistFn;
+impl Function for NegbinomdistFn {
+    func_caps!(PURE);
+    fn name(&self) -> &'static str {
+        "NEGBINOMDIST"
+    }
+    fn min_args(&self) -> usize {
+        3
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        use std::sync::LazyLock;
+        static SCHEMA: LazyLock<Vec<ArgSchema>> = LazyLock::new(|| {
+            vec![
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+            ]
+        });
+        &SCHEMA[..]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        _ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        let number_f = coerce_num(&scalar_like_value(&args[0])?)?.trunc() as i64;
+        let number_s = coerce_num(&scalar_like_value(&args[1])?)?.trunc() as i64;
+        let prob_s = coerce_num(&scalar_like_value(&args[2])?)?;
+        Ok(scalar_result(negbinom_dist(
+            number_f, number_s, prob_s, false,
         )))
     }
 }
@@ -5189,52 +5340,97 @@ impl Function for HypgeomDistFn {
         let population_s = coerce_num(&scalar_like_value(&args[2])?)?.trunc() as i64; // successes in population
         let number_pop = coerce_num(&scalar_like_value(&args[3])?)?.trunc() as i64; // population size
         let cumulative = coerce_num(&scalar_like_value(&args[4])?)? != 0.0;
+        Ok(scalar_result(hypgeom_dist(
+            sample_s,
+            number_sample,
+            population_s,
+            number_pop,
+            cumulative,
+        )))
+    }
+}
 
-        // Validation
-        if number_pop <= 0
-            || population_s < 0
-            || population_s > number_pop
-            || number_sample < 0
-            || number_sample > number_pop
-            || sample_s < 0
-        {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_num(),
-            )));
-        }
+fn hypgeom_dist(
+    sample_s: i64,
+    number_sample: i64,
+    population_s: i64,
+    number_pop: i64,
+    cumulative: bool,
+) -> Result<f64, ExcelError> {
+    if number_pop <= 0
+        || population_s < 0
+        || population_s > number_pop
+        || number_sample < 0
+        || number_sample > number_pop
+        || sample_s < 0
+    {
+        return Err(ExcelError::new_num());
+    }
 
-        // sample_s must be at least max(0, number_sample - (number_pop - population_s))
-        // and at most min(number_sample, population_s)
-        let min_successes = 0.max(number_sample - (number_pop - population_s));
-        let max_successes = number_sample.min(population_s);
+    // sample_s must be at least max(0, number_sample - (number_pop - population_s))
+    // and at most min(number_sample, population_s)
+    let min_successes = 0.max(number_sample - (number_pop - population_s));
+    let max_successes = number_sample.min(population_s);
 
-        if sample_s < min_successes || sample_s > max_successes {
-            // Return 0 for PMF, or appropriate CDF value
-            if cumulative {
-                if sample_s < min_successes {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)));
-                } else {
-                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(1.0)));
-                }
-            } else {
-                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(0.0)));
-            }
-        }
-
-        let result = if cumulative {
-            // CDF: sum from i=min_successes to sample_s of P(X=i)
-            let mut sum = 0.0;
-            for i in min_successes..=sample_s {
-                sum += hypgeom_pmf(i, number_sample, population_s, number_pop);
-            }
-            sum
+    if sample_s < min_successes || sample_s > max_successes {
+        // Return 0 for PMF, or appropriate CDF value
+        return Ok(if cumulative && sample_s >= min_successes {
+            1.0
         } else {
-            // PMF: C(population_s, sample_s) * C(number_pop - population_s, number_sample - sample_s) / C(number_pop, number_sample)
-            hypgeom_pmf(sample_s, number_sample, population_s, number_pop)
-        };
+            0.0
+        });
+    }
 
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(
-            result,
+    Ok(if cumulative {
+        // CDF: sum from i=min_successes to sample_s of P(X=i)
+        (min_successes..=sample_s)
+            .map(|i| hypgeom_pmf(i, number_sample, population_s, number_pop))
+            .sum()
+    } else {
+        // PMF: C(population_s, sample_s) * C(number_pop - population_s, number_sample - sample_s) / C(number_pop, number_sample)
+        hypgeom_pmf(sample_s, number_sample, population_s, number_pop)
+    })
+}
+
+/// `HYPGEOMDIST(sample_s, number_sample, population_s, number_pop)` — Excel 2007 name for the
+/// probability-mass form of `HYPGEOM.DIST`.
+#[derive(Debug)]
+pub struct HypgeomdistFn;
+impl Function for HypgeomdistFn {
+    func_caps!(PURE);
+    fn name(&self) -> &'static str {
+        "HYPGEOMDIST"
+    }
+    fn min_args(&self) -> usize {
+        4
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        use std::sync::LazyLock;
+        static SCHEMA: LazyLock<Vec<ArgSchema>> = LazyLock::new(|| {
+            vec![
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+            ]
+        });
+        &SCHEMA[..]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        _ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        let sample_s = coerce_num(&scalar_like_value(&args[0])?)?.trunc() as i64;
+        let number_sample = coerce_num(&scalar_like_value(&args[1])?)?.trunc() as i64;
+        let population_s = coerce_num(&scalar_like_value(&args[2])?)?.trunc() as i64;
+        let number_pop = coerce_num(&scalar_like_value(&args[3])?)?.trunc() as i64;
+        Ok(scalar_result(hypgeom_dist(
+            sample_s,
+            number_sample,
+            population_s,
+            number_pop,
+            false,
         )))
     }
 }
@@ -6679,8 +6875,13 @@ impl Function for ZTestFn {
             }
             s
         } else {
-            // Population standard deviation
-            let variance: f64 = data.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
+            // Excel uses the sample standard deviation (STDEV, n - 1) when sigma is omitted.
+            if n < 2.0 {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                    ExcelError::new_div(),
+                )));
+            }
+            let variance: f64 = data.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0);
             let std_dev = variance.sqrt();
             if std_dev == 0.0 {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
@@ -7836,6 +8037,47 @@ impl Function for TDist2TFn {
 
         // Two-tailed: P(|T| > x) = 2 * (1 - t_cdf(x, df))
         let p = 2.0 * (1.0 - t_cdf(x, df));
+        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(p)))
+    }
+}
+
+/// `TDIST(x, deg_freedom, tails)` — Excel 2007 Student's t tail probability: `tails` 1 is
+/// `T.DIST.RT`, 2 is `T.DIST.2T`; `x` must be non-negative and `deg_freedom` is truncated.
+#[derive(Debug)]
+pub struct TdistFn;
+impl Function for TdistFn {
+    func_caps!(PURE);
+    fn name(&self) -> &'static str {
+        "TDIST"
+    }
+    fn min_args(&self) -> usize {
+        3
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        use std::sync::LazyLock;
+        static SCHEMA: LazyLock<Vec<ArgSchema>> = LazyLock::new(|| {
+            vec![
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+                ArgSchema::number_lenient_scalar(),
+            ]
+        });
+        &SCHEMA[..]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        _ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        let x = coerce_num(&scalar_like_value(&args[0])?)?;
+        let df = coerce_num(&scalar_like_value(&args[1])?)?.trunc();
+        let tails = coerce_num(&scalar_like_value(&args[2])?)?.trunc();
+        if x < 0.0 || df < 1.0 || (tails != 1.0 && tails != 2.0) {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new_num(),
+            )));
+        }
+        let p = tails * (1.0 - t_cdf(x, df));
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Number(p)))
     }
 }
@@ -9172,6 +9414,9 @@ impl Function for ChisqDistRtFn {
     fn name(&self) -> &'static str {
         "CHISQ.DIST.RT"
     }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["CHIDIST"]
+    }
     fn min_args(&self) -> usize {
         2
     }
@@ -9245,6 +9490,9 @@ impl Function for ChisqInvRtFn {
     func_caps!(PURE);
     fn name(&self) -> &'static str {
         "CHISQ.INV.RT"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["CHIINV"]
     }
     fn min_args(&self) -> usize {
         2
@@ -9330,6 +9578,9 @@ impl Function for FDistRtFn {
     fn name(&self) -> &'static str {
         "F.DIST.RT"
     }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["FDIST"]
+    }
     fn min_args(&self) -> usize {
         3
     }
@@ -9405,6 +9656,9 @@ impl Function for FInvRtFn {
     func_caps!(PURE);
     fn name(&self) -> &'static str {
         "F.INV.RT"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["FINV"]
     }
     fn min_args(&self) -> usize {
         3
@@ -9495,6 +9749,9 @@ impl Function for BetaInvFn {
     func_caps!(PURE);
     fn name(&self) -> &'static str {
         "BETA.INV"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["BETAINV"]
     }
     fn min_args(&self) -> usize {
         3
@@ -10033,6 +10290,11 @@ impl Function for GammaLnPreciseFn {
 pub fn register_builtins() {
     use std::sync::Arc;
     crate::function_registry::register_builtin(Arc::new(ForecastLinearFn));
+    crate::function_registry::register_builtin(Arc::new(LognormdistFn));
+    crate::function_registry::register_builtin(Arc::new(HypgeomdistFn));
+    crate::function_registry::register_builtin(Arc::new(NegbinomdistFn));
+    crate::function_registry::register_builtin(Arc::new(BetadistFn));
+    crate::function_registry::register_builtin(Arc::new(TdistFn));
     crate::function_registry::register_builtin(Arc::new(LinestFn));
     crate::function_registry::register_builtin(Arc::new(LARGE));
     crate::function_registry::register_builtin(Arc::new(SMALL));

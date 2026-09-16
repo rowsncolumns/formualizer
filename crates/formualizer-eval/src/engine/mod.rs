@@ -1069,13 +1069,18 @@ impl CycleConfig {
     }
 
     /// Whether ingest may accept formulas whose dependencies include the
-    /// formula's own cell (`=B1+A1` in B1). Excel accepts these only with
-    /// iterative calculation enabled; everywhere else the edit-time
-    /// "Self-reference detected" rejection stands.
+    /// formula's own cell (`=B1+A1` in B1). Excel accepts these with
+    /// iterative calculation enabled (`Iterate`) AND with it disabled
+    /// (`Zero`: the cell installs, becomes a single-vertex SCC and displays
+    /// 0 with a circular-reference warning). Only `Error` keeps the
+    /// edit-time "Self-reference detected" rejection.
     #[inline]
     pub(crate) fn allows_self_dependency(&self) -> bool {
-        self.detection == CycleDetection::Runtime
-            && matches!(self.policy, CyclePolicy::Iterate { .. })
+        match self.policy {
+            CyclePolicy::Iterate { .. } => self.detection == CycleDetection::Runtime,
+            CyclePolicy::Zero => true,
+            CyclePolicy::Error => false,
+        }
     }
 }
 
@@ -1092,12 +1097,21 @@ pub enum CycleDetection {
     Runtime,
 }
 
-/// What happens to witnessed (live) cycles under `CycleDetection::Runtime`.
+/// What happens to cyclic SCCs: every static SCC under `CycleDetection::Static`,
+/// only witnessed (live) cycles under `CycleDetection::Runtime`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum CyclePolicy {
     /// Live cycles produce `#CIRC!`.
     #[default]
     Error,
+    /// Excel with iterative calculation OFF: cycle members are stamped `0` —
+    /// the value Excel displays for them and the value their dependents
+    /// compute with (`=A1+1` → 1, `ISERROR(A1)` → FALSE) — instead of an
+    /// error value that would propagate and leak into exports. The cycle is
+    /// reported out of band through [`super::Engine::last_cycle_cells`] so
+    /// hosts can raise Excel's circular-reference warning. Self-references
+    /// are accepted at ingest under this policy (Excel accepts them too).
+    Zero,
     /// Excel-style iterative calculation (RFC #113, spec §3.5/§6):
     /// live cycles keep running full passes over all SCC members in member
     /// order (Gauss–Seidel: each result is committed before the next member
@@ -1128,6 +1142,22 @@ impl CyclePolicy {
         CyclePolicy::Iterate {
             max_iterations: Self::EXCEL_DEFAULT_MAX_ITERATIONS,
             max_change: Self::EXCEL_DEFAULT_MAX_CHANGE,
+        }
+    }
+
+    /// The value stamped on a cycle member that receives the cycle verdict:
+    /// `0` under [`CyclePolicy::Zero`], `#CIRC!` otherwise (including the
+    /// conservative §7.9 array-anchor and defensive settle-cap stamps under
+    /// `Iterate`).
+    pub(crate) fn cycle_stamp_value(&self) -> formualizer_common::LiteralValue {
+        match self {
+            CyclePolicy::Zero => formualizer_common::LiteralValue::Number(0.0),
+            CyclePolicy::Error | CyclePolicy::Iterate { .. } => {
+                formualizer_common::LiteralValue::Error(
+                    ExcelError::new(ExcelErrorKind::Circ)
+                        .with_message("Circular dependency detected".to_string()),
+                )
+            }
         }
     }
 }

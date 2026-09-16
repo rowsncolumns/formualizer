@@ -1519,6 +1519,40 @@ impl Function for MirrFn {
     }
 }
 
+/// Walk an amortization schedule in Excel's sign convention (positive `pv` is a loan, so the
+/// payment, interest and principal are all negative) and total the interest and principal
+/// components over the inclusive `start..=end` window. `pay_type` 1 pays at the start of each
+/// period: period 1 carries no interest and the level payment is the annuity-due amount.
+fn cumulative_schedule(
+    rate: f64,
+    nper: i32,
+    pv: f64,
+    start: i32,
+    end: i32,
+    pay_type: i32,
+) -> (f64, f64) {
+    let pow = (1.0 + rate).powi(nper);
+    let pmt = -pv * rate * pow / ((1.0 + rate * pay_type as f64) * (pow - 1.0));
+
+    let mut cum_int = 0.0;
+    let mut cum_princ = 0.0;
+    let mut balance = pv;
+    for period in 1..=end {
+        let interest = if pay_type == 1 && period == 1 {
+            0.0
+        } else {
+            -balance * rate
+        };
+        let principal = pmt - interest;
+        if period >= start {
+            cum_int += interest;
+            cum_princ += principal;
+        }
+        balance += principal;
+    }
+    (cum_int, cum_princ)
+}
+
 /// Returns cumulative interest paid between two inclusive payment periods.
 ///
 /// Use this to total the interest component over a slice of an amortization schedule.
@@ -1527,17 +1561,17 @@ impl Function for MirrFn {
 /// - `rate` is the interest rate per payment period.
 /// - `start_period` and `end_period` are 1-based, inclusive integer periods.
 /// - `type` must be `0` (end-of-period) or `1` (beginning-of-period).
-/// - Sign convention follows this implementation's balance model; with positive `pv`, cumulative interest is typically positive.
+/// - Excel sign convention: with positive `pv` the payments are cash outflows, so cumulative interest is negative.
 /// - Returns `#NUM!` for invalid domain values (non-positive rate, invalid ranges, invalid type, or non-positive `pv`).
 ///
 /// # Examples
 /// ```yaml,sandbox
-/// formula: =CUMIPMT(0.06/12, 360, 300000, 1, 12, 0)
-/// result: 16929.385083045923
+/// formula: =CUMIPMT(0.09/12, 360, 125000, 13, 24, 0)
+/// result: -11135.23213
 /// ```
 /// ```yaml,sandbox
-/// formula: =CUMIPMT(0.06/12, 360, 300000, 13, 24, 0)
-/// result: 14681.09233746059
+/// formula: =CUMIPMT(0.09/12, 360, 125000, 1, 1, 0)
+/// result: -937.5
 /// ```
 /// ```yaml,docs
 /// related:
@@ -1608,32 +1642,7 @@ impl Function for CumipmtFn {
             ));
         }
 
-        // Calculate PMT
-        let pmt = if rate == 0.0 {
-            -pv / nper as f64
-        } else {
-            -pv * rate * (1.0 + rate).powi(nper) / ((1.0 + rate).powi(nper) - 1.0)
-        };
-
-        // Sum interest payments from start to end
-        let mut cum_int = 0.0;
-        let mut balance = pv;
-
-        for period in 1..=end {
-            let interest = if pay_type == 1 && period == 1 {
-                0.0
-            } else {
-                balance * rate
-            };
-
-            if period >= start {
-                cum_int += interest;
-            }
-
-            let principal = pmt - interest;
-            balance += principal;
-        }
-
+        let (cum_int, _) = cumulative_schedule(rate, nper, pv, start, end, pay_type);
         Ok(CalcValue::Scalar(LiteralValue::Number(cum_int)))
     }
 }
@@ -1651,12 +1660,12 @@ impl Function for CumipmtFn {
 ///
 /// # Examples
 /// ```yaml,sandbox
-/// formula: =CUMPRINC(0.06/12, 360, 300000, 1, 12, 0)
-/// result: -38513.20398854517
+/// formula: =CUMPRINC(0.09/12, 360, 125000, 13, 24, 0)
+/// result: -934.1071234
 /// ```
 /// ```yaml,sandbox
-/// formula: =CUMPRINC(0.06/12, 360, 300000, 13, 24, 0)
-/// result: -36264.91124295984
+/// formula: =CUMPRINC(0.09/12, 360, 125000, 1, 1, 0)
+/// result: -68.27827118
 /// ```
 /// ```yaml,docs
 /// related:
@@ -1727,33 +1736,7 @@ impl Function for CumprincFn {
             ));
         }
 
-        // Calculate PMT
-        let pmt = if rate == 0.0 {
-            -pv / nper as f64
-        } else {
-            -pv * rate * (1.0 + rate).powi(nper) / ((1.0 + rate).powi(nper) - 1.0)
-        };
-
-        // Sum principal payments from start to end
-        let mut cum_princ = 0.0;
-        let mut balance = pv;
-
-        for period in 1..=end {
-            let interest = if pay_type == 1 && period == 1 {
-                0.0
-            } else {
-                balance * rate
-            };
-
-            let principal = pmt - interest;
-
-            if period >= start {
-                cum_princ += principal;
-            }
-
-            balance += principal;
-        }
-
+        let (_, cum_princ) = cumulative_schedule(rate, nper, pv, start, end, pay_type);
         Ok(CalcValue::Scalar(LiteralValue::Number(cum_princ)))
     }
 }
@@ -2566,6 +2549,74 @@ impl Function for PdurationFn {
     }
 }
 
+/// `FVSCHEDULE(principal, schedule)` — the future value of `principal` after applying the series
+/// of (possibly varying) interest rates in `schedule`. Blank cells count as a 0% period; text or
+/// logical entries in the schedule are `#VALUE!`, as in Excel.
+#[derive(Debug)]
+pub struct FvscheduleFn;
+impl Function for FvscheduleFn {
+    func_caps!(PURE);
+    fn name(&self) -> &'static str {
+        "FVSCHEDULE"
+    }
+    fn min_args(&self) -> usize {
+        2
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        use std::sync::LazyLock;
+        static SCHEMA: LazyLock<Vec<ArgSchema>> =
+            LazyLock::new(|| vec![ArgSchema::number_lenient_scalar(), ArgSchema::any()]);
+        &SCHEMA[..]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        _ctx: &dyn FunctionContext<'b>,
+    ) -> Result<CalcValue<'b>, ExcelError> {
+        let principal = coerce_num(&args[0])?;
+
+        fn schedule_rate(v: &LiteralValue) -> Result<f64, ExcelError> {
+            match v {
+                LiteralValue::Number(f) => Ok(*f),
+                LiteralValue::Int(i) => Ok(*i as f64),
+                LiteralValue::Empty => Ok(0.0),
+                LiteralValue::Error(e) => Err(e.clone()),
+                _ => Err(ExcelError::new_value()),
+            }
+        }
+
+        let mut value = principal;
+        match args[1].value()? {
+            CalcValue::Scalar(LiteralValue::Array(arr)) => {
+                for row in arr {
+                    for cell in row {
+                        value *= 1.0 + schedule_rate(&cell)?;
+                    }
+                }
+            }
+            CalcValue::Scalar(lit) => {
+                value *= 1.0 + schedule_rate(&lit)?;
+            }
+            CalcValue::Range(range) => {
+                let (rows, cols) = range.dims();
+                for r in 0..rows {
+                    for c in 0..cols {
+                        value *= 1.0 + schedule_rate(&range.get_cell(r, c))?;
+                    }
+                }
+            }
+            CalcValue::Callable(_) => {
+                return Ok(CalcValue::Scalar(LiteralValue::Error(
+                    ExcelError::new(ExcelErrorKind::Calc)
+                        .with_message("LAMBDA value must be invoked"),
+                )));
+            }
+        }
+
+        Ok(CalcValue::Scalar(LiteralValue::Number(value)))
+    }
+}
+
 pub fn register_builtins() {
     use std::sync::Arc;
     crate::function_registry::register_builtin(Arc::new(PmtFn));
@@ -2589,4 +2640,5 @@ pub fn register_builtins() {
     crate::function_registry::register_builtin(Arc::new(RriFn));
     crate::function_registry::register_builtin(Arc::new(IspmtFn));
     crate::function_registry::register_builtin(Arc::new(PdurationFn));
+    crate::function_registry::register_builtin(Arc::new(FvscheduleFn));
 }

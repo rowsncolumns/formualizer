@@ -995,6 +995,11 @@ pub struct Engine<R> {
 
     // Runtime-cycle SCC evaluation telemetry (RFC #112, Stage 2)
     last_cycle_telemetry: CycleTelemetry,
+    /// Cells stamped with the cycle verdict (`#CIRC!` or, under
+    /// `CyclePolicy::Zero`, `0`) during the most recent evaluation request —
+    /// the host-facing "circular reference detected" signal. Reset per request
+    /// like `last_cycle_telemetry`.
+    last_cycle_cells: Vec<CellRef>,
 
     // C0 evaluation-resource observability. IDs are never reset or reused.
     next_evaluation_resource_request_id: u64,
@@ -2575,6 +2580,7 @@ where
             last_virtual_dep_telemetry: VirtualDepTelemetry::default(),
             virtual_dep_fallback_activations: 0,
             last_cycle_telemetry: CycleTelemetry::default(),
+            last_cycle_cells: Vec::new(),
             next_evaluation_resource_request_id: 1,
             evaluation_resource_request_depth: 0,
             active_evaluation_resource_request: None,
@@ -2711,6 +2717,7 @@ where
             last_virtual_dep_telemetry: VirtualDepTelemetry::default(),
             virtual_dep_fallback_activations: 0,
             last_cycle_telemetry: CycleTelemetry::default(),
+            last_cycle_cells: Vec::new(),
             next_evaluation_resource_request_id: 1,
             evaluation_resource_request_depth: 0,
             active_evaluation_resource_request: None,
@@ -2787,6 +2794,15 @@ where
     /// or when `enable_virtual_dep_telemetry` is off).
     pub fn last_cycle_telemetry(&self) -> &CycleTelemetry {
         &self.last_cycle_telemetry
+    }
+
+    /// Cells stamped with the cycle verdict during the most recent evaluation
+    /// request, in stamp order (a member may repeat when it was re-stamped
+    /// within the request). Populated under every detection mode and policy:
+    /// this is how a host learns WHICH cells form a circular reference when
+    /// [`CyclePolicy::Zero`] leaves no error value in the grid to find.
+    pub fn last_cycle_cells(&self) -> &[CellRef] {
+        &self.last_cycle_cells
     }
 
     /// Resource observations for the most recently completed public evaluation request.
@@ -3389,6 +3405,7 @@ where
     /// every evaluation request that walks schedule units.
     fn begin_evaluation_request(&mut self) {
         self.last_cycle_telemetry = CycleTelemetry::default();
+        self.last_cycle_cells.clear();
         // Defensive: consumed at the end of the previous request; a request
         // that errored out mid-walk must not leak its members into this one.
         self.pending_iterative_redirty.clear();
@@ -23739,7 +23756,8 @@ where
         }
     }
 
-    /// Apply the evaluation outcome for one cyclic SCC: stamp `#CIRC!` on its
+    /// Apply the evaluation outcome for one cyclic SCC: stamp the policy's
+    /// cycle verdict (`#CIRC!`, or `0` under `CyclePolicy::Zero`) on its
     /// (optionally filtered) members via `stamp_cycle_error`.
     ///
     /// This is the single per-SCC application point used by every schedule
@@ -23758,10 +23776,7 @@ where
         mut delta: Option<&mut DeltaCollector>,
         dirty_filter: Option<&FxHashSet<VertexId>>,
     ) -> usize {
-        let circ_error = LiteralValue::Error(
-            ExcelError::new(ExcelErrorKind::Circ)
-                .with_message("Circular dependency detected".to_string()),
-        );
+        let circ_error = self.config.cycle.policy.cycle_stamp_value();
         let mut stamped = 0usize;
         for &vertex_id in cycle {
             if let Some(filter) = dirty_filter
@@ -23820,6 +23835,9 @@ where
         self.graph
             .update_vertex_value(vertex_id, circ_error.clone());
         self.mirror_vertex_value_to_overlay(vertex_id, circ_error);
+        if let Some(cell) = self.graph.get_cell_ref_for_vertex(vertex_id) {
+            self.last_cycle_cells.push(cell);
+        }
     }
 
     /// Dispatch point for one `ScheduleUnit::Cycle` (RFC #112, Stage 2).
@@ -23946,10 +23964,7 @@ where
         // members can be neither edge sources nor targets.
         let recordable = cell_refs.len() + name_keys.len();
 
-        let circ_error = LiteralValue::Error(
-            ExcelError::new(ExcelErrorKind::Circ)
-                .with_message("Circular dependency detected".to_string()),
-        );
+        let circ_error = self.config.cycle.policy.cycle_stamp_value();
 
         // ── 0b. Spec-§4 persistence repair: structural edits clear computed
         // overlays wholesale (`clear_computed_overlay_after_row/_col`), but
@@ -24181,8 +24196,8 @@ where
                 // accumulating so the count stays "distinct live cycles".
                 witnessed_cycles = witnessed_cycles.max(analysis.cycle_count);
                 match policy {
-                    CyclePolicy::Error => {
-                        // POLICY (Error): stamp every member of a live cycle,
+                    CyclePolicy::Error | CyclePolicy::Zero => {
+                        // POLICY (Error / Zero): stamp every member of a live cycle,
                         // then one settling pass over the remaining members in
                         // live-topological order so error propagation
                         // downstream is consistent (spec §3.4). Blast radius =
