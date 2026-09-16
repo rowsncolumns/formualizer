@@ -356,7 +356,9 @@ impl Function for AverageFn {
                 if let LiteralValue::Error(e) = v {
                     return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
                 }
-                if let Ok(n) = crate::coercion::to_number_lenient_with_locale(&v, &ctx.locale()) {
+                if let Ok(n) =
+                    crate::coercion::to_number_lenient_with_clock(&v, &ctx.locale(), ctx.clock())
+                {
                     sum += n;
                     cnt += 1;
                 }

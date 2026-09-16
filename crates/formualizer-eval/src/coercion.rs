@@ -1,3 +1,4 @@
+use chrono::Datelike;
 use formualizer_common::{ExcelError, ExcelErrorKind, LiteralValue};
 
 /// Centralized coercion and error policy utilities (Milestone 7).
@@ -27,13 +28,36 @@ pub fn to_number_lenient(value: &LiteralValue) -> Result<f64, ExcelError> {
     to_number_lenient_with_locale(value, &crate::locale::Locale::invariant())
 }
 
-/// Context-aware lenient numeric coercion using locale.
+/// Context-aware lenient numeric coercion using locale. Year-less date text (`"1/2"`) is not
+/// accepted here — it needs the ambient date; see [`to_number_lenient_with_clock`].
 pub fn to_number_lenient_with_locale(
     value: &LiteralValue,
     loc: &crate::locale::Locale,
 ) -> Result<f64, ExcelError> {
+    to_number_lenient_on(value, loc, None)
+}
+
+/// Lenient numeric coercion with the evaluation clock: like
+/// [`to_number_lenient_with_locale`], plus Excel's year-less date text (`"1/2"`, `"Jan 2"`,
+/// `"2-Jan"`) resolved in the clock's current year — the same `today()` `TODAY()` reads.
+pub fn to_number_lenient_with_clock(
+    value: &LiteralValue,
+    loc: &crate::locale::Locale,
+    clock: &dyn crate::timezone::ClockProvider,
+) -> Result<f64, ExcelError> {
     match value {
-        LiteralValue::Text(s) => parse_numeric_text(s, loc).ok_or_else(|| {
+        LiteralValue::Text(_) => to_number_lenient_on(value, loc, Some(clock.today())),
+        _ => to_number_strict(value),
+    }
+}
+
+fn to_number_lenient_on(
+    value: &LiteralValue,
+    loc: &crate::locale::Locale,
+    today: Option<chrono::NaiveDate>,
+) -> Result<f64, ExcelError> {
+    match value {
+        LiteralValue::Text(s) => parse_numeric_text_on(s, loc, today).ok_or_else(|| {
             ExcelError::new(ExcelErrorKind::Value)
                 .with_message(format!("Cannot convert '{s}' to number"))
         }),
@@ -45,13 +69,29 @@ pub fn to_number_lenient_with_locale(
 /// (`"1,000"`, `"$5"`, `"50%"`, `"(5)"`, `"1e3"`) via the locale, otherwise
 /// en-US date/time text (`"1/2/2024"` → 45293, `"6:00 PM"` → 0.75,
 /// `"2024-01-02 18:00"` → 45293.75). `None` when the text is not numeric.
+/// Year-less dates need [`parse_numeric_text_on`] with the ambient date.
 pub fn parse_numeric_text(text: &str, loc: &crate::locale::Locale) -> Option<f64> {
+    parse_numeric_text_on(text, loc, None)
+}
+
+/// [`parse_numeric_text`] that also accepts Excel's year-less date text (`"1/2"` → January 2
+/// of `today`'s year, `"Jan 2"`, `"2-Jan"`) when `today` is given.
+pub fn parse_numeric_text_on(
+    text: &str,
+    loc: &crate::locale::Locale,
+    today: Option<chrono::NaiveDate>,
+) -> Option<f64> {
     loc.parse_number_invariant(text)
-        .or_else(|| parse_date_time_text(text))
+        .or_else(|| parse_date_time_text_on(text, today))
 }
 
 /// Parse en-US date and/or time text to an Excel (1900 date system) serial.
 pub fn parse_date_time_text(text: &str) -> Option<f64> {
+    parse_date_time_text_on(text, None)
+}
+
+/// [`parse_date_time_text`] with the ambient date for year-less forms (`None` rejects them).
+pub fn parse_date_time_text_on(text: &str, today: Option<chrono::NaiveDate>) -> Option<f64> {
     let text = text.trim();
     if text.is_empty() {
         return None;
@@ -59,7 +99,7 @@ pub fn parse_date_time_text(text: &str) -> Option<f64> {
     if let Some(fraction) = parse_time_text(text) {
         return Some(fraction);
     }
-    if let Some(date) = parse_date_text(text) {
+    if let Some(date) = parse_date_text(text, today) {
         return Some(crate::builtins::datetime::date_to_serial(&date));
     }
     // "<date> <time>": split at the last run of whitespace whose right-hand
@@ -72,9 +112,10 @@ pub fn parse_date_time_text(text: &str) -> Option<f64> {
     split_points.reverse();
     for i in split_points {
         let (date_part, time_part) = (text[..i].trim_end(), text[i..].trim_start());
-        if let (Some(date), Some(fraction)) =
-            (parse_date_text(date_part), parse_time_text(time_part))
-        {
+        if let (Some(date), Some(fraction)) = (
+            parse_date_text(date_part, today),
+            parse_time_text(time_part),
+        ) {
             return Some(crate::builtins::datetime::date_to_serial(&date) + fraction);
         }
     }
@@ -125,17 +166,42 @@ fn make_date(year: i32, month: u32, day: u32) -> Option<chrono::NaiveDate> {
 }
 
 /// `1/2/2024`, `1/2/24`, `2024-01-02`, `2024/1/2`, `5-Jan-2024`, `5 Jan 2024`,
-/// `Jan 5, 2024`, `January 5 2024`. Forms without a year are not accepted
-/// (the engine has no ambient clock here).
-fn parse_date_text(text: &str) -> Option<chrono::NaiveDate> {
+/// `Jan 5, 2024`, `January 5 2024`; `1/2024` is the first of that month. With `today`, Excel's
+/// year-less forms `1/2` (m/d), `Jan 2`, `2-Jan` resolve in the current year; without it they
+/// are rejected (no ambient clock).
+fn parse_date_text(text: &str, today: Option<chrono::NaiveDate>) -> Option<chrono::NaiveDate> {
     let parts: Vec<&str> = text
         .split(|c: char| c == '/' || c == '-' || c == ',' || c.is_whitespace())
         .filter(|p| !p.is_empty())
         .collect();
+    let is_digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    if parts.len() == 2 {
+        let (a, b) = (parts[0], parts[1]);
+        // Two bare numbers only form a date around `/` or `-` (`"12 5"` is not December 5).
+        let numeric_pair =
+            is_digits(a) && is_digits(b) && (text.contains('/') || text.contains('-'));
+        if numeric_pair && a.len() <= 2 && b.len() == 4 {
+            // m/yyyy → the first of the month
+            return make_date(b.parse().ok()?, a.parse().ok()?, 1);
+        }
+        let year = today?.year();
+        if numeric_pair && a.len() <= 2 && b.len() <= 2 {
+            // m/d in the current year
+            return make_date(year, a.parse().ok()?, b.parse().ok()?);
+        }
+        if is_digits(b) && b.len() <= 2 {
+            // mmm d
+            return make_date(year, month_from_name(a)?, b.parse().ok()?);
+        }
+        if is_digits(a) && a.len() <= 2 {
+            // d-mmm
+            return make_date(year, month_from_name(b)?, a.parse().ok()?);
+        }
+        return None;
+    }
     if parts.len() != 3 {
         return None;
     }
-    let is_digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
     let (a, b, c) = (parts[0], parts[1], parts[2]);
     if is_digits(a) && is_digits(b) && is_digits(c) {
         if a.len() == 4 {

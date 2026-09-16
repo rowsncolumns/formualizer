@@ -564,4 +564,42 @@ mod tests {
             LiteralValue::Text("helLO!".into())
         );
     }
+
+    /// `~` escapes a wildcard in SEARCH: `SEARCH("~*","a*b")` finds the literal `*` (2) instead
+    /// of matching everything at position 1; an escaped-only needle is a plain find and a live
+    /// wildcard next to an escaped one still matches (rowsncolumns/spreadsheet#546 B-9).
+    #[test]
+    fn search_tilde_escapes_wildcards() {
+        let wb = TestWorkbook::new()
+            .with_function(Arc::new(FindFn))
+            .with_function(Arc::new(SearchFn));
+        let ctx = wb.interpreter();
+        let search = ctx.context.get_function("", "SEARCH").unwrap();
+        let find = ctx.context.get_function("", "FIND").unwrap();
+        let run = |f: &Arc<dyn crate::function::Function>, needle: &str, hay: &str| {
+            let n = lit(LiteralValue::Text(needle.into()));
+            let h = lit(LiteralValue::Text(hay.into()));
+            f.dispatch(
+                &[ArgumentHandle::new(&n, &ctx), ArgumentHandle::new(&h, &ctx)],
+                &ctx.function_context(None),
+            )
+            .unwrap()
+            .into_literal()
+        };
+        assert_eq!(run(&search, "~*", "a*b"), LiteralValue::Int(2));
+        assert_eq!(run(&search, "~?", "a?b"), LiteralValue::Int(2));
+        assert_eq!(run(&search, "~~", "a~b"), LiteralValue::Int(2));
+        assert_eq!(run(&search, "a~*c", "xa*c"), LiteralValue::Int(2));
+        // Live `?` plus an escaped `*`: one char then a literal asterisk.
+        assert_eq!(run(&search, "?~*", "xxb*"), LiteralValue::Int(3));
+        // A `~` not followed by a wildcard is an ordinary character.
+        assert_eq!(run(&search, "a~b", "xa~b"), LiteralValue::Int(2));
+        // Escaped `*` must not match arbitrary text.
+        match run(&search, "~*", "abc") {
+            LiteralValue::Error(e) => assert_eq!(e.to_string(), "#VALUE!"),
+            other => panic!("expected #VALUE!, got {other:?}"),
+        }
+        // FIND has no wildcards: `~*` is the two literal characters.
+        assert_eq!(run(&find, "~*", "a~*b"), LiteralValue::Int(2));
+    }
 }

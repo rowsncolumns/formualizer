@@ -245,7 +245,9 @@ fn search_element(
         // SEARCH renvoie une position en CARACTERES et accepte les jokers * et ?.
         // On indexe par char (pas par octet) -> pas de panique "char boundary" sur
         // l'accentue, et ? compte bien pour UN caractere (sémantique Excel).
-        let found = if needle.contains('*') || needle.contains('?') {
+        // `~` escapes the next `*` / `?` / `~`: `SEARCH("~*","a*b")` looks for a literal
+        // asterisk (2), so a needle whose only wildcards are escaped is a plain find.
+        let found = if crate::args::has_wildcard(&needle) {
             let hay_chars: Vec<char> = hay.chars().collect();
             if start > hay_chars.len() {
                 return Ok(LiteralValue::Error(ExcelError::new_value()));
@@ -256,7 +258,7 @@ fn search_element(
             if start > 0 && start > hay.chars().count() {
                 return Ok(LiteralValue::Error(ExcelError::new_value()));
             }
-            char_find(&hay, &needle, start)
+            char_find(&hay, &crate::args::unescape_wildcards(&needle), start)
         };
         Ok(match found {
             Some(idx) => LiteralValue::Int((idx + 1) as i64),
@@ -307,6 +309,9 @@ fn wildcard_match_chars(p: &[char], t: &[char]) -> bool {
     match p[0] {
         '*' => (0..=t.len()).any(|i| wildcard_match_chars(&p[1..], &t[i..])),
         '?' => !t.is_empty() && wildcard_match_chars(&p[1..], &t[1..]),
+        '~' if p.len() > 1 && matches!(p[1], '*' | '?' | '~') => {
+            !t.is_empty() && t[0] == p[1] && wildcard_match_chars(&p[2..], &t[1..])
+        }
         c => !t.is_empty() && t[0] == c && wildcard_match_chars(&p[1..], &t[1..]),
     }
 }

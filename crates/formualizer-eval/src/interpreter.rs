@@ -274,6 +274,54 @@ impl<'a> Interpreter<'a> {
         self.context.resolve_range_view(reference, current_sheet)
     }
 
+    /// The areas of a reference expression: a parenthesised union `(A1:A5,C1:C5)` is one area
+    /// per `,` operand (nested unions flatten), anything else is the single reference
+    /// `evaluate_ast_as_reference` yields. `AREAS` counts them and `INDEX(…, area_num)`
+    /// selects one; a union stays an error for consumers that need one rectangle.
+    pub fn evaluate_ast_as_reference_areas(
+        &self,
+        node: &ASTNode,
+    ) -> Result<Vec<ReferenceType>, ExcelError> {
+        match &node.node_type {
+            ASTNodeType::BinaryOp { op, left, right } if op == "," => {
+                let mut areas = self.evaluate_ast_as_reference_areas(left)?;
+                areas.extend(self.evaluate_ast_as_reference_areas(right)?);
+                Ok(areas)
+            }
+            _ => Ok(vec![self.evaluate_ast_as_reference(node)?]),
+        }
+    }
+
+    /// Arena twin of [`Self::evaluate_ast_as_reference_areas`].
+    pub(crate) fn evaluate_arena_ast_as_reference_areas(
+        &self,
+        node_id: AstNodeId,
+        data_store: &DataStore,
+        sheet_registry: &SheetRegistry,
+    ) -> Result<Vec<ReferenceType>, ExcelError> {
+        if let Some(AstNodeData::BinaryOp {
+            op_id,
+            left_id,
+            right_id,
+        }) = data_store.get_node(node_id)
+            && data_store.resolve_ast_string(*op_id) == ","
+        {
+            let mut areas =
+                self.evaluate_arena_ast_as_reference_areas(*left_id, data_store, sheet_registry)?;
+            areas.extend(self.evaluate_arena_ast_as_reference_areas(
+                *right_id,
+                data_store,
+                sheet_registry,
+            )?);
+            return Ok(areas);
+        }
+        Ok(vec![self.evaluate_arena_ast_as_reference(
+            node_id,
+            data_store,
+            sheet_registry,
+        )?])
+    }
+
     /// Evaluate an AST node in a reference context and return a ReferenceType.
     /// This is used for range combinators (e.g., ":"), by-ref argument flows,
     /// and spill planning. Functions that can return references must set
@@ -1382,11 +1430,21 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// Excel's lenient text→number coercion for operators: locale-aware numeric text and
+    /// date/time text, with year-less dates (`"1/2"`) taken in the evaluation clock's year.
+    fn lenient_number(&self, v: &LiteralValue) -> Result<f64, ExcelError> {
+        crate::coercion::to_number_lenient_with_clock(
+            v,
+            &self.context.locale(),
+            self.context.clock(),
+        )
+    }
+
     fn apply_number_unary<F>(&self, v: LiteralValue, f: F) -> Result<LiteralValue, ExcelError>
     where
         F: Fn(f64) -> f64,
     {
-        match crate::coercion::to_number_lenient_with_locale(&v, &self.context.locale()) {
+        match self.lenient_number(&v) {
             Ok(n) => match crate::coercion::sanitize_numeric(f(n)) {
                 Ok(n2) => Ok(LiteralValue::Number(n2)),
                 Err(e) => Ok(LiteralValue::Error(e)),
@@ -1481,9 +1539,7 @@ impl<'a> Interpreter<'a> {
                 }
             };
 
-            let to_num = |v: &LiteralValue| -> Result<f64, ExcelError> {
-                crate::coercion::to_number_lenient_with_locale(v, &self.context.locale())
-            };
+            let to_num = |v: &LiteralValue| -> Result<f64, ExcelError> { self.lenient_number(v) };
 
             let serial_to_literal = |serial: f64| -> LiteralValue {
                 match crate::coercion::sanitize_numeric(serial) {
@@ -1656,8 +1712,8 @@ impl<'a> Interpreter<'a> {
         F: Fn(f64, f64) -> f64 + Copy,
     {
         self.broadcast_apply(left, right, |l, r| {
-            let a = crate::coercion::to_number_lenient_with_locale(&l, &self.context.locale());
-            let b = crate::coercion::to_number_lenient_with_locale(&r, &self.context.locale());
+            let a = self.lenient_number(&l);
+            let b = self.lenient_number(&r);
             match (a, b) {
                 (Ok(a), Ok(b)) => match crate::coercion::sanitize_numeric(f(a, b)) {
                     Ok(n2) => Ok(LiteralValue::Number(n2)),
@@ -1688,8 +1744,8 @@ impl<'a> Interpreter<'a> {
 
     fn divide(&self, left: LiteralValue, right: LiteralValue) -> Result<LiteralValue, ExcelError> {
         self.broadcast_apply(left, right, |l, r| {
-            let ln = crate::coercion::to_number_lenient_with_locale(&l, &self.context.locale());
-            let rn = crate::coercion::to_number_lenient_with_locale(&r, &self.context.locale());
+            let ln = self.lenient_number(&l);
+            let rn = self.lenient_number(&r);
             let (a, b) = match (ln, rn) {
                 (Ok(a), Ok(b)) => (a, b),
                 (Err(e), _) | (_, Err(e)) => return Ok(LiteralValue::Error(e)),
@@ -1708,8 +1764,8 @@ impl<'a> Interpreter<'a> {
 
     fn power(&self, left: LiteralValue, right: LiteralValue) -> Result<LiteralValue, ExcelError> {
         self.broadcast_apply(left, right, |l, r| {
-            let ln = crate::coercion::to_number_lenient_with_locale(&l, &self.context.locale());
-            let rn = crate::coercion::to_number_lenient_with_locale(&r, &self.context.locale());
+            let ln = self.lenient_number(&l);
+            let rn = self.lenient_number(&r);
             let (a, b) = match (ln, rn) {
                 (Ok(a), Ok(b)) => (a, b),
                 (Err(e), _) | (_, Err(e)) => return Ok(LiteralValue::Error(e)),
@@ -1939,16 +1995,8 @@ impl<'a> Interpreter<'a> {
                     _ => {
                         // Pending / other placeholders: keep the lenient
                         // numeric-then-text fallback.
-                        let an = crate::coercion::to_number_lenient_with_locale(
-                            &l,
-                            &self.context.locale(),
-                        )
-                        .ok();
-                        let bn = crate::coercion::to_number_lenient_with_locale(
-                            &r,
-                            &self.context.locale(),
-                        )
-                        .ok();
+                        let an = self.lenient_number(&l).ok();
+                        let bn = self.lenient_number(&r).ok();
                         if let (Some(a), Some(b)) = (an, bn) {
                             self.cmp_f64(a, b, op)
                         } else {

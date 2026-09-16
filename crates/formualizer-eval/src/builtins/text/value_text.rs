@@ -113,7 +113,9 @@ impl Function for ValueFn {
             _ => {}
         }
         let s = to_text(&args[0])?;
-        let Some(n) = crate::coercion::parse_numeric_text(&s, &ctx.locale()) else {
+        let Some(n) =
+            crate::coercion::parse_numeric_text_on(&s, &ctx.locale(), Some(ctx.clock().today()))
+        else {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));
