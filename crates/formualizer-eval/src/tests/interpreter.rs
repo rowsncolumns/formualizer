@@ -105,9 +105,10 @@ mod tests {
         value_err("=NOT(\"a\")");
         eq("=XOR(\"TRUE\",FALSE)", LiteralValue::Boolean(true));
         value_err("=XOR(\"a\")");
-        // Text inside a reference is ignored, whatever it says.
+        // Text inside a reference is ignored, whatever it says; a reference
+        // that leaves nothing logical to test is #VALUE!.
         eq("=AND(A1:A3)", LiteralValue::Boolean(true));
-        eq("=OR(A1:A2)", LiteralValue::Boolean(false));
+        value_err("=OR(A1:A2)");
         eq("=XOR(A1:A3)", LiteralValue::Boolean(true));
     }
 

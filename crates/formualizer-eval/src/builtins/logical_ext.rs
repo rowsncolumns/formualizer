@@ -77,6 +77,7 @@ impl Function for NotFn {
                 ExcelError::new_value(),
             )));
         }
+        let from_reference = args[0].as_reference().is_ok();
         let v = args[0].value()?.into_literal();
         let b = match v {
             LiteralValue::Boolean(b) => !b,
@@ -85,6 +86,12 @@ impl Function for NotFn {
             LiteralValue::Empty => true,
             LiteralValue::Error(e) => {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+            }
+            // Text read through a reference (a cell that says "TRUE") is #VALUE!.
+            LiteralValue::Text(_) if from_reference => {
+                return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                    ExcelError::new_value(),
+                )));
             }
             // Excel coerces the text booleans in a direct argument (`NOT("TRUE")`).
             LiteralValue::Text(_) => match crate::coercion::to_logical(&v) {
@@ -113,8 +120,9 @@ pub struct XorFn;
 ///
 /// # Remarks
 /// - Booleans and numbers are accepted (`0` is FALSE, non-zero is TRUE).
-/// - Blank values are ignored.
-/// - Text and other non-coercible values produce `#VALUE!`.
+/// - Blank cells and text inside references are ignored; a direct text argument must be
+///   `TRUE`/`FALSE` or it produces `#VALUE!`.
+/// - A reference that holds no logical or numeric value at all yields `#VALUE!`.
 /// - If no coercion error occurs first, encountered formula errors are propagated.
 ///
 /// # Examples
@@ -170,6 +178,7 @@ impl Function for XorFn {
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         let mut true_count = 0usize;
+        let mut saw_logical = false;
         let mut first_error: Option<LiteralValue> = None;
         for a in args {
             if let Ok(view) = a.range_view() {
@@ -177,16 +186,19 @@ impl Function for XorFn {
                 view.for_each_cell(&mut |val| {
                     match val {
                         LiteralValue::Boolean(b) => {
+                            saw_logical = true;
                             if *b {
                                 true_count += 1;
                             }
                         }
                         LiteralValue::Number(n) => {
+                            saw_logical = true;
                             if *n != 0.0 {
                                 true_count += 1;
                             }
                         }
                         LiteralValue::Int(i) => {
+                            saw_logical = true;
                             if *i != 0 {
                                 true_count += 1;
                             }
@@ -223,21 +235,25 @@ impl Function for XorFn {
                 };
                 match v {
                     LiteralValue::Boolean(b) => {
+                        saw_logical = true;
                         if b {
                             true_count += 1;
                         }
                     }
                     LiteralValue::Number(n) => {
+                        saw_logical = true;
                         if n != 0.0 {
                             true_count += 1;
                         }
                     }
                     LiteralValue::Int(i) => {
+                        saw_logical = true;
                         if i != 0 {
                             true_count += 1;
                         }
                     }
-                    LiteralValue::Empty => {}
+                    // An omitted direct argument counts as FALSE.
+                    LiteralValue::Empty => saw_logical = true,
                     LiteralValue::Error(e) => {
                         if first_error.is_none() {
                             first_error = Some(LiteralValue::Error(e));
@@ -255,6 +271,12 @@ impl Function for XorFn {
         }
         if let Some(err) = first_error {
             return Ok(crate::traits::CalcValue::Scalar(err));
+        }
+        // Excel: a reference holding only text/blanks leaves nothing to test → #VALUE!.
+        if !saw_logical {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new_value().with_message("XOR found no logical values"),
+            )));
         }
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
             true_count % 2 == 1,
