@@ -45,6 +45,104 @@ mod tests {
             .with_function(Arc::new(crate::builtins::logical::AndFn))
             .with_function(Arc::new(crate::builtins::logical::TrueFn))
             .with_function(Arc::new(crate::builtins::logical::FalseFn))
+            .with_function(Arc::new(crate::builtins::logical_ext::NotFn))
+            .with_function(Arc::new(crate::builtins::logical::OrFn))
+            .with_function(Arc::new(crate::builtins::logical_ext::XorFn))
+            .with_function(Arc::new(crate::builtins::math::numeric::PowerFn))
+            .with_function(Arc::new(crate::builtins::math::numeric::RoundFn))
+            .with_function(Arc::new(crate::builtins::math::numeric::RoundUpFn))
+            .with_function(Arc::new(crate::builtins::math::numeric::RoundDownFn))
+            .with_function(Arc::new(crate::builtins::math::numeric::CeilingFn))
+            .with_function(Arc::new(crate::builtins::math::CountFn))
+            .with_function(Arc::new(crate::builtins::info::NaFn))
+            .with_function(Arc::new(crate::builtins::text::LenFn))
+            .with_function(Arc::new(crate::builtins::text::LeftFn))
+    }
+
+    /// Excel parity sweep (rowsncolumns/spreadsheet#546 U17b): misc math /
+    /// logical / info semantics.
+    #[test]
+    fn round_family_rounds_the_fifteen_digit_decimal() {
+        let wb = create_workbook();
+        let n = |f: &str, v: f64| {
+            assert_eq!(
+                evaluate_formula(f, &wb).unwrap(),
+                LiteralValue::Number(v),
+                "{f}"
+            )
+        };
+        n("=ROUND(1.005,2)", 1.01);
+        n("=ROUND(2.675,2)", 2.68);
+        n("=ROUND(0.285,2)", 0.29);
+        n("=ROUND(-1.005,2)", -1.01);
+        n("=ROUND(2.5,0)", 3.0);
+        n("=ROUND(1234.5678,-2)", 1200.0);
+        n("=ROUNDDOWN(0.29*100,0)", 29.0);
+        n("=ROUNDUP(1.1*3,0)", 4.0);
+    }
+
+    #[test]
+    fn text_booleans_coerce_in_direct_logical_args_only() {
+        let wb = create_workbook()
+            .with_cell_a1("Sheet1", "A1", LiteralValue::Text("TRUE".into()))
+            .with_cell_a1("Sheet1", "A2", LiteralValue::Text("abc".into()))
+            .with_cell_a1("Sheet1", "A3", LiteralValue::Boolean(true));
+        let eq = |f: &str, v: LiteralValue| assert_eq!(evaluate_formula(f, &wb).unwrap(), v, "{f}");
+        let value_err = |f: &str| match evaluate_formula(f, &wb).unwrap() {
+            LiteralValue::Error(e) => assert_eq!(e.kind, ExcelErrorKind::Value, "{f}"),
+            v => panic!("{f}: expected #VALUE!, got {v:?}"),
+        };
+        eq("=IF(\"TRUE\",1,2)", LiteralValue::Number(1.0));
+        eq("=IF(\"false\",1,2)", LiteralValue::Number(2.0));
+        value_err("=IF(\"a\",1,2)");
+        value_err("=IF(\"1\",1,2)");
+        eq("=AND(\"TRUE\")", LiteralValue::Boolean(true));
+        eq("=AND(\"TRUE\",\"FALSE\")", LiteralValue::Boolean(false));
+        value_err("=AND(\"a\")");
+        eq("=OR(\"FALSE\",\"true\")", LiteralValue::Boolean(true));
+        value_err("=OR(\"a\")");
+        eq("=NOT(\"TRUE\")", LiteralValue::Boolean(false));
+        value_err("=NOT(\"a\")");
+        eq("=XOR(\"TRUE\",FALSE)", LiteralValue::Boolean(true));
+        value_err("=XOR(\"a\")");
+        // Text inside a reference is ignored, whatever it says.
+        eq("=AND(A1:A3)", LiteralValue::Boolean(true));
+        eq("=OR(A1:A2)", LiteralValue::Boolean(false));
+        eq("=XOR(A1:A3)", LiteralValue::Boolean(true));
+    }
+
+    #[test]
+    fn count_ignores_errors_in_direct_arguments() {
+        let wb = create_workbook().with_cell_a1("Sheet1", "A1", LiteralValue::Int(1));
+        assert_eq!(
+            evaluate_formula("=COUNT(A1,NA())", &wb).unwrap(),
+            LiteralValue::Number(1.0)
+        );
+        assert_eq!(
+            evaluate_formula("=COUNT(1/0,2,\"x\")", &wb).unwrap(),
+            LiteralValue::Number(1.0)
+        );
+    }
+
+    #[test]
+    fn ceiling_sign_rules() {
+        let wb = create_workbook();
+        assert_eq!(
+            evaluate_formula("=CEILING(-2.5,-2)", &wb).unwrap(),
+            LiteralValue::Number(-4.0)
+        );
+        assert_eq!(
+            evaluate_formula("=CEILING(-2.5,2)", &wb).unwrap(),
+            LiteralValue::Number(-2.0)
+        );
+        assert_eq!(
+            evaluate_formula("=CEILING(2.5,-2)", &wb).unwrap(),
+            LiteralValue::Error(ExcelError::new_num())
+        );
+        assert_eq!(
+            evaluate_formula("=CEILING(2.5,1)", &wb).unwrap(),
+            LiteralValue::Number(3.0)
+        );
     }
 
     #[test]
@@ -726,10 +824,10 @@ mod tests {
             LiteralValue::Array(rows) => {
                 assert_eq!(rows.len(), 2);
                 assert_eq!(rows[0].len(), 2);
-                // 1^-1 = 1; 0^-1 is treated as #NUM! by current semantics
+                // 1^-1 = 1; 0^-1 is #DIV/0! as in Excel
                 assert_eq!(rows[0][0], LiteralValue::Number(1.0));
                 match &rows[0][1] {
-                    LiteralValue::Error(e) => assert_eq!(e, "#NUM!"),
+                    LiteralValue::Error(e) => assert_eq!(e, "#DIV/0!"),
                     v => panic!("expected num error, got {v:?}"),
                 }
                 // 1^0.5 = 1; 0^0.5 = 0
@@ -776,9 +874,72 @@ mod tests {
 
     #[test]
     fn test_zero_power_zero() {
+        // Excel: 0^0 is #NUM!, 0 to a negative power is #DIV/0!
         let wb = create_workbook();
-        let result = evaluate_formula("=0^0", &wb).unwrap();
-        assert_eq!(result, LiteralValue::Number(1.0));
+        assert_eq!(
+            evaluate_formula("=0^0", &wb).unwrap(),
+            LiteralValue::Error(ExcelError::new_num())
+        );
+        assert_eq!(
+            evaluate_formula("=0^-1", &wb).unwrap(),
+            LiteralValue::Error(ExcelError::new_div())
+        );
+        assert_eq!(
+            evaluate_formula("=POWER(0,0)", &wb).unwrap(),
+            LiteralValue::Error(ExcelError::new_num())
+        );
+        assert_eq!(
+            evaluate_formula("=0^2", &wb).unwrap(),
+            LiteralValue::Number(0.0)
+        );
+    }
+
+    #[test]
+    fn numeric_comparison_uses_fifteen_significant_digits() {
+        // Excel: `=0.1+0.2=0.3` is TRUE because comparisons act on the
+        // 15-significant-digit decimal value, not the raw double.
+        let wb = create_workbook();
+        let t = |f: &str| {
+            assert_eq!(
+                evaluate_formula(f, &wb).unwrap(),
+                LiteralValue::Boolean(true),
+                "{f} should be TRUE"
+            )
+        };
+        t("=0.1+0.2=0.3");
+        t("=NOT(0.1+0.2>0.3)");
+        t("=NOT(0.1+0.2<>0.3)");
+        t("=0.1+0.2>=0.3");
+        t("=1/3*3=1");
+        t("=1.0000001<>1");
+        t("=1<2");
+    }
+
+    #[test]
+    fn number_to_text_uses_fifteen_significant_digits() {
+        // Excel: number→text conversions spell 15 significant digits
+        // (`LEN(1/3)` is 17: "0.333333333333333").
+        let wb = create_workbook();
+        assert_eq!(
+            evaluate_formula("=LEN(1/3)", &wb).unwrap(),
+            LiteralValue::Int(17)
+        );
+        assert_eq!(
+            evaluate_formula("=1/3&\"\"", &wb).unwrap(),
+            LiteralValue::Text("0.333333333333333".to_string())
+        );
+        assert_eq!(
+            evaluate_formula("=(0.1+0.2)&\"\"", &wb).unwrap(),
+            LiteralValue::Text("0.3".to_string())
+        );
+        assert_eq!(
+            evaluate_formula("=1E+15&\"\"", &wb).unwrap(),
+            LiteralValue::Text("1E+15".to_string())
+        );
+        assert_eq!(
+            evaluate_formula("=LEFT(1/3,5)", &wb).unwrap(),
+            LiteralValue::Text("0.333".to_string())
+        );
     }
 
     #[test]
