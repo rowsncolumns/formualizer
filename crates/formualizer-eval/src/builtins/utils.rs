@@ -107,10 +107,12 @@ where
                 for cell in row.iter() {
                     let num_opt = match cell {
                         LiteralValue::Error(e) => return Err(e.clone()),
-                        other => {
-                            crate::coercion::to_number_lenient_with_locale(other, &ctx.locale())
-                                .ok()
-                        }
+                        other => crate::coercion::to_number_lenient_with_clock(
+                            other,
+                            &ctx.locale(),
+                            ctx.clock(),
+                        )
+                        .ok(),
                     };
                     match num_opt {
                         Some(n) => out_row.push(f(n)?),
@@ -136,10 +138,12 @@ where
                 for cell in row {
                     let num_opt = match &cell {
                         LiteralValue::Error(e) => return Err(e.clone()),
-                        other => {
-                            crate::coercion::to_number_lenient_with_locale(other, &ctx.locale())
-                                .ok()
-                        }
+                        other => crate::coercion::to_number_lenient_with_clock(
+                            other,
+                            &ctx.locale(),
+                            ctx.clock(),
+                        )
+                        .ok(),
                     };
                     match num_opt {
                         Some(n) => out_row.push(f(n)?),
@@ -235,15 +239,21 @@ where
 
                 let n0 = match &lv0 {
                     LiteralValue::Error(e) => return Err(e.clone()),
-                    other => {
-                        crate::coercion::to_number_lenient_with_locale(other, &ctx.locale()).ok()
-                    }
+                    other => crate::coercion::to_number_lenient_with_clock(
+                        other,
+                        &ctx.locale(),
+                        ctx.clock(),
+                    )
+                    .ok(),
                 };
                 let n1 = match &lv1 {
                     LiteralValue::Error(e) => return Err(e.clone()),
-                    other => {
-                        crate::coercion::to_number_lenient_with_locale(other, &ctx.locale()).ok()
-                    }
+                    other => crate::coercion::to_number_lenient_with_clock(
+                        other,
+                        &ctx.locale(),
+                        ctx.clock(),
+                    )
+                    .ok(),
                 };
 
                 let out_cell = match (n0, n1) {

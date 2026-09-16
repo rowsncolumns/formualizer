@@ -1975,8 +1975,8 @@ impl Function for InfoFn {
     }
 }
 
-/// `AREAS(reference)` — the number of areas in a reference. The engine has no union references
-/// (`(A1:B2,D4)`), so every reference is one area; a non-reference argument is `#VALUE!`.
+/// `AREAS(reference)` — the number of areas in a reference: one per operand of a parenthesised
+/// union `(A1:B2,D4)`, else 1. A non-reference argument is `#VALUE!`.
 #[derive(Debug)]
 pub struct AreasFn;
 
@@ -2012,16 +2012,17 @@ impl Function for AreasFn {
         if args.len() != 1 {
             return arity_error();
         }
-        match args[0].as_reference_or_eval() {
+        match args[0].as_reference_areas().as_deref() {
             // A defined name is a reference syntactically; it still has to resolve
             // (`=AREAS(FOO)` with FOO undefined is `#NAME?`, not 1).
-            Ok(formualizer_parse::parser::ReferenceType::NamedRange(_)) => {
+            Ok([formualizer_parse::parser::ReferenceType::NamedRange(_)]) => {
                 match args[0].range_view() {
                     Ok(_) => Ok(scalar(LiteralValue::Int(1))),
                     Err(e) => Ok(scalar(LiteralValue::Error(e))),
                 }
             }
-            Ok(_) => Ok(scalar(LiteralValue::Int(1))),
+            // A parenthesised union `(A1,B2)` is one area per operand.
+            Ok(areas) => Ok(scalar(LiteralValue::Int(areas.len() as i64))),
             Err(_) => Ok(error_value(ExcelErrorKind::Value)),
         }
     }

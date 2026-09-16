@@ -42,7 +42,40 @@ fn arg_byref_array() -> Vec<ArgSchema> {
             repeating: None,
             default: None,
         },
+        // area_num: which area of a union reference `(A1:A5,C1:C5)` to index (default 1)
+        ArgSchema {
+            kinds: smallvec::smallvec![ArgKind::Number],
+            required: false,
+            by_ref: false,
+            shape: ShapeKind::Scalar,
+            coercion: CoercionPolicy::NumberStrict,
+            max: None,
+            repeating: None,
+            default: None,
+        },
     ]
+}
+
+/// `INDEX`'s optional `area_num` (1-based, default 1) as an index into `areas`: `#REF!` when
+/// out of range, `#VALUE!` when not numeric.
+fn index_area<'a>(
+    areas: &'a [ReferenceType],
+    area_arg: Option<&ArgumentHandle<'_, '_>>,
+) -> Result<&'a ReferenceType, ExcelError> {
+    let area_num = match area_arg {
+        None => 1,
+        Some(a) if is_skipped_arg(a) => 1,
+        Some(a) => match a.value()?.into_literal() {
+            LiteralValue::Number(n) => n as i64,
+            LiteralValue::Int(i) => i,
+            LiteralValue::Error(e) => return Err(e),
+            _ => return Err(ExcelError::new(ExcelErrorKind::Value)),
+        },
+    };
+    if area_num < 1 || area_num as usize > areas.len() {
+        return Err(ExcelError::new(ExcelErrorKind::Ref));
+    }
+    Ok(&areas[area_num as usize - 1])
 }
 
 fn arg_byref_reference() -> Vec<ArgSchema> {
@@ -214,14 +247,19 @@ impl Function for IndexFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         ctx: &dyn FunctionContext<'b>,
     ) -> Option<Result<ReferenceType, ExcelError>> {
-        // args: array(by_ref), row, col (col optional for 1D)
+        // args: array(by_ref), row, col (col optional for 1D), area_num (union references)
         if args.len() < 2 {
             return Some(Err(ExcelError::new(ExcelErrorKind::Value)));
         }
         // Return None for array literals so eval() handles them
-        let base = match args[0].as_reference_or_eval() {
-            Ok(r) => r,
+        let areas = match args[0].as_reference_areas() {
+            Ok(areas) => areas,
             Err(_) => return None,
+        };
+        // A parenthesised union `(A1:A5,C1:C5)` indexes into the area `area_num` selects.
+        let base = match index_area(&areas, args.get(3)) {
+            Ok(base) => base.clone(),
+            Err(e) => return Some(Err(e)),
         };
         // A NAMED base resolves through its definition when it is a plain cell/range name;
         // literal/formula names fall back to eval()'s values path.
@@ -371,6 +409,22 @@ impl Function for IndexFn {
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                     ExcelError::new(ExcelErrorKind::Value),
                 )));
+            }
+            // An array constant is a single area: only area_num 1 (or omitted) is valid.
+            if let Some(area_arg) = args.get(3)
+                && !is_skipped_arg(area_arg)
+            {
+                let area_num = match area_arg.value()?.into_literal() {
+                    LiteralValue::Number(n) => n as i64,
+                    LiteralValue::Int(i) => i,
+                    LiteralValue::Error(e) => return Err(e),
+                    _ => return Err(ExcelError::new(ExcelErrorKind::Value)),
+                };
+                if area_num != 1 {
+                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                        ExcelError::new(ExcelErrorKind::Ref),
+                    )));
+                }
             }
             let v = args[0].value()?.into_literal();
             let table: Vec<Vec<LiteralValue>> = match v {

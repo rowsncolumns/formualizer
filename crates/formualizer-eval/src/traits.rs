@@ -980,6 +980,41 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
         }
     }
 
+    /// The reference areas of this argument: one per operand of a parenthesised union
+    /// (`(A1:A5,C1:C5)` → two), otherwise the single reference of
+    /// [`Self::as_reference_or_eval`]. Materializes no values.
+    pub fn as_reference_areas(&self) -> Result<Vec<ReferenceType>, ExcelError> {
+        match &self.expr {
+            ArgumentExpr::Ast(node) => match &node.node_type {
+                ASTNodeType::Reference { .. }
+                | ASTNodeType::Function { .. }
+                | ASTNodeType::BinaryOp { .. }
+                | ASTNodeType::UnaryOp { .. } => self.interp.evaluate_ast_as_reference_areas(node),
+                _ => Err(ExcelError::new(ExcelErrorKind::Ref)
+                    .with_message("Argument is not a reference")),
+            },
+            ArgumentExpr::Arena {
+                id,
+                data_store,
+                sheet_registry,
+            } => {
+                let node = data_store.get_node(*id).ok_or_else(|| {
+                    ExcelError::new(ExcelErrorKind::Value).with_message("Missing AST node")
+                })?;
+                match node {
+                    crate::engine::arena::AstNodeData::Reference { .. }
+                    | crate::engine::arena::AstNodeData::Function { .. }
+                    | crate::engine::arena::AstNodeData::BinaryOp { .. }
+                    | crate::engine::arena::AstNodeData::UnaryOp { .. } => self
+                        .interp
+                        .evaluate_arena_ast_as_reference_areas(*id, data_store, sheet_registry),
+                    _ => Err(ExcelError::new(ExcelErrorKind::Ref)
+                        .with_message("Argument is not a reference")),
+                }
+            }
+        }
+    }
+
     /* tiny validator helper for macro */
     pub fn matches_kind(&self, k: formualizer_common::ArgKind) -> Result<bool, ExcelError> {
         Ok(match k {
