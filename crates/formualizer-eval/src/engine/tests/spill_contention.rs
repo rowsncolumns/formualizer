@@ -253,7 +253,9 @@ fn preemption_recomputes_readers_of_the_vacated_projection() {
 }
 
 /// Host-declared blockers (a spreadsheet's merged cells) stop a spill like content does; clearing
-/// them frees the region. The anchor's own cell is exempt — a 1×1 result there is not a spill.
+/// them frees the region. Excel's rule covers EVERY cell of the spill range, the anchor included:
+/// a merged cell holding a spilling formula is `#SPILL!` ("Spill range has merged cell"). Only a
+/// 1×1 result is exempt — it never spills, so a merged cell may hold it.
 #[test]
 fn host_spill_blockers_block_projection_cells_only() {
     for (mode, cfg) in configs() {
@@ -268,11 +270,25 @@ fn host_spill_blockers_block_projection_cells_only() {
             get(&engine, 1, 2)
         );
         assert!(is_empty(&get(&engine, 1, 3)), "{mode}: C1 untouched");
-        set(&mut engine, 1, 1, "=SEQUENCE(3)"); // A1:A3 — only the anchor A1 lies in the merge A1:B1
+        set(&mut engine, 1, 1, "=SEQUENCE(3)"); // A1:A3 — the anchor A1 itself lies in the merge A1:B1
+        assert!(
+            is_spill(&get(&engine, 1, 1)),
+            "{mode}: a merged anchor cannot spill, got {:?}",
+            get(&engine, 1, 1)
+        );
+        assert!(is_empty(&get(&engine, 2, 1)), "{mode}: A2 untouched");
+        assert!(is_empty(&get(&engine, 3, 1)), "{mode}: A3 untouched");
+        set(&mut engine, 1, 1, "=SEQUENCE(1)"); // a 1×1 array result never spills
         assert_eq!(
-            get(&engine, 3, 1),
+            get(&engine, 1, 1),
+            Some(LiteralValue::Number(1.0)),
+            "{mode}: a 1×1 result in a merged cell is an ordinary value"
+        );
+        set(&mut engine, 1, 1, "=SUM(1,2)");
+        assert_eq!(
+            get(&engine, 1, 1),
             Some(LiteralValue::Number(3.0)),
-            "{mode}: anchor-only overlap spills"
+            "{mode}: a scalar formula in a merged cell"
         );
         set(&mut engine, 1, 4, "=SEQUENCE(2,2)"); // D1:E2 — no blocker there
         assert_eq!(
