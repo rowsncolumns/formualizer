@@ -1,4 +1,5 @@
-//! Bond pricing functions: ACCRINT, ACCRINTM, PRICE, YIELD
+//! Bond pricing functions: ACCRINT, ACCRINTM, PRICE, YIELD, the COUP* coupon-schedule family,
+//! DURATION, MDURATION, PRICEDISC, YIELDDISC, INTRATE, RECEIVED, PRICEMAT, YIELDMAT
 
 use crate::args::ArgSchema;
 use crate::builtins::datetime::serial_to_date;
@@ -165,55 +166,93 @@ fn year_fraction(start: &NaiveDate, end: &NaiveDate, basis: DayCountBasis) -> f6
 }
 
 /// Find the coupon date before settlement date
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let (ny, nm) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    NaiveDate::from_ymd_opt(ny, nm, 1)
+        .unwrap()
+        .signed_duration_since(NaiveDate::from_ymd_opt(year, month, 1).unwrap())
+        .num_days() as u32
+}
+
+/// The coupon date `months_back` months before `maturity` on Excel's back-from-maturity
+/// schedule: maturity's day-of-month is kept (clamped to each month's length) and a maturity on
+/// the last day of its month pins every coupon date to month-end.
+fn coupon_date_back(maturity: &NaiveDate, months_back: i32) -> NaiveDate {
+    let eom = maturity.day() == days_in_month(maturity.year(), maturity.month());
+    let total = maturity.year() * 12 + (maturity.month() as i32 - 1) - months_back;
+    let year = total.div_euclid(12);
+    let month = (total.rem_euclid(12) + 1) as u32;
+    let dim = days_in_month(year, month);
+    let day = if eom { dim } else { maturity.day().min(dim) };
+    NaiveDate::from_ymd_opt(year, month, day).expect("coupon date within month length")
+}
+
+/// The coupon period containing `settlement`: the previous coupon date (`pcd`, at or before
+/// settlement), the next one (`ncd`, strictly after) and `num`, the number of coupons still
+/// payable after settlement up to and including maturity (Excel's COUPPCD / COUPNCD / COUPNUM).
+struct CouponPeriod {
+    pcd: NaiveDate,
+    ncd: NaiveDate,
+    num: i32,
+}
+
+fn coupon_period(settlement: &NaiveDate, maturity: &NaiveDate, frequency: i32) -> CouponPeriod {
+    let step = 12 / frequency;
+    let mut j = 1;
+    while coupon_date_back(maturity, j * step) > *settlement {
+        j += 1;
+    }
+    CouponPeriod {
+        pcd: coupon_date_back(maturity, j * step),
+        ncd: coupon_date_back(maturity, (j - 1) * step),
+        num: j,
+    }
+}
+
+/// COUPDAYS — days in the coupon period: actual for actual/actual, else the nominal year over
+/// the frequency.
+fn coupon_days(period: &CouponPeriod, frequency: i32, basis: DayCountBasis) -> f64 {
+    match basis {
+        DayCountBasis::ActualActual => (period.ncd - period.pcd).num_days() as f64,
+        DayCountBasis::Actual365 => 365.0 / frequency as f64,
+        _ => 360.0 / frequency as f64,
+    }
+}
+
+/// COUPDAYBS — days from the previous coupon date to settlement on the given basis.
+fn coupon_days_bs(period: &CouponPeriod, settlement: &NaiveDate, basis: DayCountBasis) -> f64 {
+    days_between(&period.pcd, settlement, basis) as f64
+}
+
+/// COUPDAYSNC — days from settlement to the next coupon date. On the 30/360 bases Excel takes
+/// the remainder of the nominal period (`COUPDAYS - COUPDAYBS`); otherwise the actual day span.
+fn coupon_days_nc(
+    period: &CouponPeriod,
+    settlement: &NaiveDate,
+    frequency: i32,
+    basis: DayCountBasis,
+) -> f64 {
+    match basis {
+        DayCountBasis::UsNasd30360 | DayCountBasis::European30360 => {
+            coupon_days(period, frequency, basis) - coupon_days_bs(period, settlement, basis)
+        }
+        _ => (period.ncd - *settlement).num_days() as f64,
+    }
+}
+
+/// The coupon date strictly before `settlement` (ACCRINT's accrual start when `calc_method` is
+/// FALSE).
 fn coupon_date_before(settlement: &NaiveDate, maturity: &NaiveDate, frequency: i32) -> NaiveDate {
-    let months_between_coupons = 12 / frequency;
-    let mut coupon_date = *maturity;
-
-    // Work backwards from maturity to find the coupon date just before settlement
-    while coupon_date >= *settlement {
-        coupon_date = add_months(&coupon_date, -months_between_coupons);
+    let step = 12 / frequency;
+    let mut j = 0;
+    while coupon_date_back(maturity, j * step) >= *settlement {
+        j += 1;
     }
-    coupon_date
-}
-
-/// Find the coupon date after settlement date
-fn coupon_date_after(settlement: &NaiveDate, maturity: &NaiveDate, frequency: i32) -> NaiveDate {
-    let months_between_coupons = 12 / frequency;
-    let prev_coupon = coupon_date_before(settlement, maturity, frequency);
-    add_months(&prev_coupon, months_between_coupons)
-}
-
-/// Add months to a date, handling end-of-month adjustments
-fn add_months(date: &NaiveDate, months: i32) -> NaiveDate {
-    let total_months = date.year() * 12 + date.month() as i32 - 1 + months;
-    let new_year = total_months / 12;
-    let new_month = (total_months % 12 + 1) as u32;
-
-    // Try to keep the same day, but cap at month's end
-    let mut new_day = date.day();
-    loop {
-        if let Some(d) = NaiveDate::from_ymd_opt(new_year, new_month, new_day) {
-            return d;
-        }
-        new_day -= 1;
-        if new_day == 0 {
-            // Fallback - should never reach here
-            return NaiveDate::from_ymd_opt(new_year, new_month, 1).unwrap();
-        }
-    }
-}
-
-/// Count the number of coupons remaining
-fn coupons_remaining(settlement: &NaiveDate, maturity: &NaiveDate, frequency: i32) -> i32 {
-    let months_between_coupons = 12 / frequency;
-    let mut count = 0;
-    let mut coupon_date = coupon_date_after(settlement, maturity, frequency);
-
-    while coupon_date <= *maturity {
-        count += 1;
-        coupon_date = add_months(&coupon_date, months_between_coupons);
-    }
-    count
+    coupon_date_back(maturity, j * step)
 }
 
 /// Returns accrued interest for a coupon-bearing security.
@@ -630,6 +669,10 @@ impl Function for PriceFn {
 }
 
 /// Calculate bond price using standard bond pricing formula
+/// Excel's PRICE formula. With `N` coupons left, `E` days in the coupon period, `A` days accrued
+/// since the previous coupon and `DSC` days to the next one, each cash flow `k` (1-based) is
+/// discounted by `(1 + yld/f)^(k - 1 + DSC/E)` and the accrued coupon `100·rate/f · A/E` is
+/// subtracted; a single remaining coupon is discounted linearly.
 fn calculate_price(
     settlement: &NaiveDate,
     maturity: &NaiveDate,
@@ -639,52 +682,77 @@ fn calculate_price(
     frequency: i32,
     basis: DayCountBasis,
 ) -> f64 {
-    let n = coupons_remaining(settlement, maturity, frequency);
-    let coupon = 100.0 * rate / frequency as f64;
+    let period = coupon_period(settlement, maturity, frequency);
+    let f = frequency as f64;
+    let e = coupon_days(&period, frequency, basis);
+    let a = coupon_days_bs(&period, settlement, basis);
+    let dsc = coupon_days_nc(&period, settlement, frequency, basis);
+    let n = period.num;
+    let coupon = 100.0 * rate / f;
+    let accrued = coupon * a / e;
 
-    // Find previous and next coupon dates
-    let next_coupon = coupon_date_after(settlement, maturity, frequency);
-    let prev_coupon = coupon_date_before(settlement, maturity, frequency);
-
-    // Calculate fraction of period from settlement to next coupon
-    let days_to_next = days_between(settlement, &next_coupon, basis) as f64;
-    let days_in_period = days_between(&prev_coupon, &next_coupon, basis) as f64;
-
-    let dsn = if days_in_period > 0.0 {
-        days_to_next / days_in_period
-    } else {
-        0.0
-    };
-
-    let yld_per_period = yld / frequency as f64;
-
-    if n == 1 {
-        // Short first period (single coupon remaining)
-        // Price = (redemption + coupon) / (1 + dsn * yld_per_period) - (1 - dsn) * coupon
-        (redemption + coupon) / (1.0 + dsn * yld_per_period) - (1.0 - dsn) * coupon
-    } else {
-        // Multiple coupons remaining
-        // Price = sum of discounted coupons + discounted redemption - accrued interest
-        let discount_factor = 1.0 + yld_per_period;
-
-        // Discount factor for first coupon (fractional period)
-        let first_discount = discount_factor.powf(dsn);
-
-        // Present value of coupon payments
-        let mut pv_coupons = 0.0;
-        for k in 0..n {
-            let discount = first_discount * discount_factor.powi(k);
-            pv_coupons += coupon / discount;
-        }
-
-        // Present value of redemption
-        let pv_redemption = redemption / (first_discount * discount_factor.powi(n - 1));
-
-        // Accrued interest (negative because we subtract it)
-        let accrued = (1.0 - dsn) * coupon;
-
-        pv_coupons + pv_redemption - accrued
+    if n <= 1 {
+        return (redemption + coupon) / (1.0 + dsc / e * yld / f) - accrued;
     }
+
+    let base = 1.0 + yld / f;
+    let frac = dsc / e;
+    let mut pv = redemption / base.powf(n as f64 - 1.0 + frac);
+    for k in 1..=n {
+        pv += coupon / base.powf(k as f64 - 1.0 + frac);
+    }
+    pv - accrued
+}
+
+/// Excel's closed-form YIELD for a security with at most one coupon left.
+fn yield_single_coupon(
+    settlement: &NaiveDate,
+    maturity: &NaiveDate,
+    rate: f64,
+    price: f64,
+    redemption: f64,
+    frequency: i32,
+    basis: DayCountBasis,
+) -> f64 {
+    let period = coupon_period(settlement, maturity, frequency);
+    let f = frequency as f64;
+    let e = coupon_days(&period, frequency, basis);
+    let a = coupon_days_bs(&period, settlement, basis);
+    let dsr = coupon_days_nc(&period, settlement, frequency, basis);
+    let coupon = rate / f;
+    let paid = price / 100.0 + a / e * coupon;
+    (redemption / 100.0 + coupon - paid) / paid * (f * e / dsr)
+}
+
+/// Macaulay duration (years) of a coupon bond: the present-value-weighted average time to each
+/// cash flow, with the same fractional first period `DSC/E` as PRICE.
+fn macaulay_duration(
+    settlement: &NaiveDate,
+    maturity: &NaiveDate,
+    coupon_rate: f64,
+    yld: f64,
+    frequency: i32,
+    basis: DayCountBasis,
+) -> f64 {
+    let period = coupon_period(settlement, maturity, frequency);
+    let f = frequency as f64;
+    let e = coupon_days(&period, frequency, basis);
+    let dsc = coupon_days_nc(&period, settlement, frequency, basis);
+    let frac = dsc / e;
+    let n = period.num;
+    let coupon = 100.0 * coupon_rate / f;
+    let base = 1.0 + yld / f;
+
+    let mut weighted = 0.0;
+    let mut pv = 0.0;
+    for k in 1..=n {
+        let t = k as f64 - 1.0 + frac;
+        let cash = if k == n { coupon + 100.0 } else { coupon };
+        let discounted = cash / base.powf(t);
+        weighted += t * discounted;
+        pv += discounted;
+    }
+    weighted / pv / f
 }
 
 /// Returns annual yield for a coupon-paying security from its market price.
@@ -808,6 +876,19 @@ impl Function for YieldFn {
             return Ok(CalcValue::Scalar(
                 LiteralValue::Error(ExcelError::new_num()),
             ));
+        }
+
+        if coupon_period(&settlement, &maturity, frequency).num <= 1 {
+            let y = yield_single_coupon(
+                &settlement,
+                &maturity,
+                rate,
+                pr,
+                redemption,
+                frequency,
+                basis,
+            );
+            return Ok(CalcValue::Scalar(LiteralValue::Number(y)));
         }
 
         // Use Newton-Raphson to find yield where price = target price
@@ -1217,6 +1298,385 @@ impl Function for TbillyieldFn {
     }
 }
 
+/// Shared argument decoding for the securities functions: `(settlement, maturity)` serial dates
+/// (settlement must precede maturity) and an optional `basis` at `basis_index` (default 0).
+fn security_dates(
+    args: &[ArgumentHandle<'_, '_>],
+    basis_index: usize,
+) -> Result<(NaiveDate, NaiveDate, DayCountBasis), ExcelError> {
+    let settlement = serial_to_date(coerce_num(&args[0])?.trunc())?;
+    let maturity = serial_to_date(coerce_num(&args[1])?.trunc())?;
+    let basis_int = if args.len() > basis_index {
+        coerce_num(&args[basis_index])?.trunc() as i32
+    } else {
+        0
+    };
+    let basis = DayCountBasis::from_int(basis_int)?;
+    if settlement >= maturity {
+        return Err(ExcelError::new_num());
+    }
+    Ok((settlement, maturity, basis))
+}
+
+fn coupon_frequency(arg: &ArgumentHandle<'_, '_>) -> Result<i32, ExcelError> {
+    let frequency = coerce_num(arg)?.trunc() as i32;
+    if frequency != 1 && frequency != 2 && frequency != 4 {
+        return Err(ExcelError::new_num());
+    }
+    Ok(frequency)
+}
+
+fn num_or_error(v: Result<f64, ExcelError>) -> Result<CalcValue<'static>, ExcelError> {
+    Ok(CalcValue::Scalar(match v {
+        Ok(n) => LiteralValue::Number(n),
+        Err(e) => LiteralValue::Error(e),
+    }))
+}
+
+static SECURITY_SCHEMA_4: std::sync::LazyLock<Vec<ArgSchema>> = std::sync::LazyLock::new(|| {
+    vec![
+        ArgSchema::number_lenient_scalar(),
+        ArgSchema::number_lenient_scalar(),
+        ArgSchema::number_lenient_scalar(),
+        ArgSchema::number_lenient_scalar(),
+    ]
+});
+static SECURITY_SCHEMA_5: std::sync::LazyLock<Vec<ArgSchema>> = std::sync::LazyLock::new(|| {
+    vec![
+        ArgSchema::number_lenient_scalar(),
+        ArgSchema::number_lenient_scalar(),
+        ArgSchema::number_lenient_scalar(),
+        ArgSchema::number_lenient_scalar(),
+        ArgSchema::number_lenient_scalar(),
+    ]
+});
+static SECURITY_SCHEMA_6: std::sync::LazyLock<Vec<ArgSchema>> = std::sync::LazyLock::new(|| {
+    vec![
+        ArgSchema::number_lenient_scalar(),
+        ArgSchema::number_lenient_scalar(),
+        ArgSchema::number_lenient_scalar(),
+        ArgSchema::number_lenient_scalar(),
+        ArgSchema::number_lenient_scalar(),
+        ArgSchema::number_lenient_scalar(),
+    ]
+});
+
+#[derive(Clone, Copy)]
+enum CouponMetric {
+    DaysBs,
+    Days,
+    DaysNc,
+    Ncd,
+    Pcd,
+    Num,
+}
+
+/// `COUP*(settlement, maturity, frequency, [basis])` — one coupon-schedule metric.
+fn eval_coupon_metric(
+    args: &[ArgumentHandle<'_, '_>],
+    metric: CouponMetric,
+) -> Result<CalcValue<'static>, ExcelError> {
+    num_or_error((|| {
+        let (settlement, maturity, basis) = security_dates(args, 3)?;
+        let frequency = coupon_frequency(&args[2])?;
+        let period = coupon_period(&settlement, &maturity, frequency);
+        Ok(match metric {
+            CouponMetric::DaysBs => coupon_days_bs(&period, &settlement, basis),
+            CouponMetric::Days => coupon_days(&period, frequency, basis),
+            CouponMetric::DaysNc => coupon_days_nc(&period, &settlement, frequency, basis),
+            CouponMetric::Ncd => crate::builtins::datetime::date_to_serial(&period.ncd),
+            CouponMetric::Pcd => crate::builtins::datetime::date_to_serial(&period.pcd),
+            CouponMetric::Num => period.num as f64,
+        })
+    })())
+}
+
+macro_rules! coupon_metric_fn {
+    ($ty:ident, $name:literal, $metric:expr, $doc:literal) => {
+        #[doc = $doc]
+        #[derive(Debug)]
+        pub struct $ty;
+        impl Function for $ty {
+            func_caps!(PURE);
+            fn name(&self) -> &'static str {
+                $name
+            }
+            fn min_args(&self) -> usize {
+                3
+            }
+            fn variadic(&self) -> bool {
+                true
+            }
+            fn arg_schema(&self) -> &'static [ArgSchema] {
+                &SECURITY_SCHEMA_4[..]
+            }
+            fn eval<'a, 'b, 'c>(
+                &self,
+                args: &'c [ArgumentHandle<'a, 'b>],
+                _ctx: &dyn FunctionContext<'b>,
+            ) -> Result<CalcValue<'b>, ExcelError> {
+                eval_coupon_metric(args, $metric)
+            }
+        }
+    };
+}
+
+coupon_metric_fn!(
+    CoupdaybsFn,
+    "COUPDAYBS",
+    CouponMetric::DaysBs,
+    "`COUPDAYBS(settlement, maturity, frequency, [basis])` — days from the start of the coupon period to settlement."
+);
+coupon_metric_fn!(
+    CoupdaysFn,
+    "COUPDAYS",
+    CouponMetric::Days,
+    "`COUPDAYS(settlement, maturity, frequency, [basis])` — days in the coupon period containing settlement."
+);
+coupon_metric_fn!(
+    CoupdaysncFn,
+    "COUPDAYSNC",
+    CouponMetric::DaysNc,
+    "`COUPDAYSNC(settlement, maturity, frequency, [basis])` — days from settlement to the next coupon date."
+);
+coupon_metric_fn!(
+    CoupncdFn,
+    "COUPNCD",
+    CouponMetric::Ncd,
+    "`COUPNCD(settlement, maturity, frequency, [basis])` — the next coupon date after settlement, as a serial date."
+);
+coupon_metric_fn!(
+    CouppcdFn,
+    "COUPPCD",
+    CouponMetric::Pcd,
+    "`COUPPCD(settlement, maturity, frequency, [basis])` — the coupon date at or before settlement, as a serial date."
+);
+coupon_metric_fn!(
+    CoupnumFn,
+    "COUPNUM",
+    CouponMetric::Num,
+    "`COUPNUM(settlement, maturity, frequency, [basis])` — the number of coupons payable between settlement and maturity."
+);
+
+/// `DURATION(settlement, maturity, coupon, yld, frequency, [basis])` — Macaulay duration in years.
+/// Excel: `DURATION(DATE(2008,1,1),DATE(2016,1,1),0.08,0.09,2,1)` = 5.993775.
+#[derive(Debug)]
+pub struct DurationFn;
+/// `MDURATION(settlement, maturity, coupon, yld, frequency, [basis])` — modified duration,
+/// `DURATION / (1 + yld / frequency)`. Excel: 5.73567 for the DURATION example.
+#[derive(Debug)]
+pub struct MdurationFn;
+
+fn eval_duration(
+    args: &[ArgumentHandle<'_, '_>],
+    modified: bool,
+) -> Result<CalcValue<'static>, ExcelError> {
+    num_or_error((|| {
+        let (settlement, maturity, basis) = security_dates(args, 5)?;
+        let coupon = coerce_num(&args[2])?;
+        let yld = coerce_num(&args[3])?;
+        let frequency = coupon_frequency(&args[4])?;
+        if coupon < 0.0 || yld < 0.0 {
+            return Err(ExcelError::new_num());
+        }
+        let duration = macaulay_duration(&settlement, &maturity, coupon, yld, frequency, basis);
+        Ok(if modified {
+            duration / (1.0 + yld / frequency as f64)
+        } else {
+            duration
+        })
+    })())
+}
+
+macro_rules! duration_fn {
+    ($ty:ident, $name:literal, $modified:expr) => {
+        impl Function for $ty {
+            func_caps!(PURE);
+            fn name(&self) -> &'static str {
+                $name
+            }
+            fn min_args(&self) -> usize {
+                5
+            }
+            fn variadic(&self) -> bool {
+                true
+            }
+            fn arg_schema(&self) -> &'static [ArgSchema] {
+                &SECURITY_SCHEMA_6[..]
+            }
+            fn eval<'a, 'b, 'c>(
+                &self,
+                args: &'c [ArgumentHandle<'a, 'b>],
+                _ctx: &dyn FunctionContext<'b>,
+            ) -> Result<CalcValue<'b>, ExcelError> {
+                eval_duration(args, $modified)
+            }
+        }
+    };
+}
+duration_fn!(DurationFn, "DURATION", false);
+duration_fn!(MdurationFn, "MDURATION", true);
+
+#[derive(Clone, Copy)]
+enum DiscountMetric {
+    PriceDisc,
+    YieldDisc,
+    IntRate,
+    Received,
+}
+
+/// The four discounted-security functions share the shape
+/// `(settlement, maturity, amount, amount, [basis])` and a single `YEARFRAC(settlement, maturity)`.
+fn eval_discount_metric(
+    args: &[ArgumentHandle<'_, '_>],
+    metric: DiscountMetric,
+) -> Result<CalcValue<'static>, ExcelError> {
+    num_or_error((|| {
+        let (settlement, maturity, basis) = security_dates(args, 4)?;
+        let x = coerce_num(&args[2])?;
+        let y = coerce_num(&args[3])?;
+        if x <= 0.0 || y <= 0.0 {
+            return Err(ExcelError::new_num());
+        }
+        let yf = year_fraction(&settlement, &maturity, basis);
+        if yf <= 0.0 {
+            return Err(ExcelError::new_num());
+        }
+        Ok(match metric {
+            // PRICEDISC(settlement, maturity, discount, redemption)
+            DiscountMetric::PriceDisc => y - x * y * yf,
+            // YIELDDISC(settlement, maturity, pr, redemption)
+            DiscountMetric::YieldDisc => (y / x - 1.0) / yf,
+            // INTRATE(settlement, maturity, investment, redemption)
+            DiscountMetric::IntRate => (y / x - 1.0) / yf,
+            // RECEIVED(settlement, maturity, investment, discount)
+            DiscountMetric::Received => x / (1.0 - y * yf),
+        })
+    })())
+}
+
+macro_rules! discount_metric_fn {
+    ($ty:ident, $name:literal, $metric:expr, $doc:literal) => {
+        #[doc = $doc]
+        #[derive(Debug)]
+        pub struct $ty;
+        impl Function for $ty {
+            func_caps!(PURE);
+            fn name(&self) -> &'static str {
+                $name
+            }
+            fn min_args(&self) -> usize {
+                4
+            }
+            fn variadic(&self) -> bool {
+                true
+            }
+            fn arg_schema(&self) -> &'static [ArgSchema] {
+                &SECURITY_SCHEMA_5[..]
+            }
+            fn eval<'a, 'b, 'c>(
+                &self,
+                args: &'c [ArgumentHandle<'a, 'b>],
+                _ctx: &dyn FunctionContext<'b>,
+            ) -> Result<CalcValue<'b>, ExcelError> {
+                eval_discount_metric(args, $metric)
+            }
+        }
+    };
+}
+
+discount_metric_fn!(
+    PricediscFn,
+    "PRICEDISC",
+    DiscountMetric::PriceDisc,
+    "`PRICEDISC(settlement, maturity, discount, redemption, [basis])` — price per 100 of a discounted security. Excel: `PRICEDISC(DATE(2008,2,16),DATE(2008,3,1),0.0525,100,2)` = 99.795833."
+);
+discount_metric_fn!(
+    YielddiscFn,
+    "YIELDDISC",
+    DiscountMetric::YieldDisc,
+    "`YIELDDISC(settlement, maturity, pr, redemption, [basis])` — annual yield of a discounted security."
+);
+discount_metric_fn!(
+    IntrateFn,
+    "INTRATE",
+    DiscountMetric::IntRate,
+    "`INTRATE(settlement, maturity, investment, redemption, [basis])` — interest rate of a fully invested security."
+);
+discount_metric_fn!(
+    ReceivedFn,
+    "RECEIVED",
+    DiscountMetric::Received,
+    "`RECEIVED(settlement, maturity, investment, discount, [basis])` — amount received at maturity for a fully invested security."
+);
+
+/// `PRICEMAT(settlement, maturity, issue, rate, yld, [basis])` — price per 100 of a security that
+/// pays interest at maturity. Excel: `PRICEMAT(DATE(2008,2,15),DATE(2008,4,13),DATE(2007,11,11),0.061,0.061,0)`
+/// = 99.98449888.
+#[derive(Debug)]
+pub struct PricematFn;
+/// `YIELDMAT(settlement, maturity, issue, rate, pr, [basis])` — annual yield of a security that
+/// pays interest at maturity.
+#[derive(Debug)]
+pub struct YieldmatFn;
+
+fn eval_maturity_security(
+    args: &[ArgumentHandle<'_, '_>],
+    price_mode: bool,
+) -> Result<CalcValue<'static>, ExcelError> {
+    num_or_error((|| {
+        let (settlement, maturity, basis) = security_dates(args, 5)?;
+        let issue = serial_to_date(coerce_num(&args[2])?.trunc())?;
+        let rate = coerce_num(&args[3])?;
+        let other = coerce_num(&args[4])?;
+        if rate < 0.0 || (price_mode && other < 0.0) || (!price_mode && other <= 0.0) {
+            return Err(ExcelError::new_num());
+        }
+        let issue_to_maturity = year_fraction(&issue, &maturity, basis);
+        let issue_to_settlement = year_fraction(&issue, &settlement, basis);
+        let settlement_to_maturity = year_fraction(&settlement, &maturity, basis);
+        Ok(if price_mode {
+            let yld = other;
+            ((1.0 + issue_to_maturity * rate) / (1.0 + settlement_to_maturity * yld)
+                - issue_to_settlement * rate)
+                * 100.0
+        } else {
+            let price = other;
+            ((1.0 + issue_to_maturity * rate) / (price / 100.0 + issue_to_settlement * rate) - 1.0)
+                / settlement_to_maturity
+        })
+    })())
+}
+
+macro_rules! maturity_security_fn {
+    ($ty:ident, $name:literal, $price_mode:expr) => {
+        impl Function for $ty {
+            func_caps!(PURE);
+            fn name(&self) -> &'static str {
+                $name
+            }
+            fn min_args(&self) -> usize {
+                5
+            }
+            fn variadic(&self) -> bool {
+                true
+            }
+            fn arg_schema(&self) -> &'static [ArgSchema] {
+                &SECURITY_SCHEMA_6[..]
+            }
+            fn eval<'a, 'b, 'c>(
+                &self,
+                args: &'c [ArgumentHandle<'a, 'b>],
+                _ctx: &dyn FunctionContext<'b>,
+            ) -> Result<CalcValue<'b>, ExcelError> {
+                eval_maturity_security(args, $price_mode)
+            }
+        }
+    };
+}
+maturity_security_fn!(PricematFn, "PRICEMAT", true);
+maturity_security_fn!(YieldmatFn, "YIELDMAT", false);
+
 pub fn register_builtins() {
     use std::sync::Arc;
     crate::function_registry::register_builtin(Arc::new(AccrintFn));
@@ -1226,6 +1686,20 @@ pub fn register_builtins() {
     crate::function_registry::register_builtin(Arc::new(TbilleqFn));
     crate::function_registry::register_builtin(Arc::new(TbillpriceFn));
     crate::function_registry::register_builtin(Arc::new(TbillyieldFn));
+    crate::function_registry::register_builtin(Arc::new(CoupdaybsFn));
+    crate::function_registry::register_builtin(Arc::new(CoupdaysFn));
+    crate::function_registry::register_builtin(Arc::new(CoupdaysncFn));
+    crate::function_registry::register_builtin(Arc::new(CoupncdFn));
+    crate::function_registry::register_builtin(Arc::new(CouppcdFn));
+    crate::function_registry::register_builtin(Arc::new(CoupnumFn));
+    crate::function_registry::register_builtin(Arc::new(DurationFn));
+    crate::function_registry::register_builtin(Arc::new(MdurationFn));
+    crate::function_registry::register_builtin(Arc::new(PricediscFn));
+    crate::function_registry::register_builtin(Arc::new(YielddiscFn));
+    crate::function_registry::register_builtin(Arc::new(IntrateFn));
+    crate::function_registry::register_builtin(Arc::new(ReceivedFn));
+    crate::function_registry::register_builtin(Arc::new(PricematFn));
+    crate::function_registry::register_builtin(Arc::new(YieldmatFn));
 }
 
 #[cfg(test)]
