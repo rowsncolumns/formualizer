@@ -280,12 +280,13 @@ fn gen_formula(rng: &mut Rng, i: usize, n_guards: usize, n: usize) -> String {
 ///     re-enters the cell still makes the cell a member — spec §7.3).
 ///   * `CircSettled` — a `#CIRC` value *read from an already-stamped member*
 ///     by a cell that is itself **not** a member. It propagates as `#CIRC`
-///     through arithmetic, comparison and `IF`/`NOT` conditions alike (an
-///     error in a condition is never re-labelled — `IF(#REF!>0,1,0)` is
-///     `#REF!`); the split from `Circ` only records *how* the verdict was
-///     reached, both compare equal to the engine's `#CIRC`.
-///   * `Value` — an engine `#VALUE!`, kept so a divergence into it is reported
-///     as such; the generated subset never produces one.
+///     through arithmetic, comparison and — like every other error — an
+///     `IF`/`NOT` *condition* (see the note on `condition_error`). Both
+///     flavors map to the engine's single `#CIRC` cell value; the split is
+///     kept so the oracle can tell a live member from a downstream reader.
+///   * `Value` — a `#VALUE!` from the engine's condition coercion. The
+///     generated subset no longer produces one (errors propagate), so an
+///     engine `#VALUE!` is a reportable discrepancy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EKind {
     Circ,
@@ -860,10 +861,14 @@ impl GuardEval<'_> {
     }
 }
 
-/// IF/NOT condition handling of an error operand: the error propagates as itself
-/// (`IF(#REF!>0,1,0)` is `#REF!`, `IF(1/0,1,0)` is `#DIV/0!`), so a `#CIRC` read
-/// through a guard — an *active* re-entry (`Circ`, spec §7.3) or a value read
-/// from an already-stamped member (`CircSettled`) — stays `#CIRC`.
+/// IF/NOT condition coercion of an error operand.
+///
+/// An error in an `IF`/`NOT` condition propagates as itself, as in Excel
+/// (`IF(NA(),1,2)` is `#N/A`; spreadsheet#546 B-32). A live-cycle member is
+/// stamped `#CIRC` structurally during the SCC task before any IF body runs,
+/// so an *active* re-entry (`Circ`) flowing through a guard keeps the cell a
+/// member (spec §7.3); a `#CIRC` *read from another, already-stamped member*
+/// (`CircSettled`) reaches the downstream reader as the `#CIRC` value itself.
 fn condition_error(e: EKind) -> OVal {
     OVal::Err(e)
 }
@@ -917,10 +922,10 @@ fn engine_to_oval(v: &Option<LiteralValue>) -> Result<OVal, String> {
         Some(LiteralValue::Error(e)) if e.kind == ExcelErrorKind::Circ => {
             Ok(OVal::Err(EKind::Circ))
         }
-        // The generated subset yields no `#VALUE!` (an error in an IF/NOT
-        // condition propagates as itself); one is kept modelable so a
-        // divergence into it is reported as such. Any *other* error kind is a
-        // genuine surprise and is surfaced as an un-modelable value.
+        // A `#VALUE!` is modelled so it fails the comparison loudly (the
+        // oracle never predicts one — IF/NOT propagate a `#CIRC` condition —
+        // rather than as an un-modelable value). Any *other* error kind would
+        // be a genuine surprise and is surfaced as an un-modelable value.
         Some(LiteralValue::Error(e)) if e.kind == ExcelErrorKind::Value => {
             Ok(OVal::Err(EKind::Value))
         }
@@ -1111,7 +1116,7 @@ fn oracle_self_check_known_shapes() {
     assert_eq!(o.value_of(2), OVal::Num(5.0));
 
     // Downstream non-member reading a member through an IF condition ⇒ the
-    // member's #CIRC propagates (an error condition is never re-labelled).
+    // member's #CIRC propagates (errors in a condition are not coerced).
     // A1↔A2 live cycle; A3 reads A1 via guard.
     let wb = Workbook {
         seed: 0,

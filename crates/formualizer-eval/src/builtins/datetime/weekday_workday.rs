@@ -5,7 +5,7 @@ use crate::args::ArgSchema;
 use crate::function::Function;
 use crate::traits::{ArgumentHandle, CalcValue, FunctionContext};
 use arrow_array::Array;
-use chrono::{Datelike, NaiveDate, Weekday};
+use chrono::{Datelike, NaiveDate};
 use formualizer_common::{ExcelError, LiteralValue};
 use formualizer_macros::func_caps;
 
@@ -409,8 +409,9 @@ impl Function for DatedifFn {
                 months as i64
             }
             "D" => {
-                // Days
-                (end_date - start_date).num_days()
+                // Whole-serial difference, so Excel's phantom 1900-02-29 (serial 60)
+                // counts as a day (DATEDIF(59,61,"d") = 2); the NaiveDates collapse it.
+                (end_serial.trunc() - start_serial.trunc()) as i64
             }
             "MD" => {
                 // Days ignoring months and years
@@ -476,9 +477,18 @@ impl Function for DatedifFn {
     }
 }
 
-/// Helper: check if a date is a weekend (Saturday or Sunday)
-fn is_weekend(date: &NaiveDate) -> bool {
-    matches!(date.weekday(), Weekday::Sat | Weekday::Sun)
+/// Excel's weekday for a whole-day serial as a Monday-based index (`Mon=0..Sun=6`,
+/// the `WeekendMask` layout). Read off the serial, not a `NaiveDate`: Excel calls
+/// serial 1 (1900-01-01) a Sunday and the phantom serial 60 a Wednesday, so
+/// `NaiveDate::weekday()` is off by one for every serial below 61 and has no
+/// answer at all for 60. The walks in NETWORKDAYS/WORKDAY therefore step serials.
+fn weekday_index(serial: i64) -> usize {
+    (serial - 2).rem_euclid(7) as usize
+}
+
+/// Helper: check if a serial falls on a weekend (Saturday or Sunday)
+fn is_weekend(serial: i64) -> bool {
+    is_weekend_masked(serial, &DEFAULT_WEEKEND_MASK)
 }
 
 /// Weekend mask: 7 bools indexed by chrono weekday (Mon=0 .. Sun=6).
@@ -570,15 +580,14 @@ fn weekend_mask_from_string(s: &str) -> Option<WeekendMask> {
 }
 
 /// Check whether a date falls on a weekend day according to the given mask.
-fn is_weekend_masked(date: &NaiveDate, mask: &WeekendMask) -> bool {
-    let idx = date.weekday().num_days_from_monday() as usize; // Mon=0..Sun=6
-    mask[idx]
+fn is_weekend_masked(serial: i64, mask: &WeekendMask) -> bool {
+    mask[weekday_index(serial)]
 }
 
-/// Collect holiday dates from argument(s) starting at `arg_start`.
+/// Collect holidays, as whole-day serials, from argument(s) starting at `arg_start`.
 /// Handles scalars, inline arrays, and range references.
 /// Silently skips non-numeric / empty cells (matching Excel behavior).
-fn collect_holidays(args: &[ArgumentHandle], arg_start: usize) -> Vec<NaiveDate> {
+fn collect_holidays(args: &[ArgumentHandle], arg_start: usize) -> Vec<i64> {
     let mut holidays = Vec::new();
     for arg in args.iter().skip(arg_start) {
         match arg.value() {
@@ -591,7 +600,7 @@ fn collect_holidays(args: &[ArgumentHandle], arg_start: usize) -> Vec<NaiveDate>
                             let values = col.values();
                             for i in 0..len {
                                 if !col.is_null(i)
-                                    && let Ok(d) = serial_to_date(values[i])
+                                    && let Some(d) = holiday_serial(values[i])
                                 {
                                     holidays.push(d);
                                 }
@@ -608,7 +617,7 @@ fn collect_holidays(args: &[ArgumentHandle], arg_start: usize) -> Vec<NaiveDate>
     holidays
 }
 
-fn collect_holidays_from_literal(lit: &LiteralValue, out: &mut Vec<NaiveDate>) {
+fn collect_holidays_from_literal(lit: &LiteralValue, out: &mut Vec<i64>) {
     match lit {
         LiteralValue::Array(rows) => {
             for row in rows {
@@ -618,21 +627,67 @@ fn collect_holidays_from_literal(lit: &LiteralValue, out: &mut Vec<NaiveDate>) {
             }
         }
         _ => {
-            if let Some(d) = literal_to_date(lit) {
+            if let Some(d) = literal_to_serial(lit) {
                 out.push(d);
             }
         }
     }
 }
 
-fn literal_to_date(lit: &LiteralValue) -> Option<NaiveDate> {
+/// Whole-day serial of a holiday, or `None` when it is not a valid date serial.
+fn holiday_serial(serial: f64) -> Option<i64> {
+    serial_to_date(serial).ok().map(|_| serial.trunc() as i64)
+}
+
+fn literal_to_serial(lit: &LiteralValue) -> Option<i64> {
     match lit {
-        LiteralValue::Number(f) => serial_to_date(*f).ok(),
-        LiteralValue::Int(i) => serial_to_date(*i as f64).ok(),
-        LiteralValue::Date(d) => Some(*d),
-        LiteralValue::DateTime(dt) => Some(dt.date()),
+        LiteralValue::Number(f) => holiday_serial(*f),
+        LiteralValue::Int(i) => holiday_serial(*i as f64),
+        LiteralValue::Date(d) => Some(date_to_serial(d) as i64),
+        LiteralValue::DateTime(dt) => Some(date_to_serial(&dt.date()) as i64),
         _ => None,
     }
+}
+
+/// Counts the serials in `start..=end` (either order; a reversed range is negative)
+/// that are neither weekend nor holiday. Serial arithmetic keeps the phantom
+/// 1900-02-29 in the count (NETWORKDAYS(59,61) = 3).
+fn count_workdays(start: i64, end: i64, mask: &WeekendMask, holidays: &[i64]) -> i64 {
+    let (start, end, sign) = if start <= end {
+        (start, end, 1i64)
+    } else {
+        (end, start, -1i64)
+    };
+    let count = (start..=end)
+        .filter(|serial| {
+            !is_weekend_masked(*serial, mask) && holidays.binary_search(serial).is_err()
+        })
+        .count() as i64;
+    count * sign
+}
+
+/// Steps `days` working days from `start` (backwards for negative `days`) over
+/// serials, so the phantom 1900-02-29 is a working Wednesday (WORKDAY(59,1) = 60).
+/// Landing before serial 0 is `#NUM!`.
+fn step_workdays(
+    start: i64,
+    days: i64,
+    mask: &WeekendMask,
+    holidays: &[i64],
+) -> Result<i64, ExcelError> {
+    let direction: i64 = if days >= 0 { 1 } else { -1 };
+    let mut current = start;
+    let mut remaining = days.abs();
+    while remaining > 0 {
+        current += direction;
+        if !is_weekend_masked(current, mask) && holidays.binary_search(&current).is_err() {
+            remaining -= 1;
+        }
+    }
+    if current < 0 {
+        return Err(ExcelError::new_num());
+    }
+    Ok(current)
 }
 
 /// Returns the number of weekday business days between two dates, inclusive.
@@ -708,27 +763,18 @@ impl Function for NetworkdaysFn {
         let start_serial = coerce_to_serial(&args[0])?;
         let end_serial = coerce_to_serial(&args[1])?;
 
-        let start_date = serial_to_date(start_serial)?;
-        let end_date = serial_to_date(end_serial)?;
+        // Range validation only (#NUM! below serial 0); the walk is over serials.
+        serial_to_date(start_serial)?;
+        serial_to_date(end_serial)?;
 
         let holidays = collect_holidays(args, 2);
 
-        let (start, end, sign) = if start_date <= end_date {
-            (start_date, end_date, 1i64)
-        } else {
-            (end_date, start_date, -1i64)
-        };
-
-        let mut count = 0i64;
-        let mut current = start;
-        while current <= end {
-            if !is_weekend(&current) && holidays.binary_search(&current).is_err() {
-                count += 1;
-            }
-            current = current.succ_opt().unwrap_or(current);
-        }
-
-        Ok(CalcValue::Scalar(LiteralValue::Int(count * sign)))
+        Ok(CalcValue::Scalar(LiteralValue::Int(count_workdays(
+            start_serial.trunc() as i64,
+            end_serial.trunc() as i64,
+            &DEFAULT_WEEKEND_MASK,
+            &holidays,
+        ))))
     }
 }
 
@@ -805,29 +851,18 @@ impl Function for WorkdayFn {
         let start_serial = coerce_to_serial(&args[0])?;
         let days = coerce_to_int(&args[1])?;
 
-        let start_date = serial_to_date(start_serial)?;
+        // Range validation only (#NUM! below serial 0); the walk is over serials.
+        serial_to_date(start_serial)?;
 
         let holidays = collect_holidays(args, 2);
 
-        let mut current = start_date;
-        let mut remaining = days.abs();
-        let direction: i64 = if days >= 0 { 1 } else { -1 };
-
-        while remaining > 0 {
-            current = if direction > 0 {
-                current.succ_opt().ok_or_else(ExcelError::new_num)?
-            } else {
-                current.pred_opt().ok_or_else(ExcelError::new_num)?
-            };
-
-            if !is_weekend(&current) && holidays.binary_search(&current).is_err() {
-                remaining -= 1;
-            }
-        }
-
-        Ok(CalcValue::Scalar(LiteralValue::Number(date_to_serial(
-            &current,
-        ))))
+        let result = step_workdays(
+            start_serial.trunc() as i64,
+            days,
+            &DEFAULT_WEEKEND_MASK,
+            &holidays,
+        )?;
+        Ok(CalcValue::Scalar(LiteralValue::Number(result as f64)))
     }
 }
 
@@ -915,8 +950,9 @@ impl Function for NetworkdaysIntlFn {
         let start_serial = coerce_to_serial(&args[0])?;
         let end_serial = coerce_to_serial(&args[1])?;
 
-        let start_date = serial_to_date(start_serial)?;
-        let end_date = serial_to_date(end_serial)?;
+        // Range validation only (#NUM! below serial 0); the walk is over serials.
+        serial_to_date(start_serial)?;
+        serial_to_date(end_serial)?;
 
         let mask = if args.len() > 2 {
             match parse_weekend_mask(&args[2]) {
@@ -934,22 +970,12 @@ impl Function for NetworkdaysIntlFn {
 
         let holidays = collect_holidays(args, 3);
 
-        let (start, end, sign) = if start_date <= end_date {
-            (start_date, end_date, 1i64)
-        } else {
-            (end_date, start_date, -1i64)
-        };
-
-        let mut count = 0i64;
-        let mut current = start;
-        while current <= end {
-            if !is_weekend_masked(&current, &mask) && holidays.binary_search(&current).is_err() {
-                count += 1;
-            }
-            current = current.succ_opt().unwrap_or(current);
-        }
-
-        Ok(CalcValue::Scalar(LiteralValue::Int(count * sign)))
+        Ok(CalcValue::Scalar(LiteralValue::Int(count_workdays(
+            start_serial.trunc() as i64,
+            end_serial.trunc() as i64,
+            &mask,
+            &holidays,
+        ))))
     }
 }
 
@@ -1038,7 +1064,8 @@ impl Function for WorkdayIntlFn {
         let start_serial = coerce_to_serial(&args[0])?;
         let days = coerce_to_int(&args[1])?;
 
-        let start_date = serial_to_date(start_serial)?;
+        // Range validation only (#NUM! below serial 0); the walk is over serials.
+        serial_to_date(start_serial)?;
 
         let mask = if args.len() > 2 {
             match parse_weekend_mask(&args[2]) {
@@ -1056,25 +1083,8 @@ impl Function for WorkdayIntlFn {
 
         let holidays = collect_holidays(args, 3);
 
-        let mut current = start_date;
-        let mut remaining = days.abs();
-        let direction: i64 = if days >= 0 { 1 } else { -1 };
-
-        while remaining > 0 {
-            current = if direction > 0 {
-                current.succ_opt().ok_or_else(ExcelError::new_num)?
-            } else {
-                current.pred_opt().ok_or_else(ExcelError::new_num)?
-            };
-
-            if !is_weekend_masked(&current, &mask) && holidays.binary_search(&current).is_err() {
-                remaining -= 1;
-            }
-        }
-
-        Ok(CalcValue::Scalar(LiteralValue::Number(date_to_serial(
-            &current,
-        ))))
+        let result = step_workdays(start_serial.trunc() as i64, days, &mask, &holidays)?;
+        Ok(CalcValue::Scalar(LiteralValue::Number(result as f64)))
     }
 }
 
@@ -1206,12 +1216,19 @@ mod tests {
     #[test]
     fn is_weekend_masked_basic() {
         let mask = weekend_mask_from_code(1).unwrap(); // Sat+Sun
-        let mon = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(); // Monday
-        let sat = NaiveDate::from_ymd_opt(2024, 1, 6).unwrap(); // Saturday
-        let sun = NaiveDate::from_ymd_opt(2024, 1, 7).unwrap(); // Sunday
-        assert!(!is_weekend_masked(&mon, &mask));
-        assert!(is_weekend_masked(&sat, &mask));
-        assert!(is_weekend_masked(&sun, &mask));
+        let mon = date_to_serial(&NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()) as i64; // Monday
+        let sat = date_to_serial(&NaiveDate::from_ymd_opt(2024, 1, 6).unwrap()) as i64; // Saturday
+        let sun = date_to_serial(&NaiveDate::from_ymd_opt(2024, 1, 7).unwrap()) as i64; // Sunday
+        assert!(!is_weekend_masked(mon, &mask));
+        assert!(is_weekend_masked(sat, &mask));
+        assert!(is_weekend_masked(sun, &mask));
+        // Below serial 61 Excel's weekday is not the calendar's: serial 1 is a Sunday,
+        // serial 0 a Saturday, the phantom serial 60 a Wednesday.
+        assert!(is_weekend_masked(1, &mask));
+        assert!(is_weekend_masked(0, &mask));
+        assert!(!is_weekend_masked(60, &mask));
+        assert!(!is_weekend(2));
+        assert!(is_weekend(7));
     }
 
     // ── NETWORKDAYS.INTL unit tests ──

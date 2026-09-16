@@ -10,7 +10,7 @@
 //! functions.
 
 use crate::args::ArgSchema;
-use crate::builtins::datetime::serial_to_date;
+use crate::builtins::datetime::{actual_actual_year_length, serial_to_date};
 use crate::function::Function;
 use crate::traits::{ArgumentHandle, CalcValue, FunctionContext};
 use chrono::{Datelike, NaiveDate};
@@ -68,11 +68,6 @@ impl DayCountBasis {
             _ => Err(ExcelError::new_num()),
         }
     }
-}
-
-/// Check if a year is a leap year
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
 /// Check if a date is the last day of the month
@@ -142,27 +137,11 @@ fn days_30_360_eu(start: &NaiveDate, end: &NaiveDate) -> i32 {
     (ey - sy) * 360 + (em - sm) * 30 + (ed - sd)
 }
 
-/// Excel's YEARFRAC basis-1 "one year or less" test (`s <= e` assumed): same calendar year, or
-/// consecutive years with the end month/day not past the start month/day.
-fn spans_at_most_one_year(s: &NaiveDate, e: &NaiveDate) -> bool {
-    s.year() == e.year()
-        || (e.year() == s.year() + 1
-            && (s.month() > e.month() || (s.month() == e.month() && s.day() >= e.day())))
-}
-
-/// A real Feb 29 falls inside `[s, e]` (`s <= e` assumed).
-fn feb29_between(s: &NaiveDate, e: &NaiveDate) -> bool {
-    let mar1 = |y: i32| NaiveDate::from_ymd_opt(y, 3, 1).expect("mar 1");
-    (is_leap_year(s.year()) && *s < mar1(s.year()) && *e >= mar1(s.year()))
-        || (is_leap_year(e.year()) && *s < mar1(e.year()) && *e >= mar1(e.year()))
-}
-
 /// Excel's YEARFRAC arithmetic for `basis`.
 ///
-/// Actual/actual follows Excel's documented algorithm (the one the host `YEARFRAC` implements): a
-/// span of one year or less is divided by 366 when it lies in a single leap year or straddles a
-/// Feb 29 (else 365); a longer span is divided by the average length of the calendar years it
-/// touches. The discount / at-maturity securities and ACCRINTM are defined in terms of it.
+/// Actual/actual is `actual_actual_year_length` — the rule the `YEARFRAC` builtin uses, so
+/// `PRICEDISC(s, m, d, r, 1) == r − d·r·YEARFRAC(s, m, 1)` holds exactly. The discount /
+/// at-maturity securities and ACCRINTM are defined in terms of it.
 pub(super) fn year_fraction(start: &NaiveDate, end: &NaiveDate, basis: DayCountBasis) -> f64 {
     if start == end {
         return 0.0;
@@ -181,21 +160,7 @@ pub(super) fn year_fraction(start: &NaiveDate, end: &NaiveDate, basis: DayCountB
         }
         DayCountBasis::Actual360 => actual_days / 360.0,
         DayCountBasis::Actual365 => actual_days / 365.0,
-        DayCountBasis::ActualActual => {
-            let denominator = if spans_at_most_one_year(s, e) {
-                if (s.year() == e.year() && is_leap_year(s.year())) || feb29_between(s, e) {
-                    366.0
-                } else {
-                    365.0
-                }
-            } else {
-                let total: i64 = (s.year()..=e.year())
-                    .map(|y| if is_leap_year(y) { 366 } else { 365 })
-                    .sum();
-                total as f64 / (e.year() - s.year() + 1) as f64
-            };
-            actual_days / denominator
-        }
+        DayCountBasis::ActualActual => actual_days / actual_actual_year_length(*s, *e),
     };
 
     sign * frac

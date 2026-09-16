@@ -82,3 +82,87 @@ fn defining_the_name_later_recomputes_dependents() {
         Some(LiteralValue::Number(42.0))
     );
 }
+
+/// Reviewer follow-up: the `#NAME?` must stay a catchable *value* behind a range / by-ref
+/// parameter as well. Builtins reach the unresolved name through `?` on
+/// `ArgumentHandle::range_view()` / `resolve_range_view`, which surfaced a hard `Err` that IS*
+/// could not see while `IFERROR` (which matches `Err`) could — the same expression answered
+/// differently under `ISERROR` and `IFERROR`. `IF(ISERROR(VLOOKUP(...)),...)` is the dominant
+/// pre-IFERROR Excel idiom.
+#[test]
+fn unknown_name_behind_range_arguments_is_catchable() {
+    for formula in [
+        "=ISERROR(SUM(FOO))",
+        "=ISERROR(SUMIF(FOO,1))",
+        "=ISERROR(SUMIFS(B1:B2,FOO,1))",
+        "=ISERROR(COUNTIF(FOO,1))",
+        "=ISERROR(COUNTIFS(FOO,1))",
+        "=ISERROR(AVERAGEIF(FOO,1))",
+        "=ISERROR(SUMPRODUCT(FOO))",
+        "=ISERROR(SUMPRODUCT(B1:B2,FOO))",
+        "=ISERROR(INDEX(FOO,1))",
+        "=ISERROR(MATCH(1,FOO,0))",
+        "=ISERROR(VLOOKUP(1,FOO,1,FALSE))",
+        "=ISERROR(XLOOKUP(1,FOO,B1:B2))",
+        "=ISERROR(FILTER(FOO,B1:B2=1))",
+        "=ISERROR(OFFSET(FOO,0,0))",
+        "=ISERROR(ROWS(FOO))",
+        "=ISERROR(MAXIFS(B1:B2,FOO,1))",
+    ] {
+        assert_eq!(eval(formula), LiteralValue::Boolean(true), "{formula}");
+    }
+    assert_eq!(eval("=ISNA(SUMIF(FOO,1))"), LiteralValue::Boolean(false));
+    assert_eq!(
+        eval("=ISNA(VLOOKUP(1,FOO,1,FALSE))"),
+        LiteralValue::Boolean(false)
+    );
+    assert_eq!(eval("=ISREF(FOO)"), LiteralValue::Boolean(false));
+    assert_eq!(
+        eval("=IF(ISERROR(SUMIF(FOO,1)),1,2)"),
+        LiteralValue::Number(1.0)
+    );
+    assert_eq!(eval("=IFERROR(SUM(FOO),9)"), LiteralValue::Number(9.0));
+    assert_eq!(
+        eval("=IFERROR(VLOOKUP(1,FOO,1,FALSE),9)"),
+        LiteralValue::Number(9.0)
+    );
+    assert_eq!(
+        eval("=IFERROR(COUNTIF(FOO,1),9)"),
+        LiteralValue::Number(9.0)
+    );
+    assert_eq!(eval("=IFERROR(ROWS(FOO),9)"), LiteralValue::Number(9.0));
+}
+
+/// The criteria aggregates propagate a non-reference range argument's error instead of
+/// matching nothing and answering 0; `AREAS` checks that a defined name resolves.
+#[test]
+fn unknown_name_behind_range_arguments_is_a_name_error_value() {
+    for formula in [
+        "=SUMIF(FOO,1)",
+        "=SUMIF(B1:B2,1,FOO)",
+        "=SUMIFS(FOO,B1:B2,1)",
+        "=SUMIFS(B1:B2,FOO,1)",
+        "=COUNTIF(FOO,1)",
+        "=COUNTIFS(FOO,1)",
+        "=AVERAGEIF(FOO,1)",
+        "=MAXIFS(B1:B2,FOO,1)",
+        "=MINIFS(B1:B2,FOO,1)",
+        "=MAXIFS(FOO,B1:B2,1)",
+        "=VLOOKUP(1,FOO,1,FALSE)",
+        "=INDEX(FOO,1)",
+        "=AREAS(FOO)",
+    ] {
+        assert_name_error(&eval(formula));
+    }
+}
+
+/// A resolvable reference in the same positions is unaffected.
+#[test]
+fn resolved_ranges_behind_the_same_parameters_still_work() {
+    assert_eq!(eval("=SUMIF(B1:B2,7)"), LiteralValue::Number(7.0));
+    assert_eq!(eval("=MAXIFS(B1:B2,B1:B2,7)"), LiteralValue::Number(7.0));
+    assert_eq!(eval("=COUNTIFS(B1:B2,7)"), LiteralValue::Number(1.0));
+    assert_eq!(eval("=AREAS(B1:B2)"), LiteralValue::Number(1.0));
+    assert_eq!(eval("=VLOOKUP(7,B1:B2,1,FALSE)"), LiteralValue::Number(7.0));
+    assert_eq!(eval("=ISERROR(SUM(B1:B2))"), LiteralValue::Boolean(false));
+}

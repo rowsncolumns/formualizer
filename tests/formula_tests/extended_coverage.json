@@ -828,13 +828,13 @@
     },
     {
       "formula": "=CUMIPMT(0.005, 360, 100000, 1, 12, 0)",
-      "result": 5643.128361015309,
+      "result": -5966.594589556309,
       "result_type": "float",
       "description": "cumipmt first year of mortgage"
     },
     {
       "formula": "=CUMPRINC(0.005, 360, 100000, 1, 12, 0)",
-      "result": -12837.734662848414,
+      "result": -1228.011712276774,
       "result_type": "float",
       "description": "cumprinc first year of mortgage"
     },
@@ -1686,13 +1686,13 @@
     },
     {
       "formula": "=Z.TEST({3,6,7,8,6,5,4,2,1,9}, 4)",
-      "result": 0.07933464890044983,
+      "result": 0.09057426145528735,
       "result_type": "float",
       "description": "Z.TEST one-tailed p-value"
     },
     {
       "formula": "=Z.TEST({3,6,7,8,6,5,4,2,1,9}, 6)",
-      "result": 0.8756017155164422,
+      "result": 0.8630433465723384,
       "result_type": "float",
       "description": "Z.TEST with x close to mean"
     },
@@ -1704,7 +1704,7 @@
     },
     {
       "formula": "=ZTEST({3,6,7,8,6,5,4,2,1,9}, 4)",
-      "result": 0.07933464890044983,
+      "result": 0.09057426145528735,
       "result_type": "float",
       "description": "ZTEST alias for Z.TEST"
     },

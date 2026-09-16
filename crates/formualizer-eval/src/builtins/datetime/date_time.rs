@@ -120,11 +120,14 @@ impl Function for DateFn {
 
 /// Returns the fractional-day serial for a time built from hour, minute, and second.
 ///
-/// `TIME` normalizes overflowing and negative components by wrapping across day boundaries.
+/// `TIME` truncates each component, sums them and wraps the total across day boundaries.
 ///
 /// # Remarks
 /// - The result is always in the range `0.0..1.0` and represents only a time-of-day fraction.
 /// - Values are normalized like Excel (for example, `25` hours becomes `01:00:00`).
+/// - Each component must be in `0..=32767` (`TIME(0,0,86400)` is `#NUM!`); a negative
+///   component is allowed as long as the total is not negative (`TIME(8,-15,0)` is 07:45,
+///   `TIME(0,-1,0)` is `#NUM!`).
 /// - Time fractions are date-system independent because they do not include a date component.
 ///
 /// # Examples
@@ -195,19 +198,23 @@ impl Function for TimeFn {
         let minute = coerce_to_int(&args[1])?;
         let second = coerce_to_int(&args[2])?;
 
+        // Excel accepts each component in 0..=32767 only; anything above is #NUM!
+        // even when the total would wrap to a valid time (TIME(0,0,86400)).
+        if hour > 32767 || minute > 32767 || second > 32767 {
+            return Err(ExcelError::new_num());
+        }
+
         // Excel normalizes time values
         let total_seconds = hour * 3600 + minute * 60 + second;
 
-        // Handle negative time by wrapping
-        let normalized_seconds = if total_seconds < 0 {
-            let days_back = (-total_seconds - 1) / 86400 + 1;
-            total_seconds + days_back * 86400
-        } else {
-            total_seconds
-        };
+        // A negative total is #NUM! (TIME(0,-1,0)); a negative component inside a
+        // positive total is fine (TIME(8,-15,0) is 07:45).
+        if total_seconds < 0 {
+            return Err(ExcelError::new_num());
+        }
 
         // Get just the time portion (modulo full days)
-        let time_seconds = normalized_seconds % 86400;
+        let time_seconds = total_seconds % 86400;
         let hours = (time_seconds / 3600) as u32;
         let minutes = ((time_seconds % 3600) / 60) as u32;
         let seconds = (time_seconds % 60) as u32;
