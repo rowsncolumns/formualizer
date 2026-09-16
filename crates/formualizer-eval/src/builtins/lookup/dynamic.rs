@@ -40,24 +40,27 @@ use std::collections::HashMap;
  * - Per-dimension: Excel sheet limits (1,048,576 rows × 16,384 cols — the
  *   same values as `EvalConfig::default().max_sheet_rows/max_sheet_cols`).
  *   A generated array larger than a sheet can never spill successfully
- *   (`SpillBoundsPolicy::Strict`), so it is `#NUM!` unconditionally.
+ *   (`SpillBoundsPolicy::Strict`), so it is `#SPILL!` unconditionally —
+ *   the error Excel shows for `=SEQUENCE(2000000)` ("spill range is too
+ *   big") — without allocating the array first.
  * - Total cells: 2^24 (16,777,216). `LiteralValue` is ≥32 bytes, so this
- *   already bounds the transient allocation near ~0.5 GiB — three orders
- *   of magnitude above the engine's default spill cap
- *   (`SpillConfig::max_spill_cells` = 10,000) which would reject the
- *   result downstream anyway. Anything larger risks OOM before that
- *   downstream guard can run.
+ *   already bounds the transient allocation near ~0.5 GiB. Anything larger
+ *   risks OOM before the engine's spill planner can reject the result, so
+ *   it fails closed as `#NUM!`.
  */
 const GENERATED_ARRAY_MAX_ROWS: i64 = 1_048_576;
 const GENERATED_ARRAY_MAX_COLS: i64 = 16_384;
 const GENERATED_ARRAY_MAX_CELLS: i64 = 1 << 24;
 
-/// Returns `Some(#NUM!)` when a `rows x cols` generated array exceeds the
-/// allocation guard; uses checked arithmetic so overflowing products fail
-/// closed. Callers have already rejected `rows <= 0 || cols <= 0`.
+/// Returns `Some(#SPILL!)` when a `rows x cols` generated array is taller or
+/// wider than a sheet, `Some(#NUM!)` when it exceeds the allocation guard;
+/// uses checked arithmetic so overflowing products fail closed. Callers have
+/// already rejected `rows <= 0 || cols <= 0`.
 fn generated_array_too_large(rows: i64, cols: i64) -> Option<ExcelError> {
     if rows > GENERATED_ARRAY_MAX_ROWS || cols > GENERATED_ARRAY_MAX_COLS {
-        return Some(ExcelError::new(ExcelErrorKind::Num));
+        return Some(
+            ExcelError::new(ExcelErrorKind::Spill).with_message("Spill exceeds sheet bounds"),
+        );
     }
     match rows.checked_mul(cols) {
         Some(total) if total <= GENERATED_ARRAY_MAX_CELLS => None,
@@ -4086,17 +4089,27 @@ mod tests {
         assert!(generated_array_too_large(4096, 4096).is_none());
         // One past the cap: #NUM!.
         assert!(generated_array_too_large(4096, 4097).is_some());
-        // Per-dimension Excel sheet limits.
+        assert_eq!(
+            generated_array_too_large(4096, 4097).map(|e| e.kind),
+            Some(formualizer_common::ExcelErrorKind::Num)
+        );
+        // Per-dimension Excel sheet limits: can never spill → #SPILL! (Excel), not #NUM!.
         assert!(generated_array_too_large(1_048_576, 1).is_none());
-        assert!(generated_array_too_large(1_048_577, 1).is_some());
+        assert_eq!(
+            generated_array_too_large(1_048_577, 1).map(|e| e.kind),
+            Some(formualizer_common::ExcelErrorKind::Spill)
+        );
         assert!(generated_array_too_large(1, 16_384).is_none());
-        assert!(generated_array_too_large(1, 16_385).is_some());
+        assert_eq!(
+            generated_array_too_large(1, 16_385).map(|e| e.kind),
+            Some(formualizer_common::ExcelErrorKind::Spill)
+        );
         // checked_mul overflow path fails closed.
         assert!(generated_array_too_large(i64::MAX, i64::MAX).is_some());
     }
 
     #[test]
-    fn sequence_oversized_returns_num_error_quickly() {
+    fn sequence_oversized_returns_spill_error_quickly() {
         let wb = TestWorkbook::new().with_function(Arc::new(SequenceFn));
         let ctx = wb.interpreter();
         let f = ctx.context.get_function("", "SEQUENCE").unwrap();
@@ -4115,14 +4128,27 @@ mod tests {
         let elapsed = started.elapsed();
         match v {
             LiteralValue::Error(e) => {
-                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Num)
+                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Spill)
             }
-            other => panic!("expected #NUM! got {other:?}"),
+            other => panic!("expected #SPILL! got {other:?}"),
         }
         assert!(
             elapsed.as_millis() < 250,
             "oversized SEQUENCE must short-circuit, took {elapsed:?}"
         );
+        // Taller than the sheet but a legal total: still #SPILL! (Excel), without allocating.
+        let rows = lit(LiteralValue::Int(2_000_000));
+        let args = vec![ArgumentHandle::new(&rows, &ctx)];
+        match f
+            .dispatch(&args, &ctx.function_context(None))
+            .unwrap()
+            .into_literal()
+        {
+            LiteralValue::Error(e) => {
+                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Spill)
+            }
+            other => panic!("expected #SPILL! got {other:?}"),
+        }
 
         // Total-cells cap: full-sheet request (1,048,576 x 16,384) is #NUM!.
         let rows = lit(LiteralValue::Int(1_048_576));
@@ -4194,10 +4220,11 @@ mod tests {
     }
 
     #[test]
-    fn randarray_oversized_returns_num_error_quickly() {
+    fn randarray_oversized_returns_spill_error_quickly() {
         let wb = TestWorkbook::new().with_function(Arc::new(RandArrayFn));
         let ctx = wb.interpreter();
         let f = ctx.context.get_function("", "RANDARRAY").unwrap();
+        // Wider than a sheet → #SPILL! (Excel), without allocating.
         let rows = lit(LiteralValue::Number(1e6));
         let cols = lit(LiteralValue::Number(1e6));
         let args = vec![
@@ -4212,14 +4239,31 @@ mod tests {
         let elapsed = started.elapsed();
         match v {
             LiteralValue::Error(e) => {
-                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Num)
+                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Spill)
             }
-            other => panic!("expected #NUM! got {other:?}"),
+            other => panic!("expected #SPILL! got {other:?}"),
         }
         assert!(
             elapsed.as_millis() < 250,
             "oversized RANDARRAY must short-circuit, took {elapsed:?}"
         );
+        // Fits the sheet's dimensions but exceeds the allocation guard → #NUM!.
+        let rows = lit(LiteralValue::Int(8192));
+        let cols = lit(LiteralValue::Int(8192));
+        let args = vec![
+            ArgumentHandle::new(&rows, &ctx),
+            ArgumentHandle::new(&cols, &ctx),
+        ];
+        match f
+            .dispatch(&args, &ctx.function_context(None))
+            .unwrap()
+            .into_literal()
+        {
+            LiteralValue::Error(e) => {
+                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Num)
+            }
+            other => panic!("expected #NUM! got {other:?}"),
+        }
     }
 
     #[test]

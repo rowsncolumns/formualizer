@@ -3337,18 +3337,18 @@ impl DependencyGraph {
         anchor: VertexId,
         target_cells: &[CellRef],
     ) -> Result<(), ExcelError> {
-        self.plan_spill_region_allowing_formula_overwrite(anchor, target_cells, None)
+        self.plan_spill_region_preempting(anchor, target_cells, None)
     }
 
-    /// Plan a spill region, optionally allowing specific formula vertices to be overwritten.
-    ///
-    /// This is used by parallel evaluation to allow spill anchors to take precedence over
-    /// other formula vertices that are being evaluated in the same layer.
-    pub(crate) fn plan_spill_region_allowing_formula_overwrite(
+    /// Plan a spill region. Cells owned by a spill anchor in `preempted_spills` count as free:
+    /// the planner has ranked this anchor above them (`Engine::spill_contenders`) and clears
+    /// their regions before this one commits. A formula cell in the target region always
+    /// blocks — it is content, exactly like a literal.
+    pub(crate) fn plan_spill_region_preempting(
         &self,
         anchor: VertexId,
         target_cells: &[CellRef],
-        overwritable_formulas: Option<&rustc_hash::FxHashSet<VertexId>>,
+        preempted_spills: Option<&rustc_hash::FxHashSet<VertexId>>,
     ) -> Result<(), ExcelError> {
         use formualizer_common::{ExcelErrorExtra, ExcelErrorKind};
         // Compute expected spill shape from the target rectangle for better diagnostics
@@ -3385,6 +3385,7 @@ impl DependencyGraph {
             // If cell is already owned by this anchor's previous spill, it's allowed.
             let owned_by_anchor = match self.spill_cell_to_anchor.get(cell) {
                 Some(&existing_anchor) if existing_anchor == anchor => true,
+                Some(other) if preempted_spills.is_some_and(|p| p.contains(other)) => false,
                 Some(_other) => {
                     return Err(ExcelError::new(ExcelErrorKind::Spill)
                         .with_message("BlockedBySpill")
@@ -3400,18 +3401,13 @@ impl DependencyGraph {
                 continue;
             }
 
-            // If cell is occupied by another formula anchor, block unless explicitly allowed.
+            // If cell is occupied by another formula anchor, block.
             if let Some(&vid) = self.cell_to_vertex.get(cell)
                 && vid != anchor
             {
                 // Prevent clobbering formulas (array or scalar) in the target area
                 match self.store.kind(vid) {
                     VertexKind::FormulaScalar | VertexKind::FormulaArray => {
-                        if let Some(allow) = overwritable_formulas
-                            && allow.contains(&vid)
-                        {
-                            continue;
-                        }
                         return Err(ExcelError::new(ExcelErrorKind::Spill)
                             .with_message("BlockedByFormula")
                             .with_extra(ExcelErrorExtra::Spill {
@@ -3636,6 +3632,16 @@ impl DependencyGraph {
         out
     }
 
+    /// A spill anchor another array just preempted (its region cleared, see
+    /// `Engine::spill_contenders`): schedule it for the respill pass so it re-plans against the
+    /// winning spill and settles on `#SPILL!` within this evaluation.
+    pub(crate) fn redirty_preempted_spill_anchor(&mut self, anchor: VertexId) {
+        self.mark_vertex_dirty(anchor);
+        if self.respill_capture_active {
+            self.capture_respill_redirtied(&[anchor]);
+        }
+    }
+
     fn capture_respill_redirtied(&mut self, affected: &[VertexId]) {
         for &vid in affected {
             if matches!(
@@ -3736,11 +3742,14 @@ impl DependencyGraph {
             let Some(&vid) = self.cell_to_vertex.get(&cell) else {
                 continue;
             };
-            // Ensure this vertex is a plain value cell.
-            if self.vertex_formulas.remove(&vid).is_some() {
-                // Be conservative: remove outgoing edges if this was a formula vertex.
-                // This should be rare for spill children under normal policies.
-                self.remove_dependent_edges(vid);
+            // A formula that has since landed on this projection cell is the very content that
+            // blocks the array (see `Engine::spill_contenders`): it keeps its formula, kind and
+            // value — only the anchor's own projection vertices are emptied.
+            if matches!(
+                self.store.kind(vid),
+                VertexKind::FormulaScalar | VertexKind::FormulaArray
+            ) {
+                continue;
             }
             self.store.set_kind(vid, VertexKind::Cell);
             if let Some(er) = empty_ref {
