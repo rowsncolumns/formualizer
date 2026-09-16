@@ -236,7 +236,9 @@ fn choose_array_index_spills_element_wise() {
 #[test]
 fn numeric_literals_keep_fifteen_significant_digits() {
     assert_eq!(eval_one("=123456789012345678"), num(123456789012345000.0));
-    assert_eq!(eval_one("=1234567890.123456789"), num(1234567890.12346));
+    // Digits past the 15th are truncated, not rounded (Excel: 1234567890123456 → 1234567890123450).
+    assert_eq!(eval_one("=1234567890.123456789"), num(1234567890.12345));
+    assert_eq!(eval_one("=1234567890123456"), num(1234567890123450.0));
     // Literals Excel can already represent are bit-identical.
     assert_eq!(eval_one("=0.1"), num(0.1));
     assert_eq!(eval_one("=1E-300"), num(1e-300));
