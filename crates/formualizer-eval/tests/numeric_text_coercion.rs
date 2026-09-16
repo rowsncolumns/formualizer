@@ -278,7 +278,11 @@ fn datevalue_and_date_parts_accept_year_less_text() {
     ] {
         assert_num_on_2026_06_15(f, expected);
     }
-    for f in ["=DATEVALUE(\"13/2\")", "=DATEVALUE(\"abc\")", "=YEAR(\"2/30\")"] {
+    for f in [
+        "=DATEVALUE(\"13/2\")",
+        "=DATEVALUE(\"abc\")",
+        "=YEAR(\"2/30\")",
+    ] {
         match eval_on_2026_06_15(f) {
             LiteralValue::Error(e) => assert_eq!(e.kind, ExcelErrorKind::Value, "{f}"),
             other => panic!("{f}: expected #VALUE!, got {other:?}"),
