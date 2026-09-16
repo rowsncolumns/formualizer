@@ -314,6 +314,37 @@ enum OVal {
     Err(EKind),
 }
 
+/// Excel comparison semantics for the oracle's value domain: a blank takes the
+/// counterpart's type (0 / FALSE), same-type values compare by value, and a
+/// boolean never equals a number and always ranks above one (`FALSE>14` is
+/// TRUE). Errors are handled by the callers before reaching here.
+fn excel_compare(op: &str, l: &OVal, r: &OVal) -> OVal {
+    let (l, r) = match (l, r) {
+        (OVal::Empty, OVal::Empty) => (OVal::Num(0.0), OVal::Num(0.0)),
+        (OVal::Empty, OVal::Bool(b)) => (OVal::Bool(false), OVal::Bool(*b)),
+        (OVal::Empty, other) => (OVal::Num(0.0), other.clone()),
+        (OVal::Bool(a), OVal::Empty) => (OVal::Bool(*a), OVal::Bool(false)),
+        (other, OVal::Empty) => (other.clone(), OVal::Num(0.0)),
+        (a, b) => (a.clone(), b.clone()),
+    };
+    // rank: numbers 1 < booleans 3 (text never occurs in this oracle)
+    let (ra, rb) = (
+        if matches!(l, OVal::Bool(_)) { 3.0 } else { 1.0 },
+        if matches!(r, OVal::Bool(_)) { 3.0 } else { 1.0 },
+    );
+    let (a, b) = if ra == rb {
+        (as_num(&l), as_num(&r))
+    } else {
+        (ra, rb)
+    };
+    match op {
+        ">" => OVal::Bool(a > b),
+        "<" => OVal::Bool(a < b),
+        "=" => OVal::Bool(a == b),
+        other => panic!("excel_compare: unsupported op {other}"),
+    }
+}
+
 impl OVal {
     fn is_err(&self) -> bool {
         matches!(self, OVal::Err(_))
@@ -586,9 +617,7 @@ impl Oracle {
                     "+" => OVal::Num(a + b),
                     "-" => OVal::Num(a - b),
                     "*" => OVal::Num(a * b),
-                    ">" => OVal::Bool(a > b),
-                    "<" => OVal::Bool(a < b),
-                    "=" => OVal::Bool(a == b),
+                    ">" | "<" | "=" => excel_compare(op, &l, &r),
                     other => panic!("oracle: unsupported binary op {other}"),
                 }
             }
@@ -766,9 +795,7 @@ impl GuardEval<'_> {
                     "+" => OVal::Num(a + b),
                     "-" => OVal::Num(a - b),
                     "*" => OVal::Num(a * b),
-                    ">" => OVal::Bool(a > b),
-                    "<" => OVal::Bool(a < b),
-                    "=" => OVal::Bool(a == b),
+                    ">" | "<" | "=" => excel_compare(op, &l, &r),
                     other => panic!("guard: unsupported binary op {other}"),
                 }
             }

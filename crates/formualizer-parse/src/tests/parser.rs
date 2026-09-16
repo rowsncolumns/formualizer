@@ -3262,14 +3262,37 @@ mod semantics_regressions {
     use crate::parser::{ASTNodeType, Parser, ReferenceType};
 
     #[test]
-    fn exponent_is_right_associative() {
+    fn exponent_is_left_associative() {
+        // Excel: =2^3^2 is (2^3)^2 = 64, not 2^(3^2) = 512.
         let mut p = Parser::new("=2^3^2").unwrap();
         let ast = p.parse().unwrap();
 
         match ast.node_type {
-            ASTNodeType::BinaryOp { op, left: _, right } => {
+            ASTNodeType::BinaryOp { op, left, right } => {
                 assert_eq!(op, "^");
-                // Expected: 2^(3^2)
+                match left.node_type {
+                    ASTNodeType::BinaryOp { op: op2, .. } => assert_eq!(op2, "^"),
+                    other => panic!("expected left child to be exponent, got {other:?}"),
+                }
+                assert!(
+                    !matches!(right.node_type, ASTNodeType::BinaryOp { .. }),
+                    "right child must be the literal 2"
+                );
+            }
+            other => panic!("expected BinaryOp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parenthesised_exponent_keeps_right_grouping() {
+        // Explicit parens must survive: =2^(3^2) is 2^(3^2).
+        let mut p = Parser::new("=2^(3^2)").unwrap();
+        let ast = p.parse().unwrap();
+
+        match ast.node_type {
+            ASTNodeType::BinaryOp { op, left, right } => {
+                assert_eq!(op, "^");
+                assert!(!matches!(left.node_type, ASTNodeType::BinaryOp { .. }));
                 match right.node_type {
                     ASTNodeType::BinaryOp { op: op2, .. } => assert_eq!(op2, "^"),
                     other => panic!("expected right child to be exponent, got {other:?}"),

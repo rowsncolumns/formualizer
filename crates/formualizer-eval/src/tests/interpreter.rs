@@ -408,6 +408,60 @@ mod tests {
     }
 
     #[test]
+    fn comparisons_never_coerce_across_types() {
+        // Excel: same-type compare by value; mixed types rank numbers < text <
+        // booleans and are never equal; a blank takes the counterpart's type.
+        let wb = create_workbook().with_cell_a1("Sheet1", "Z9", LiteralValue::Empty);
+        let t = |f: &str| {
+            assert_eq!(
+                evaluate_formula(f, &wb).unwrap(),
+                LiteralValue::Boolean(true),
+                "{f} should be TRUE"
+            )
+        };
+        let f = |f: &str| {
+            assert_eq!(
+                evaluate_formula(f, &wb).unwrap(),
+                LiteralValue::Boolean(false),
+                "{f} should be FALSE"
+            )
+        };
+        f("=\"1\"=1");
+        t("=\"1\"<>1");
+        f("=TRUE=1");
+        f("=1=1=1");
+        t("=TRUE>1");
+        t("=FALSE>1");
+        t("=TRUE>\"z\"");
+        t("=\"a\">1");
+        t("=1<\"a\"");
+        t("=\"a\"<TRUE");
+        f("=\"\"=0");
+        t("=\"A\"=\"a\"");
+        t("=Z9=0");
+        t("=Z9=\"\"");
+        t("=Z9=FALSE");
+        f("=Z9=1");
+    }
+
+    #[test]
+    fn exponent_is_left_associative_and_unary_minus_binds_tighter() {
+        let wb = create_workbook();
+        assert_eq!(
+            evaluate_formula("=2^3^2", &wb).unwrap(),
+            LiteralValue::Number(64.0)
+        );
+        assert_eq!(
+            evaluate_formula("=2^(3^2)", &wb).unwrap(),
+            LiteralValue::Number(512.0)
+        );
+        assert_eq!(
+            evaluate_formula("=-2^2", &wb).unwrap(),
+            LiteralValue::Number(4.0)
+        );
+    }
+
+    #[test]
     fn test_comparisons() {
         let wb = create_workbook();
         // Equal and not equal
@@ -482,14 +536,14 @@ mod tests {
             LiteralValue::Boolean(true)
         );
 
-        // Mixed type comparisons
+        // Mixed type comparisons never coerce (Excel): text ≠ number, bool ≠ number
         assert_eq!(
             evaluate_formula("=\"5\"=5", &wb).unwrap(),
-            LiteralValue::Boolean(true)
+            LiteralValue::Boolean(false)
         );
         assert_eq!(
             evaluate_formula("=TRUE=1", &wb).unwrap(),
-            LiteralValue::Boolean(true)
+            LiteralValue::Boolean(false)
         );
     }
 
