@@ -1,4 +1,4 @@
-use super::super::utils::{ARG_RANGE_NUM_LENIENT_ONE, coerce_num};
+use super::super::utils::{ARG_RANGE_NUM_LENIENT_ONE, ARG_RANGE_NUM_LENIENT_TWO, coerce_num};
 use crate::args::ArgSchema;
 use crate::engine::VisibilityMaskMode;
 use crate::function::Function;
@@ -86,48 +86,152 @@ impl Function for SumFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        ctx: &dyn FunctionContext<'b>,
+        _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         let mut total = 0.0;
         for arg in args {
-            if let Ok(view) = arg.range_view() {
-                // Propagate errors from range first
-                for res in view.errors_slices() {
-                    let (_, _, err_cols) = res?;
-                    for col in err_cols {
-                        if col.null_count() < col.len() {
-                            for i in 0..col.len() {
-                                if !col.is_null(i) {
-                                    return Ok(crate::traits::CalcValue::Scalar(
-                                        LiteralValue::Error(ExcelError::new(
-                                            crate::arrow_store::unmap_error_code(col.value(i)),
-                                        )),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-
-                for res in view.numbers_slices() {
-                    let (_, _, num_cols) = res?;
-                    for col in num_cols {
-                        total +=
-                            arrow::compute::kernels::aggregate::sum(col.as_ref()).unwrap_or(0.0);
-                    }
-                }
-            } else {
-                let v = arg.value()?.into_literal();
-                match v {
-                    LiteralValue::Error(e) => {
-                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
-                    }
-                    v => total += coerce_num(&v)?,
-                }
+            match sum_argument(arg) {
+                Ok(part) => total += part,
+                Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
             }
         }
         Ok(crate::traits::CalcValue::Scalar(
             super::super::utils::aggregate_result(total),
+        ))
+    }
+}
+
+/// `SUM` of one argument: numeric cells of a range (text / logical / blank cells are skipped),
+/// or the coerced scalar. The first error value met is returned as `Err` so the caller can
+/// surface it as the result, like Excel.
+fn sum_argument(arg: &ArgumentHandle<'_, '_>) -> Result<f64, ExcelError> {
+    if let Ok(view) = arg.range_view() {
+        // Propagate errors from range first
+        for res in view.errors_slices() {
+            let (_, _, err_cols) = res?;
+            for col in err_cols {
+                if col.null_count() < col.len() {
+                    for i in 0..col.len() {
+                        if !col.is_null(i) {
+                            return Err(ExcelError::new(crate::arrow_store::unmap_error_code(
+                                col.value(i),
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        let mut total = 0.0;
+        for res in view.numbers_slices() {
+            let (_, _, num_cols) = res?;
+            for col in num_cols {
+                total += arrow::compute::kernels::aggregate::sum(col.as_ref()).unwrap_or(0.0);
+            }
+        }
+        return Ok(total);
+    }
+    match arg.value()?.into_literal() {
+        LiteralValue::Error(e) => Err(e),
+        v => coerce_num(&v),
+    }
+}
+
+/* ─────────────────────────── PERCENTOF() ──────────────────────────── */
+
+#[derive(Debug)]
+pub struct PercentOfFn;
+
+/// Returns the share of a subset within a whole: `SUM(data_subset) / SUM(data_all)`.
+///
+/// `PERCENTOF` is the Excel 365 helper behind `GROUPBY` / `PIVOTBY` percent-of-total
+/// aggregations; both arguments accept a range, an array or a scalar and are summed with
+/// `SUM`'s rules.
+///
+/// # Remarks
+/// - Text, logical and blank cells inside a range are ignored; a scalar that cannot be
+///   coerced to a number is `#VALUE!`.
+/// - An error value in either argument is returned as the result.
+/// - `SUM(data_all) = 0` is `#DIV/0!`.
+///
+/// # Examples
+///
+/// ```yaml,sandbox
+/// title: "Share of the first two values"
+/// grid:
+///   A1: 1
+///   A2: 2
+///   A3: 3
+/// formula: "=PERCENTOF(A1:A2,A1:A3)"
+/// expected: 0.5
+/// ```
+///
+/// ```yaml,sandbox
+/// title: "Whole of zero"
+/// formula: "=PERCENTOF(1,0)"
+/// expected: "#DIV/0!"
+/// ```
+///
+/// ```yaml,docs
+/// related:
+///   - SUM
+///   - GROUPBY
+///   - PIVOTBY
+/// faq:
+///   - q: "Does the subset have to be part of the whole?"
+///     a: "No. PERCENTOF only divides the two sums, so any two ranges can be compared."
+/// ```
+///
+/// [formualizer-docgen:schema:start]
+/// Name: PERCENTOF
+/// Type: PercentOfFn
+/// Min args: 2
+/// Max args: 2
+/// Variadic: false
+/// Signature: PERCENTOF(arg1: number@range, arg2: number@range)
+/// Arg schema: arg1{kinds=number,required=true,shape=range,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg2{kinds=number,required=true,shape=range,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
+/// Caps: PURE, REDUCTION, NUMERIC_ONLY
+/// [formualizer-docgen:schema:end]
+impl Function for PercentOfFn {
+    func_caps!(PURE, REDUCTION, NUMERIC_ONLY);
+
+    fn name(&self) -> &'static str {
+        "PERCENTOF"
+    }
+    fn min_args(&self) -> usize {
+        2
+    }
+    fn dependency_contract(&self, arity: usize) -> Option<FunctionDependencyContract> {
+        FunctionDependencyContract::static_reduction(arity, self.min_args())
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        &ARG_RANGE_NUM_LENIENT_TWO[..]
+    }
+
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        _ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        if args.len() != 2 {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new_value(),
+            )));
+        }
+        let subset = match sum_argument(&args[0]) {
+            Ok(v) => v,
+            Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
+        };
+        let all = match sum_argument(&args[1]) {
+            Ok(v) => v,
+            Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
+        };
+        if all == 0.0 {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new_div(),
+            )));
+        }
+        Ok(crate::traits::CalcValue::Scalar(
+            super::super::utils::aggregate_result(subset / all),
         ))
     }
 }
@@ -2041,6 +2145,7 @@ mod tests_subtotal_aggregate {
 pub fn register_builtins() {
     crate::function_registry::register_builtin(std::sync::Arc::new(SumProductFn));
     crate::function_registry::register_builtin(std::sync::Arc::new(SumFn));
+    crate::function_registry::register_builtin(std::sync::Arc::new(PercentOfFn));
     crate::function_registry::register_builtin(std::sync::Arc::new(CountFn));
     crate::function_registry::register_builtin(std::sync::Arc::new(AverageFn));
     crate::function_registry::register_builtin(std::sync::Arc::new(SubtotalFn));

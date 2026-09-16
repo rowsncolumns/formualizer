@@ -3576,6 +3576,192 @@ impl Function for DropFn {
     }
 }
 
+/* ───────────────────────── TRIMRANGE() ───────────────────────── */
+
+#[derive(Debug)]
+pub struct TrimRangeFn;
+/// Excludes the blank rows and columns at the edges of a range or array.
+///
+/// `TRIMRANGE` scans in from each edge until it meets a non-blank cell and drops the blank
+/// rows / columns outside it, so a formula over a whole column (`TRIMRANGE(A:A)`) works on the
+/// data actually present. It is the function form of Excel's trim-ref operators
+/// (`A1.:.E10`, `A1:.E10`, `A1.:E10`).
+///
+/// # Remarks
+/// - `trim_rows` / `trim_cols`: `0` keeps every row / column, `1` trims leading blanks, `2`
+///   trims trailing blanks, `3` (default) trims both. Any other value is `#VALUE!`.
+/// - Only truly empty cells are blank; a formula result of `""` and a `0` keep their row.
+/// - A range with no non-blank cell trims to nothing and is `#REF!`, as in Excel.
+///
+/// # Examples
+/// ```yaml,sandbox
+/// title: "Trim trailing blanks"
+/// grid:
+///   A1: 1
+///   A2: 2
+///   A3: 3
+/// formula: '=TRIMRANGE(A1:A5)'
+/// expected: [[1],[2],[3]]
+/// ```
+///
+/// ```yaml,sandbox
+/// title: "Keep leading blank rows"
+/// grid:
+///   A2: 5
+///   A3: 6
+/// formula: '=TRIMRANGE(A1:A4,2)'
+/// expected: [[null],[5],[6]]
+/// ```
+///
+/// ```yaml,docs
+/// related:
+///   - DROP
+///   - TAKE
+///   - FILTER
+/// faq:
+///   - q: "Why is TRIMRANGE(A1:A5) #REF! on an empty range?"
+///     a: "Every row is blank, so nothing is left after trimming; Excel reports the empty result as #REF!."
+///   - q: "Does a cell containing an empty string count as blank?"
+///     a: "No. Only cells with no value are blank; a formula returning \"\" keeps its row and column."
+/// ```
+/// [formualizer-docgen:schema:start]
+/// Name: TRIMRANGE
+/// Type: TrimRangeFn
+/// Min args: 1
+/// Max args: variadic
+/// Variadic: true
+/// Signature: TRIMRANGE(arg1: range@range, arg2?: number@scalar, arg3?...: number@scalar)
+/// Arg schema: arg1{kinds=range,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}; arg2{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}; arg3{kinds=number,required=false,shape=scalar,by_ref=false,coercion=NumberLenientText,max=None,repeating=None,default=false}
+/// Caps: PURE
+/// [formualizer-docgen:schema:end]
+impl Function for TrimRangeFn {
+    func_caps!(PURE, MAY_SPILL);
+    fn name(&self) -> &'static str {
+        "TRIMRANGE"
+    }
+    fn min_args(&self) -> usize {
+        1
+    }
+    fn variadic(&self) -> bool {
+        true
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        use once_cell::sync::Lazy;
+        static SCHEMA: Lazy<Vec<ArgSchema>> = Lazy::new(|| {
+            let mode = || ArgSchema {
+                kinds: smallvec::smallvec![ArgKind::Number],
+                required: false,
+                by_ref: false,
+                shape: ShapeKind::Scalar,
+                coercion: CoercionPolicy::NumberLenientText,
+                max: None,
+                repeating: None,
+                default: None,
+            };
+            vec![
+                ArgSchema {
+                    kinds: smallvec::smallvec![ArgKind::Range],
+                    required: true,
+                    by_ref: true,
+                    shape: ShapeKind::Range,
+                    coercion: CoercionPolicy::None,
+                    max: None,
+                    repeating: None,
+                    default: None,
+                },
+                mode(),
+                mode(),
+            ]
+        });
+        &SCHEMA
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        let scalar_err =
+            |e: ExcelError| Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+        if args.is_empty() || args.len() > 3 {
+            return scalar_err(ExcelError::new_value());
+        }
+        // Trim mode: 0 none, 1 leading, 2 trailing, 3 both (default). A skipped slot
+        // (`TRIMRANGE(rng,,2)`) is the default, like an omitted argument.
+        let mode = |idx: usize| -> Result<u8, ExcelError> {
+            let Some(arg) = args.get(idx) else { return Ok(3) };
+            if arg.is_skipped() {
+                return Ok(3);
+            }
+            match arg.value()?.into_literal() {
+                LiteralValue::Error(e) => Err(e),
+                LiteralValue::Empty => Ok(3),
+                v => {
+                    let n = crate::coercion::to_number_lenient(&v)?.trunc();
+                    if (0.0..=3.0).contains(&n) {
+                        Ok(n as u8)
+                    } else {
+                        Err(ExcelError::new_value())
+                    }
+                }
+            }
+        };
+        let trim_rows = match mode(1) {
+            Ok(m) => m,
+            Err(e) => return scalar_err(e),
+        };
+        let trim_cols = match mode(2) {
+            Ok(m) => m,
+            Err(e) => return scalar_err(e),
+        };
+        let view = match args[0].range_view() {
+            Ok(v) => v,
+            Err(e) => return scalar_err(e),
+        };
+        let (rows, cols) = view.dims();
+        if rows == 0 || cols == 0 {
+            return scalar_err(ExcelError::new_ref());
+        }
+        let blank_row = |r: usize| (0..cols).all(|c| matches!(view.get_cell(r, c), LiteralValue::Empty));
+        let blank_col = |c: usize| (0..rows).all(|r| matches!(view.get_cell(r, c), LiteralValue::Empty));
+
+        let (mut row_start, mut row_end) = (0usize, rows);
+        if trim_rows & 1 != 0 {
+            while row_start < row_end && blank_row(row_start) {
+                row_start += 1;
+            }
+        }
+        if trim_rows & 2 != 0 {
+            while row_end > row_start && blank_row(row_end - 1) {
+                row_end -= 1;
+            }
+        }
+        let (mut col_start, mut col_end) = (0usize, cols);
+        if trim_cols & 1 != 0 {
+            while col_start < col_end && blank_col(col_start) {
+                col_start += 1;
+            }
+        }
+        if trim_cols & 2 != 0 {
+            while col_end > col_start && blank_col(col_end - 1) {
+                col_end -= 1;
+            }
+        }
+        if row_start >= row_end || col_start >= col_end {
+            return scalar_err(ExcelError::new_ref());
+        }
+
+        let mut out: Vec<Vec<LiteralValue>> = Vec::with_capacity(row_end - row_start);
+        for r in row_start..row_end {
+            let mut row_out: Vec<LiteralValue> = Vec::with_capacity(col_end - col_start);
+            for c in col_start..col_end {
+                row_out.push(view.get_cell(r, c));
+            }
+            out.push(row_out);
+        }
+        Ok(collapse_if_scalar(out, ctx.date_system()))
+    }
+}
+
 pub fn register_builtins() {
     use crate::function_registry::register_builtin;
     use std::sync::Arc;
@@ -3586,6 +3772,7 @@ pub fn register_builtins() {
     register_builtin(Arc::new(TransposeFn));
     register_builtin(Arc::new(TakeFn));
     register_builtin(Arc::new(DropFn));
+    register_builtin(Arc::new(TrimRangeFn));
     register_builtin(Arc::new(XMatchFn));
     register_builtin(Arc::new(SortFn));
     register_builtin(Arc::new(SortByFn));
@@ -3617,6 +3804,7 @@ mod tests {
             "TRANSPOSE",
             "TAKE",
             "DROP",
+            "TRIMRANGE",
             "XMATCH",
             "SORT",
             "SORTBY",
