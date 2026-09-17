@@ -20,6 +20,11 @@
 use crate::parser::{SpecialItem, TableSpecifier};
 use crate::types::ParsingError;
 
+/// The column specifier Excel writes when a structured reference's column was deleted
+/// (`Table1[@#REF!]`, `Table1[#REF!]`). Not a special item: it parses as a column NAMED `#REF!`,
+/// which no table has, so resolution yields the `#REF!` error.
+pub const REF_ERROR_COLUMN: &str = "#REF!";
+
 /// Top-level entry point: parse a complete bracketed specifier and reject
 /// trailing garbage.
 pub(crate) fn parse_full_specifier(input: &str) -> Result<Option<TableSpecifier>, ParsingError> {
@@ -165,6 +170,9 @@ fn parse_content(content: &str) -> Result<TableSpecifier, ParsingError> {
         return build_column_range(start, end);
     }
 
+    if trimmed.eq_ignore_ascii_case(REF_ERROR_COLUMN) {
+        return Ok(TableSpecifier::Column(REF_ERROR_COLUMN.to_string()));
+    }
     if trimmed.starts_with('#') {
         return parse_special_token(trimmed).map(TableSpecifier::SpecialItem);
     }
@@ -387,6 +395,9 @@ fn bracketed_token_to_specifier(tok: BracketedToken) -> Result<TableSpecifier, P
         return Err(ParsingError::InvalidReference(
             "Empty '[]' inside structured-reference combination".to_string(),
         ));
+    }
+    if trimmed.eq_ignore_ascii_case(REF_ERROR_COLUMN) {
+        return Ok(TableSpecifier::Column(REF_ERROR_COLUMN.to_string()));
     }
     if trimmed.starts_with('#') {
         return parse_special_token(trimmed).map(TableSpecifier::SpecialItem);

@@ -1024,6 +1024,12 @@ impl Display for ReferenceType {
             f,
             "{}",
             match self {
+                ReferenceType::Cell { sheet: Some(s), .. }
+                | ReferenceType::Range { sheet: Some(s), .. }
+                    if Self::is_ref_error_sheet(s) =>
+                {
+                    Self::ref_error_text(s)
+                }
                 ReferenceType::Cell {
                     sheet,
                     row,
@@ -1237,12 +1243,23 @@ impl ReferenceType {
             None
         } else {
             // Bare segment. Sheet names cannot contain ':', '!', '\'', or any
-            // ASCII-whitespace/operator characters in unquoted form.
+            // ASCII-whitespace/operator characters in unquoted form. A `[...]` span is
+            // opaque: the `!` of a `#REF!` column specifier (`Table1[#REF!]`, the text
+            // Excel writes for a deleted table column) is not a sheet separator.
             let mut i = start;
+            let mut depth: u32 = 0;
             while i < bytes.len() {
                 let b = bytes[i];
                 match b {
-                    b':' | b'!' | b'\'' | b' ' | b'\t' | b'\n' | b'\r' => break,
+                    b'[' => {
+                        depth += 1;
+                        i += 1;
+                    }
+                    b']' => {
+                        depth = depth.saturating_sub(1);
+                        i += 1;
+                    }
+                    b':' | b'!' | b'\'' | b' ' | b'\t' | b'\n' | b'\r' if depth == 0 => break,
                     _ => i += 1,
                 }
             }
@@ -1343,12 +1360,20 @@ impl ReferenceType {
         // reader rejects (such as bracketed external workbook tokens, e.g.
         // `[1]Sheet1!A1`). The original implementation scanned for the first
         // `!` after byte 0; preserve that behaviour for compatibility.
+        // A `!` inside a `[...]` span (`Table1[#REF!]`) is part of the specifier, not a
+        // sheet separator.
         let mut i = 0;
+        let mut depth: u32 = 0;
         while i < bytes.len() {
-            if bytes[i] == b'!' && i > 0 {
-                let sheet = reference[..i].to_string();
-                let ref_part = reference[i + 1..].to_string();
-                return (SheetSpec::Single(sheet), ref_part);
+            match bytes[i] {
+                b'[' => depth += 1,
+                b']' => depth = depth.saturating_sub(1),
+                b'!' if i > 0 && depth == 0 => {
+                    let sheet = reference[..i].to_string();
+                    let ref_part = reference[i + 1..].to_string();
+                    return (SheetSpec::Single(sheet), ref_part);
+                }
+                _ => {}
             }
             i += 1;
         }
@@ -1632,9 +1657,71 @@ impl ReferenceType {
     // `parse_complex_table_specifier` helpers were removed when the real
     // recursive-descent parser landed for issue #73.
 
+    /// The pseudo sheet a structural edit moves a reference onto when its target row/column was
+    /// deleted (`=A3+1` after row 3 is deleted). Consumers detect the marker with
+    /// [`Self::is_ref_error_sheet`]; a sheet-qualified original keeps its qualifier behind the
+    /// marker (`#REF:Sheet1`, see [`Self::ref_error_sheet_marker`]) so the text prints as
+    /// `Sheet1!#REF!` the way Excel writes it. `:` cannot appear in a real sheet name, so the
+    /// qualified form is unambiguous.
+    pub const REF_ERROR_SHEET: &'static str = "#REF";
+
+    /// Marker sheet for a reference whose target was structurally deleted; `original` is the
+    /// reference's own sheet qualifier (kept so the printed text stays `Sheet1!#REF!`).
+    pub fn ref_error_sheet_marker(original: Option<&str>) -> String {
+        match original {
+            Some(orig) if !Self::is_ref_error_sheet(orig) => {
+                format!("{}:{orig}", Self::REF_ERROR_SHEET)
+            }
+            Some(marker) => marker.to_string(),
+            None => Self::REF_ERROR_SHEET.to_string(),
+        }
+    }
+
+    /// Is `sheet` the structural-delete marker (bare or with an original qualifier)?
+    pub fn is_ref_error_sheet(sheet: &str) -> bool {
+        sheet == Self::REF_ERROR_SHEET
+            || sheet
+                .strip_prefix(Self::REF_ERROR_SHEET)
+                .is_some_and(|rest| rest.starts_with(':'))
+    }
+
+    /// The sheet qualifier a marker preserved, if the broken reference was sheet-qualified.
+    pub fn ref_error_original_sheet(sheet: &str) -> Option<&str> {
+        sheet
+            .strip_prefix(Self::REF_ERROR_SHEET)
+            .and_then(|rest| rest.strip_prefix(':'))
+    }
+
+    /// Does this cell/range reference carry the structural-delete marker?
+    pub fn is_ref_error(&self) -> bool {
+        match self {
+            ReferenceType::Cell { sheet: Some(s), .. }
+            | ReferenceType::Range { sheet: Some(s), .. } => Self::is_ref_error_sheet(s),
+            _ => false,
+        }
+    }
+
+    /// Excel's text for a broken reference: the bare `#REF!` error token, or `Sheet1!#REF!` when
+    /// the reference was sheet-qualified (the tokenizer reads both back as the `#REF!` literal).
+    fn ref_error_text(marker: &str) -> String {
+        match Self::ref_error_original_sheet(marker) {
+            Some(orig) if sheet_name_needs_quoting(orig) => {
+                format!("'{}'!#REF!", orig.replace('\'', "''"))
+            }
+            Some(orig) => format!("{orig}!#REF!"),
+            None => "#REF!".to_string(),
+        }
+    }
+
     /// Get the Excel-style string representation of this reference
     pub fn to_excel_string(&self) -> String {
         match self {
+            ReferenceType::Cell { sheet: Some(s), .. }
+            | ReferenceType::Range { sheet: Some(s), .. }
+                if Self::is_ref_error_sheet(s) =>
+            {
+                Self::ref_error_text(s)
+            }
             ReferenceType::Cell {
                 sheet,
                 row,

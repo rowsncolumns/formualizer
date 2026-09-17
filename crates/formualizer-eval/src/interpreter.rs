@@ -374,6 +374,10 @@ impl<'a> Interpreter<'a> {
                 let anchor = self.evaluate_ast_as_reference(expr)?;
                 self.spill_range_of_anchor_reference(&anchor)
             }
+            // An error literal in reference position keeps its own error: `=#REF!#` (a spill
+            // reference whose anchor row was deleted) is `#REF!`, not a generic "not a
+            // reference" complaint.
+            ASTNodeType::Literal(LiteralValue::Error(e)) => Err(e.clone()),
             ASTNodeType::Array(_)
             | ASTNodeType::UnaryOp { .. }
             | ASTNodeType::BinaryOp { .. }
@@ -459,6 +463,11 @@ impl<'a> Interpreter<'a> {
                     self.evaluate_arena_ast_as_reference(*expr_id, data_store, sheet_registry)?;
                 self.spill_range_of_anchor_reference(&anchor)
             }
+            AstNodeData::Literal(vref) => match data_store.retrieve_value(*vref) {
+                LiteralValue::Error(e) => Err(e),
+                _ => Err(ExcelError::new(ExcelErrorKind::Ref)
+                    .with_message("Expression cannot be used as a reference")),
+            },
             _ => Err(ExcelError::new(ExcelErrorKind::Ref)
                 .with_message("Expression cannot be used as a reference")),
         }

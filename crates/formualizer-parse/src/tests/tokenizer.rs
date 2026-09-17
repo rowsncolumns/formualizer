@@ -1860,6 +1860,24 @@ mod tests {
         }
 
         #[test]
+        fn hash_after_ref_error_literal_is_spill_postfix() {
+            let expected = vec![
+                (TokenType::Operand, TokenSubType::Error, "#REF!".to_string()),
+                (TokenType::OpPostfix, TokenSubType::None, "#".to_string()),
+            ];
+            assert_eq!(classic_non_ws("=#REF!#"), expected);
+            assert_eq!(span_non_ws("=#REF!#"), expected);
+            let expected = vec![
+                (TokenType::Func, TokenSubType::Open, "SUM(".to_string()),
+                (TokenType::Operand, TokenSubType::Error, "#REF!".to_string()),
+                (TokenType::OpPostfix, TokenSubType::None, "#".to_string()),
+                (TokenType::Func, TokenSubType::Close, ")".to_string()),
+            ];
+            assert_eq!(classic_non_ws("=SUM(#REF!#)"), expected);
+            assert_eq!(span_non_ws("=SUM(#REF!#)"), expected);
+        }
+
+        #[test]
         fn hash_after_operator_is_error_literal() {
             let classic = classic_non_ws("=1+#DIV/0!");
             assert_eq!(classic.last().unwrap().0, TokenType::Operand);
