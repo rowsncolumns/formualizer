@@ -1435,34 +1435,13 @@ impl<'a> Interpreter<'a> {
                     }
                 };
 
-                // Normalize bounds (A10:A1 is legal syntax; treat as swapped).
-                let (mut sr, mut er) = (sr, er);
-                let (mut sc, mut ec) = (sc, ec);
-                if sr > er {
-                    std::mem::swap(&mut sr, &mut er);
-                }
-                if sc > ec {
-                    std::mem::swap(&mut sc, &mut ec);
-                }
-
-                let pick = if sc == ec {
-                    // Column vector: intersect by row
-                    if cur_r1 < sr || cur_r1 > er {
-                        return LiteralValue::Error(ExcelError::new(ExcelErrorKind::Value));
-                    }
-                    (cur_r1, sc)
-                } else if sr == er {
-                    // Row vector: intersect by column
-                    if cur_c1 < sc || cur_c1 > ec {
-                        return LiteralValue::Error(ExcelError::new(ExcelErrorKind::Value));
-                    }
-                    (sr, cur_c1)
-                } else {
-                    // 2D: require both axes
-                    if cur_r1 < sr || cur_r1 > er || cur_c1 < sc || cur_c1 > ec {
-                        return LiteralValue::Error(ExcelError::new(ExcelErrorKind::Value));
-                    }
-                    (cur_r1, cur_c1)
+                // The same pick as the function spelling `SINGLE(range)` — Excel persists `@`
+                // as `_xlfn.SINGLE`, so the two must never drift.
+                let pick = match crate::builtins::reference_fns::implicit_intersection_cell(
+                    cur_r1, cur_c1, sr, sc, er, ec,
+                ) {
+                    Ok(pick) => pick,
+                    Err(e) => return LiteralValue::Error(e),
                 };
 
                 match self

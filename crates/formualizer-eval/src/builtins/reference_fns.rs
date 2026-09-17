@@ -1118,10 +1118,211 @@ impl Function for IndirectFn {
     }
 }
 
+/// The cell Excel's implicit intersection of a bounded range with the formula cell selects
+/// (all coordinates 1-based). A column vector — a 1×1 range included — picks the formula's row, a
+/// row vector the formula's column, a block needs the formula cell inside it; no intersection is
+/// `#VALUE!`. `A10:A1` is legal syntax and reads as `A1:A10`. Shared by the `@` operator and its
+/// persisted function form `SINGLE` so the two spellings cannot drift.
+pub(crate) fn implicit_intersection_cell(
+    cur_row: u32,
+    cur_col: u32,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+) -> Result<(u32, u32), ExcelError> {
+    let (sr, er) = (start_row.min(end_row), start_row.max(end_row));
+    let (sc, ec) = (start_col.min(end_col), start_col.max(end_col));
+    let in_rows = (sr..=er).contains(&cur_row);
+    let in_cols = (sc..=ec).contains(&cur_col);
+    if sc == ec {
+        if in_rows {
+            Ok((cur_row, sc))
+        } else {
+            Err(ExcelError::new(ExcelErrorKind::Value))
+        }
+    } else if sr == er {
+        if in_cols {
+            Ok((sr, cur_col))
+        } else {
+            Err(ExcelError::new(ExcelErrorKind::Value))
+        }
+    } else if in_rows && in_cols {
+        Ok((cur_row, cur_col))
+    } else {
+        Err(ExcelError::new(ExcelErrorKind::Value))
+    }
+}
+
+#[derive(Debug)]
+pub struct SingleFn;
+
+/// The function form of the implicit-intersection operator `@`: reduces a reference or array to
+/// the one cell the formula cell "sees".
+///
+/// Excel 365 persists `=@A1:A10` as `_xlfn.SINGLE(A1:A10)` in the sheet XML and reads it back as
+/// `@`, so a workbook can carry either spelling and both must evaluate identically. A cell
+/// reference is returned as is, a column vector picks the formula's row, a row vector the
+/// formula's column, a 2-D range needs the formula cell inside it, and anything the formula cell
+/// does not intersect is `#VALUE!`. An array — a literal or a spilling function's result — yields
+/// its top-left element; a scalar passes through unchanged.
+///
+/// # Remarks
+/// - A reference stays a reference: `ROW(SINGLE(A1:A10))` is the intersected row, like
+///   `ROW(@A1:A10)`.
+/// - A multi-area union `(A1:A5,C1:C5)` has no single cell to intersect with → `#VALUE!`.
+/// - Whole-column / whole-row references (`A:A`, `1:1`) intersect through the materialised
+///   range view, the same path the `@` operator takes for them.
+///
+/// # Examples
+/// ```yaml,sandbox
+/// title: "Top-left of an array constant"
+/// formula: '=SINGLE({1,2;3,4})'
+/// expected: 1
+/// ```
+///
+/// ```yaml,sandbox
+/// title: "A scalar passes through"
+/// formula: '=SINGLE(7)*2'
+/// expected: 14
+/// ```
+///
+/// ```yaml,docs
+/// related:
+///   - INDEX
+///   - OFFSET
+/// faq:
+///   - q: "Why does a saved workbook contain SINGLE when I typed @?"
+///     a: "SINGLE is the file spelling of the @ operator; Excel writes _xlfn.SINGLE(range) for =@range and shows it as @ again on load."
+///   - q: "When does SINGLE return #VALUE!?"
+///     a: "When the formula cell's row (for a column vector), column (for a row vector) or both (for a block) fall outside the range, or when the argument is a multi-area union."
+/// ```
+///
+/// [formualizer-docgen:schema:start]
+/// Name: SINGLE
+/// Type: SingleFn
+/// Min args: 1
+/// Max args: 1
+/// Variadic: false
+/// Signature: SINGLE(arg1: any@range)
+/// Arg schema: arg1{kinds=any,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}
+/// Caps: PURE, RETURNS_REFERENCE
+/// [formualizer-docgen:schema:end]
+impl Function for SingleFn {
+    fn caps(&self) -> FnCaps {
+        FnCaps::PURE | FnCaps::RETURNS_REFERENCE
+    }
+    fn name(&self) -> &'static str {
+        "SINGLE"
+    }
+    fn min_args(&self) -> usize {
+        1
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        use once_cell::sync::Lazy;
+        // References and arrays alike; the value path handles scalars too.
+        static SCHEMA: Lazy<Vec<ArgSchema>> = Lazy::new(|| {
+            vec![ArgSchema {
+                kinds: smallvec::smallvec![ArgKind::Any],
+                required: true,
+                by_ref: false,
+                shape: ShapeKind::Range,
+                coercion: CoercionPolicy::None,
+                max: None,
+                repeating: None,
+                default: None,
+            }]
+        });
+        &SCHEMA
+    }
+
+    fn eval_reference<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+    ) -> Option<Result<ReferenceType, ExcelError>> {
+        if args.len() != 1 {
+            return Some(Err(ExcelError::new(ExcelErrorKind::Value)));
+        }
+        // Not a reference (array literal, scalar, value-returning function): `eval` handles it.
+        let areas = match args[0].as_reference_areas() {
+            Ok(areas) => areas,
+            Err(_) => return None,
+        };
+        let [base] = areas.as_slice() else {
+            return Some(Err(ExcelError::new(ExcelErrorKind::Value)));
+        };
+        // A NAMED base resolves through its definition when it is a plain cell/range name;
+        // literal/formula names fall back to eval()'s values path.
+        let base = match base {
+            ReferenceType::NamedRange(n) => ctx.named_range_reference_definition(n)?,
+            other => other.clone(),
+        };
+        // Outside any cell (a name evaluated on its own) the `@` operator intersects with A1.
+        let (cur_row, cur_col) = match ctx.current_cell() {
+            Some(cell) => (
+                cell.coord.row().saturating_add(1),
+                cell.coord.col().saturating_add(1),
+            ),
+            None => (1, 1),
+        };
+        match base {
+            ReferenceType::Cell { .. } => Some(Ok(base)),
+            ReferenceType::Range {
+                sheet,
+                start_row: Some(sr),
+                start_col: Some(sc),
+                end_row: Some(er),
+                end_col: Some(ec),
+                ..
+            } => Some(
+                implicit_intersection_cell(cur_row, cur_col, sr, sc, er, ec)
+                    .map(|(row, col)| ReferenceType::cell(sheet, row, col)),
+            ),
+            // Open-ended ranges, tables, 3-D spans: intersect the materialised range view.
+            _ => None,
+        }
+    }
+
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        if let Some(result) = self.eval_reference(args, ctx) {
+            // Materialise the intersected cell.
+            let value = match result {
+                Ok(reference) => match ctx.resolve_range_view(&reference, ctx.current_sheet()) {
+                    Ok(rv) => rv.as_1x1().unwrap_or(LiteralValue::Empty),
+                    Err(e) => LiteralValue::Error(e),
+                },
+                Err(e) => LiteralValue::Error(e),
+            };
+            return Ok(crate::traits::CalcValue::Scalar(value));
+        }
+        let value = match args[0].value()? {
+            crate::traits::CalcValue::Scalar(LiteralValue::Array(rows)) => rows
+                .into_iter()
+                .next()
+                .and_then(|row| row.into_iter().next())
+                .unwrap_or_else(|| LiteralValue::Error(ExcelError::new(ExcelErrorKind::Value))),
+            crate::traits::CalcValue::Scalar(v) => v,
+            crate::traits::CalcValue::Range(rv) => {
+                crate::builtins::info::implicit_intersect(&rv, ctx.current_cell())
+            }
+            crate::traits::CalcValue::Callable(_) => LiteralValue::Error(
+                ExcelError::new(ExcelErrorKind::Calc).with_message("LAMBDA value must be invoked"),
+            ),
+        };
+        Ok(crate::traits::CalcValue::Scalar(value))
+    }
+}
+
 pub fn register_builtins() {
     crate::function_registry::register_builtin(std::sync::Arc::new(IndexFn));
     crate::function_registry::register_builtin(std::sync::Arc::new(OffsetFn));
     crate::function_registry::register_builtin(std::sync::Arc::new(IndirectFn));
+    crate::function_registry::register_builtin(std::sync::Arc::new(SingleFn));
 }
 
 #[cfg(test)]

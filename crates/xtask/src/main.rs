@@ -231,7 +231,10 @@ struct RegistrationVisitor {
 
 impl<'ast> Visit<'ast> for RegistrationVisitor {
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        if path_ends_with_ident(&node.func, "register_function")
+        // Builtins register through `register_builtin` (the stock library) or
+        // `register_function` (host overrides); both take `Arc::new(TypeFn)`.
+        if (path_ends_with_ident(&node.func, "register_builtin")
+            || path_ends_with_ident(&node.func, "register_function"))
             && let Some(first_arg) = node.args.first()
             && let Some(type_name) = extract_arc_new_type_name(first_arg)
         {
