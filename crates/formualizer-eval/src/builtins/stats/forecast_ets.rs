@@ -9,6 +9,13 @@
 //! 1 % on typical series. `data_completion` and `aggregation` are validated but not modelled: the
 //! timeline is used as given (no gap filling, duplicates are not aggregated).
 //! (rowsncolumns/spreadsheet#546 A-14)
+//!
+//! The fit keeps only its terminal state (level, trend, one seasonal cycle), so a forecast is O(1)
+//! in the horizon: `FORECAST.ETS(1E15, …)` is a multiplication, not a `Vec` of 10¹⁵ steps — on
+//! wasm32 that allocation was a `capacity overflow` panic that poisoned the whole engine
+//! (rowsncolumns/spreadsheet#642 B-06). Two numeric pairs are enough to fit, like Excel, and the
+//! Holt level starts one step before the series so a perfectly linear history forecasts its exact
+//! continuation (#642 B-01).
 
 use super::{coerce_num, scalar_like_value};
 use crate::args::{ArgSchema, ShapeKind};
@@ -209,7 +216,9 @@ fn prepare(
         };
         pairs.push((x, y));
     }
-    if pairs.len() < 4 {
+    // Excel fits from two pairs (there is no four-pair floor); fewer is #N/A, and two pairs at the
+    // same timeline point have no step (#NUM! below).
+    if pairs.len() < 2 {
         return Err(na_error());
     }
     pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -239,24 +248,43 @@ fn prepare(
     })
 }
 
+/// The terminal state of one Holt-Winters pass: everything a forecast at any horizon needs.
 struct HoltWinters {
     fitted: Vec<f64>,
-    forecast: Vec<f64>,
+    /// Smoothed level after the last observation.
+    level: f64,
+    /// Smoothed per-step trend after the last observation.
+    trend: f64,
+    /// One cycle of seasonal indices (a single zero entry without a seasonal component).
+    seasonal: Vec<f64>,
     /// Mean squared in-sample residual.
     sse: f64,
 }
 
+impl HoltWinters {
+    /// The forecast `h` whole steps past the last observation: `level + h·trend + seasonal[(n + h - 1) mod m]`.
+    /// O(1) in `h`, which stays an `f64` — the seasonal slot is reduced with `%` (exact for finite
+    /// operands), so a horizon beyond `usize` on wasm32 neither overflows nor allocates.
+    fn forecast_at(&self, h: f64) -> f64 {
+        let m = self.seasonal.len();
+        let season_comp = if m > 1 {
+            let n = self.fitted.len() as f64;
+            self.seasonal[((n + h - 1.0) % m as f64) as usize]
+        } else {
+            0.0
+        };
+        self.level + h * self.trend + season_comp
+    }
+}
+
 /// One additive Holt-Winters pass with fixed smoothing parameters. `period == 1` collapses to Holt's
 /// linear method. Seasonal indices initialise from the first cycle's deviations from its mean, the
-/// trend from the average per-step change between the first two cycles.
-fn run_holt_winters(
-    y: &[f64],
-    period: usize,
-    alpha: f64,
-    beta: f64,
-    gamma: f64,
-    horizon: usize,
-) -> HoltWinters {
+/// trend from the average per-step change between the first two cycles. The initial level is the
+/// level one step *before* the series (first value or first-cycle mean, minus the trend), so the
+/// one-step-ahead prediction of the first observation is the observation itself and a perfectly
+/// linear history has zero residual — an initial level *at* the first value predicted `y₀ + trend`
+/// for `y₀`, and that spurious residual pulled the grid search off the exact continuation.
+fn run_holt_winters(y: &[f64], period: usize, alpha: f64, beta: f64, gamma: f64) -> HoltWinters {
     let n = y.len();
     let m = period;
     let mut fitted = vec![0.0; n];
@@ -268,18 +296,18 @@ fn run_holt_winters(
             sum1 += v;
         }
         let mean1 = sum1 / m as f64;
-        level = mean1;
         let mut trend_sum = 0.0;
         for i in 0..m {
             trend_sum += (y[i + m] - y[i]) / m as f64;
         }
         trend = trend_sum / m as f64;
+        level = mean1 - trend;
         for i in 0..m {
             seasonal[i] = y[i] - mean1;
         }
     } else {
-        level = y[0];
         trend = if n > 1 { y[1] - y[0] } else { 0.0 };
+        level = y[0] - trend;
     }
     let mut sse = 0.0;
     let mut count = 0usize;
@@ -298,18 +326,11 @@ fn run_holt_winters(
             seasonal[season_idx] = gamma * (y[t] - level) + (1.0 - gamma) * season_comp;
         }
     }
-    let mut forecast = Vec::with_capacity(horizon);
-    for h in 1..=horizon {
-        let season_comp = if m > 1 {
-            seasonal[(n + h - 1) % m]
-        } else {
-            0.0
-        };
-        forecast.push(level + h as f64 * trend + season_comp);
-    }
     HoltWinters {
         fitted,
-        forecast,
+        level,
+        trend,
+        seasonal,
         sse: if count > 0 {
             sse / count as f64
         } else {
@@ -327,13 +348,13 @@ struct Fit {
 
 /// Grid-search the smoothing parameters for the lowest in-sample error (first minimum wins, grid
 /// order α, β, γ). Without a seasonal component γ is 0.
-fn fit_holt_winters(y: &[f64], period: usize, horizon: usize) -> Fit {
+fn fit_holt_winters(y: &[f64], period: usize) -> Fit {
     let gammas: &[f64] = if period > 1 { &SMOOTHING_GRID } else { &[0.0] };
     let mut best: Option<Fit> = None;
     for &alpha in &SMOOTHING_GRID {
         for &beta in &SMOOTHING_GRID {
             for &gamma in gammas {
-                let model = run_holt_winters(y, period, alpha, beta, gamma, horizon);
+                let model = run_holt_winters(y, period, alpha, beta, gamma);
                 if best.as_ref().is_none_or(|b| model.sse < b.model.sse) {
                     best = Some(Fit {
                         alpha,
@@ -356,7 +377,7 @@ fn detect_seasonality(y: &[f64]) -> usize {
         return 1;
     }
     let max_period = (n / 2).min(MAX_DETECTED_PERIOD);
-    let baseline = run_holt_winters(y, 1, 0.5, 0.1, 0.0, 0).sse;
+    let baseline = run_holt_winters(y, 1, 0.5, 0.1, 0.0).sse;
     let mut best_period = 1;
     let mut best_sse = baseline;
     for m in 2..=max_period {
@@ -367,7 +388,7 @@ fn detect_seasonality(y: &[f64]) -> usize {
         for alpha in [0.3, 0.7] {
             for beta in [0.1, 0.3] {
                 for gamma in [0.3, 0.7] {
-                    let sse = run_holt_winters(y, m, alpha, beta, gamma, 0).sse;
+                    let sse = run_holt_winters(y, m, alpha, beta, gamma).sse;
                     if sse < m_sse {
                         m_sse = sse;
                     }
@@ -468,12 +489,13 @@ fn std_normal_quantile(p: f64) -> f64 {
 /// and extrapolates them to `target_date`.
 ///
 /// # Remarks
-/// - `values` and `timeline` must have the same size and at least four numeric pairs; otherwise
+/// - `values` and `timeline` must have the same size and at least two numeric pairs; otherwise
 ///   `#N/A`. Pairs with a non-numeric value or date are skipped; the timeline need not be sorted.
 /// - `seasonality`: `1` (default) detects the period automatically, `0` fits without seasonality,
 ///   `2`..`8760` forces the period. Anything else is `#NUM!`.
 /// - `target_date` before the last timeline point is `#NUM!`; a target on the last point returns
-///   the last value.
+///   the last value. Any finite target after it is extrapolated in constant time — a perfectly
+///   linear history forecasts its exact continuation, however far out.
 /// - The smoothing parameters come from a grid search minimising the in-sample error, so results
 ///   match the JS engine exactly and Excel to within about 1 %.
 ///
@@ -482,7 +504,7 @@ fn std_normal_quantile(p: f64) -> f64 {
 /// ```yaml,sandbox
 /// title: "Next value of a linear trend"
 /// formula: "=ROUND(FORECAST.ETS(11,{10;20;30;40;50;60;70;80;90;100},{1;2;3;4;5;6;7;8;9;10}),2)"
-/// expected: 109.56
+/// expected: 110
 /// ```
 ///
 /// ```yaml,sandbox
@@ -540,12 +562,18 @@ impl Function for ForecastEtsFn {
             return error_scalar(num_error());
         }
         let horizon = js_round((target - series.last_x) / series.step);
+        if !horizon.is_finite() {
+            return error_scalar(num_error());
+        }
         if horizon < 1.0 {
             return scalar(LiteralValue::Number(series.y[series.y.len() - 1]));
         }
-        let horizon = horizon as usize;
-        let fit = fit_holt_winters(&series.y, series.period, horizon);
-        scalar(LiteralValue::Number(fit.model.forecast[horizon - 1]))
+        let fit = fit_holt_winters(&series.y, series.period);
+        let forecast = fit.model.forecast_at(horizon);
+        if !forecast.is_finite() {
+            return error_scalar(num_error());
+        }
+        scalar(LiteralValue::Number(forecast))
     }
 }
 
@@ -624,8 +652,11 @@ impl Function for ForecastEtsConfintFn {
         if target < series.last_x {
             return error_scalar(num_error());
         }
-        let horizon = js_round((target - series.last_x) / series.step).max(1.0) as usize;
-        let fit = fit_holt_winters(&series.y, series.period, horizon);
+        let horizon = js_round((target - series.last_x) / series.step).max(1.0);
+        if !horizon.is_finite() {
+            return error_scalar(num_error());
+        }
+        let fit = fit_holt_winters(&series.y, series.period);
         let mut sse = 0.0;
         for (y, fitted) in series.y.iter().zip(&fit.model.fitted) {
             sse += (y - fitted).powi(2);
@@ -636,7 +667,11 @@ impl Function for ForecastEtsConfintFn {
             (sse / series.y.len() as f64).sqrt()
         };
         let z = std_normal_quantile(1.0 - (1.0 - confidence) / 2.0);
-        scalar(LiteralValue::Number(z * rmse * (horizon as f64).sqrt()))
+        let half_width = z * rmse * horizon.sqrt();
+        if !half_width.is_finite() {
+            return error_scalar(num_error());
+        }
+        scalar(LiteralValue::Number(half_width))
     }
 }
 
@@ -777,7 +812,7 @@ impl Function for ForecastEtsStatFn {
             Err(e) => return error_scalar(e),
         };
         let y = &series.y;
-        let fit = fit_holt_winters(y, series.period, 0);
+        let fit = fit_holt_winters(y, series.period);
         let fitted = &fit.model.fitted;
         let value = match stat_type as i64 {
             1 => fit.alpha,

@@ -93,111 +93,79 @@ fn assert_error(v: LiteralValue, kind: ExcelErrorKind, formula: &str) {
 /// `seasonality` spelling), agreed to 1e-9.
 const JS_FIXTURES: &[(&str, &str, f64)] = &[
     // linear
-    (
-        "linear",
-        "=FORECAST.ETS(11,A1:A10,B1:B10,0)",
-        109.55787660644461,
-    ),
-    (
-        "linear",
-        "=FORECAST.ETS(13,A1:A10,B1:B10,0)",
-        128.77201805970907,
-    ),
-    (
-        "linear",
-        "=FORECAST.ETS(11,A1:A10,B1:B10,0)",
-        109.55787660644461,
-    ),
+    ("linear", "=FORECAST.ETS(11,A1:A10,B1:B10,0)", 110.0),
+    ("linear", "=FORECAST.ETS(13,A1:A10,B1:B10,0)", 130.0),
+    ("linear", "=FORECAST.ETS(11,A1:A10,B1:B10,0)", 110.0),
     (
         "linear",
         "=FORECAST.ETS(11,A1:A10,B1:B10,4)",
-        108.94703533828222,
+        107.48480853747664,
     ),
     (
         "linear",
         "=FORECAST.ETS(13,A1:A10,B1:B10,4)",
-        129.83612682113574,
+        128.50499731090798,
     ),
-    (
-        "linear",
-        "=FORECAST.ETS(11,A1:A10,B1:B10,1)",
-        109.55787660644461,
-    ),
+    ("linear", "=FORECAST.ETS(11,A1:A10,B1:B10,1)", 110.0),
     ("linear", "=FORECAST.ETS(10,A1:A10,B1:B10,0)", 100.0),
     (
         "linear",
         "=FORECAST.ETS.CONFINT(11,A1:A10,B1:B10,0.95,0)",
-        6.329863983955223,
+        0.0,
     ),
     (
         "linear",
         "=FORECAST.ETS.CONFINT(13,A1:A10,B1:B10,0.9,4)",
-        40.870168149219936,
+        31.71265211563925,
     ),
     ("linear", "=FORECAST.ETS.SEASONALITY(A1:A10,B1:B10)", 1.0),
-    ("linear", "=FORECAST.ETS.STAT(A1:A10,B1:B10,1,0)", 0.9),
+    ("linear", "=FORECAST.ETS.STAT(A1:A10,B1:B10,1,0)", 0.1),
     ("linear", "=FORECAST.ETS.STAT(A1:A10,B1:B10,2,0)", 0.1),
     ("linear", "=FORECAST.ETS.STAT(A1:A10,B1:B10,3,0)", 0.0),
-    (
-        "linear",
-        "=FORECAST.ETS.STAT(A1:A10,B1:B10,4,0)",
-        0.15834119184802453,
-    ),
-    (
-        "linear",
-        "=FORECAST.ETS.STAT(A1:A10,B1:B10,5,0)",
-        0.07832251807104482,
-    ),
-    (
-        "linear",
-        "=FORECAST.ETS.STAT(A1:A10,B1:B10,6,0)",
-        1.5834119184802453,
-    ),
-    (
-        "linear",
-        "=FORECAST.ETS.STAT(A1:A10,B1:B10,7,0)",
-        3.2295817851166557,
-    ),
+    ("linear", "=FORECAST.ETS.STAT(A1:A10,B1:B10,4,0)", 0.0),
+    ("linear", "=FORECAST.ETS.STAT(A1:A10,B1:B10,5,0)", 0.0),
+    ("linear", "=FORECAST.ETS.STAT(A1:A10,B1:B10,6,0)", 0.0),
+    ("linear", "=FORECAST.ETS.STAT(A1:A10,B1:B10,7,0)", 0.0),
     ("linear", "=FORECAST.ETS.STAT(A1:A10,B1:B10,8,0)", 1.0),
-    ("linear", "=FORECAST.ETS.STAT(A1:A10,B1:B10,1,4)", 0.5),
+    ("linear", "=FORECAST.ETS.STAT(A1:A10,B1:B10,1,4)", 0.3),
     ("linear", "=FORECAST.ETS.STAT(A1:A10,B1:B10,2,4)", 0.1),
     ("linear", "=FORECAST.ETS.STAT(A1:A10,B1:B10,3,4)", 0.9),
     (
         "linear",
         "=FORECAST.ETS.STAT(A1:A10,B1:B10,4,4)",
-        1.2753330365060542,
+        0.8734046106567369,
     ),
     (
         "linear",
         "=FORECAST.ETS.STAT(A1:A10,B1:B10,5,4)",
-        0.3320944194498802,
+        0.19769252087772174,
     ),
     (
         "linear",
         "=FORECAST.ETS.STAT(A1:A10,B1:B10,6,4)",
-        12.753330365060542,
+        8.73404610656737,
     ),
     (
         "linear",
         "=FORECAST.ETS.STAT(A1:A10,B1:B10,7,4)",
-        14.345594158740033,
+        11.131269029460851,
     ),
     ("linear", "=FORECAST.ETS.STAT(A1:A10,B1:B10,8,4)", 1.0),
     // seasonal
     (
         "seasonal",
         "=FORECAST.ETS(13,A1:A12,B1:B12,0)",
-        36.15392131048526,
+        37.985850047209965,
     ),
     (
         "seasonal",
         "=FORECAST.ETS(15,A1:A12,B1:B12,0)",
-        47.312805601695324,
+        52.401437108758785,
     ),
     (
         "seasonal",
         "=FORECAST.ETS(13,A1:A12,B1:B12,0)",
-        36.15392131048526,
+        37.985850047209965,
     ),
     ("seasonal", "=FORECAST.ETS(13,A1:A12,B1:B12,4)", 10.0),
     ("seasonal", "=FORECAST.ETS(15,A1:A12,B1:B12,4)", 20.0),
@@ -206,7 +174,7 @@ const JS_FIXTURES: &[(&str, &str, f64)] = &[
     (
         "seasonal",
         "=FORECAST.ETS.CONFINT(13,A1:A12,B1:B12,0.95,0)",
-        34.56631949886052,
+        36.338753033657824,
     ),
     (
         "seasonal",
@@ -215,27 +183,27 @@ const JS_FIXTURES: &[(&str, &str, f64)] = &[
     ),
     ("seasonal", "=FORECAST.ETS.SEASONALITY(A1:A12,B1:B12)", 4.0),
     ("seasonal", "=FORECAST.ETS.STAT(A1:A12,B1:B12,1,0)", 0.5),
-    ("seasonal", "=FORECAST.ETS.STAT(A1:A12,B1:B12,2,0)", 0.7),
+    ("seasonal", "=FORECAST.ETS.STAT(A1:A12,B1:B12,2,0)", 0.9),
     ("seasonal", "=FORECAST.ETS.STAT(A1:A12,B1:B12,3,0)", 0.0),
     (
         "seasonal",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,4,0)",
-        0.7728193463268915,
+        0.727969441962325,
     ),
     (
         "seasonal",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,5,0)",
-        0.5730672631495511,
+        0.5095331032657088,
     ),
     (
         "seasonal",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,6,0)",
-        14.753823884422474,
+        13.897598437462568,
     ),
     (
         "seasonal",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,7,0)",
-        17.636201364675696,
+        18.54052080563381,
     ),
     ("seasonal", "=FORECAST.ETS.STAT(A1:A12,B1:B12,8,0)", 1.0),
     ("seasonal", "=FORECAST.ETS.STAT(A1:A12,B1:B12,1,4)", 0.1),
@@ -250,158 +218,158 @@ const JS_FIXTURES: &[(&str, &str, f64)] = &[
     (
         "noisy",
         "=FORECAST.ETS(45658,A1:A12,B1:B12,0)",
-        28.519378528399958,
+        28.089109146002784,
     ),
     (
         "noisy",
         "=FORECAST.ETS(45720,A1:A12,B1:B12,0)",
-        31.38546005527558,
+        30.757956020835433,
     ),
     (
         "noisy",
         "=FORECAST.ETS(45658,A1:A12,B1:B12,0)",
-        28.519378528399958,
+        28.089109146002784,
     ),
     (
         "noisy",
         "=FORECAST.ETS(45658,A1:A12,B1:B12,4)",
-        26.86627360534232,
+        27.101986996643497,
     ),
     (
         "noisy",
         "=FORECAST.ETS(45720,A1:A12,B1:B12,4)",
-        28.773382106779877,
+        29.69449166187702,
     ),
     (
         "noisy",
         "=FORECAST.ETS(45658,A1:A12,B1:B12,1)",
-        27.186999096632675,
+        27.569614770133377,
     ),
     ("noisy", "=FORECAST.ETS(45627,A1:A12,B1:B12,0)", 28.3),
     (
         "noisy",
         "=FORECAST.ETS.CONFINT(45658,A1:A12,B1:B12,0.95,0)",
-        3.2997780981206923,
+        2.830574900239169,
     ),
     (
         "noisy",
         "=FORECAST.ETS.CONFINT(45720,A1:A12,B1:B12,0.9,4)",
-        4.793288134696768,
+        3.937295321363165,
     ),
     ("noisy", "=FORECAST.ETS.SEASONALITY(A1:A12,B1:B12)", 2.0),
-    ("noisy", "=FORECAST.ETS.STAT(A1:A12,B1:B12,1,0)", 0.3),
-    ("noisy", "=FORECAST.ETS.STAT(A1:A12,B1:B12,2,0)", 0.3),
+    ("noisy", "=FORECAST.ETS.STAT(A1:A12,B1:B12,1,0)", 0.1),
+    ("noisy", "=FORECAST.ETS.STAT(A1:A12,B1:B12,2,0)", 0.9),
     ("noisy", "=FORECAST.ETS.STAT(A1:A12,B1:B12,3,0)", 0.0),
     (
         "noisy",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,4,0)",
-        0.6474514143529115,
+        0.4956000460966044,
     ),
     (
         "noisy",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,5,0)",
-        0.08554511986983275,
+        0.06163119122720647,
     ),
     (
         "noisy",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,6,0)",
-        1.5774270822416394,
+        1.2074619304899092,
     ),
     (
         "noisy",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,7,0)",
-        1.683591190526418,
+        1.4441974049351836,
     ),
     ("noisy", "=FORECAST.ETS.STAT(A1:A12,B1:B12,8,0)", 31.0),
-    ("noisy", "=FORECAST.ETS.STAT(A1:A12,B1:B12,1,4)", 0.5),
+    ("noisy", "=FORECAST.ETS.STAT(A1:A12,B1:B12,1,4)", 0.3),
     ("noisy", "=FORECAST.ETS.STAT(A1:A12,B1:B12,2,4)", 0.1),
-    ("noisy", "=FORECAST.ETS.STAT(A1:A12,B1:B12,3,4)", 0.7),
+    ("noisy", "=FORECAST.ETS.STAT(A1:A12,B1:B12,3,4)", 0.9),
     (
         "noisy",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,4,4)",
-        0.644836181553036,
+        0.4545639549628752,
     ),
     (
         "noisy",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,5,4)",
-        0.0864657836058637,
+        0.06053514705995866,
     ),
     (
         "noisy",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,6,4)",
-        1.5710554241473973,
+        1.1074830902731871,
     ),
     (
         "noisy",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,7,4)",
-        1.6824635028465447,
+        1.3820065666761867,
     ),
     ("noisy", "=FORECAST.ETS.STAT(A1:A12,B1:B12,8,4)", 31.0),
     // sales
     (
         "sales",
         "=FORECAST.ETS(13,A1:A12,B1:B12,0)",
-        177.5126111688807,
+        180.8381168378906,
     ),
     (
         "sales",
         "=FORECAST.ETS(15,A1:A12,B1:B12,0)",
-        196.0754828673537,
+        191.24266992773434,
     ),
     (
         "sales",
         "=FORECAST.ETS(13,A1:A12,B1:B12,0)",
-        177.5126111688807,
+        180.8381168378906,
     ),
     (
         "sales",
         "=FORECAST.ETS(13,A1:A12,B1:B12,4)",
-        149.61303104651,
+        149.80169475674302,
     ),
     (
         "sales",
         "=FORECAST.ETS(15,A1:A12,B1:B12,4)",
-        179.0536370673752,
+        179.38058339625363,
     ),
     (
         "sales",
         "=FORECAST.ETS(13,A1:A12,B1:B12,1)",
-        149.61303104651,
+        149.80169475674302,
     ),
     ("sales", "=FORECAST.ETS(12,A1:A12,B1:B12,0)", 185.0),
     (
         "sales",
         "=FORECAST.ETS.CONFINT(13,A1:A12,B1:B12,0.95,0)",
-        37.00198257379272,
+        39.049330822456554,
     ),
     (
         "sales",
         "=FORECAST.ETS.CONFINT(15,A1:A12,B1:B12,0.9,4)",
-        9.368391165086983,
+        7.256951634254313,
     ),
     ("sales", "=FORECAST.ETS.SEASONALITY(A1:A12,B1:B12)", 4.0),
-    ("sales", "=FORECAST.ETS.STAT(A1:A12,B1:B12,1,0)", 0.3),
-    ("sales", "=FORECAST.ETS.STAT(A1:A12,B1:B12,2,0)", 0.9),
+    ("sales", "=FORECAST.ETS.STAT(A1:A12,B1:B12,1,0)", 0.5),
+    ("sales", "=FORECAST.ETS.STAT(A1:A12,B1:B12,2,0)", 0.3),
     ("sales", "=FORECAST.ETS.STAT(A1:A12,B1:B12,3,0)", 0.0),
     (
         "sales",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,4,0)",
-        0.811159893097448,
+        0.6761990086223324,
     ),
     (
         "sales",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,5,0)",
-        0.098215460875628,
+        0.07889874451415939,
     ),
     (
         "sales",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,6,0)",
-        15.117070734997894,
+        12.601890615234376,
     ),
     (
         "sales",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,7,0)",
-        18.878909442040587,
+        19.923494069519993,
     ),
     ("sales", "=FORECAST.ETS.STAT(A1:A12,B1:B12,8,0)", 1.0),
     ("sales", "=FORECAST.ETS.STAT(A1:A12,B1:B12,1,4)", 0.3),
@@ -410,22 +378,22 @@ const JS_FIXTURES: &[(&str, &str, f64)] = &[
     (
         "sales",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,4,4)",
-        0.1406441103283995,
+        0.10113838937923268,
     ),
     (
         "sales",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,5,4)",
-        0.018071071863405522,
+        0.012652153156481667,
     ),
     (
         "sales",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,6,4)",
-        2.6210947833928997,
+        1.8848518020675182,
     ),
     (
         "sales",
         "=FORECAST.ETS.STAT(A1:A12,B1:B12,7,4)",
-        3.2883431524914997,
+        2.547219345771265,
     ),
     ("sales", "=FORECAST.ETS.STAT(A1:A12,B1:B12,8,4)", 1.0),
 ];
@@ -463,7 +431,7 @@ fn forecast_ets_seasonality_defaults_to_auto_detection() {
         (four - 10.0).abs() < 1e-9,
         "next cycle restarts at 10: {four}"
     );
-    assert!((none - 36.15392131048526).abs() < 1e-9, "{none}");
+    assert!((none - 37.985850047209965).abs() < 1e-9, "{none}");
     let period = eval_in(&mut e, "=FORECAST.ETS.SEASONALITY(A1:A12,B1:B12)");
     assert_eq!(as_num(&period, "seasonality"), 4.0);
     // Skipped slots take the defaults.
@@ -505,16 +473,25 @@ fn forecast_ets_accepts_inline_arrays_and_unsorted_timelines() {
 #[test]
 fn forecast_ets_error_kinds() {
     let mut e = engine_with_series("linear");
-    // Mismatched series sizes and fewer than four numeric pairs are #N/A.
+    // Mismatched series sizes and fewer than two numeric pairs are #N/A; three points fit
+    // (rowsncolumns/spreadsheet#642 B-01: Excel has no four-point floor).
     assert_error(
         eval_in(&mut e, "=FORECAST.ETS(11,A1:A10,B1:B9)"),
         ExcelErrorKind::Na,
         "sizes",
     );
     assert_error(
-        eval_in(&mut e, "=FORECAST.ETS(11,A1:A3,B1:B3)"),
+        eval_in(&mut e, "=FORECAST.ETS(30,A20:A21,B20:B21)"),
         ExcelErrorKind::Na,
+        "no numeric pairs",
+    );
+    let three = as_num(
+        &eval_in(&mut e, "=FORECAST.ETS(4,A1:A3,B1:B3)"),
         "three points",
+    );
+    assert!(
+        (three - 40.0).abs() < 1e-9,
+        "three points of 10,20,30 → 40: {three}"
     );
     // A target before the end of the history is #NUM!.
     assert_error(
@@ -656,10 +633,22 @@ fn rows_and_columns_report_array_shapes_and_propagate_errors() {
         ("=ROWS(A1:B3)", 3.0),
         ("=COLUMNS(A1:B3)", 2.0),
     ] {
-        assert_eq!(as_num(&eval_in(&mut e, formula), formula), expected, "{formula}");
+        assert_eq!(
+            as_num(&eval_in(&mut e, formula), formula),
+            expected,
+            "{formula}"
+        );
     }
-    assert_error(eval_in(&mut e, "=ROWS(NA())"), ExcelErrorKind::Na, "ROWS(NA())");
-    assert_error(eval_in(&mut e, "=ROWS(1/0)"), ExcelErrorKind::Div, "ROWS(1/0)");
+    assert_error(
+        eval_in(&mut e, "=ROWS(NA())"),
+        ExcelErrorKind::Na,
+        "ROWS(NA())",
+    );
+    assert_error(
+        eval_in(&mut e, "=ROWS(1/0)"),
+        ExcelErrorKind::Div,
+        "ROWS(1/0)",
+    );
     assert_error(
         eval_in(&mut e, "=COLUMNS(#REF!)"),
         ExcelErrorKind::Ref,
@@ -690,8 +679,20 @@ fn too_few_arguments_contract_covers_lambda_helpers_index_and_criteria_functions
         assert_error(eval_in(&mut e, formula), ExcelErrorKind::Na, formula);
     }
     // Enough arguments of the wrong kind is a different error: an even LET count / a non-lambda.
-    assert_error(eval_in(&mut e, "=LET(x,1,2,y)"), ExcelErrorKind::Value, "LET(x,1,2,y)");
-    assert_error(eval_in(&mut e, "=REDUCE(0,A1:A3)"), ExcelErrorKind::Value, "REDUCE(0,A1:A3)");
+    assert_error(
+        eval_in(&mut e, "=LET(x,1,2,y)"),
+        ExcelErrorKind::Value,
+        "LET(x,1,2,y)",
+    );
+    assert_error(
+        eval_in(&mut e, "=REDUCE(0,A1:A3)"),
+        ExcelErrorKind::Value,
+        "REDUCE(0,A1:A3)",
+    );
     // A body-less LAMBDA is a lambda value as the cell result.
-    assert_error(eval_in(&mut e, "=LAMBDA(x)"), ExcelErrorKind::Calc, "LAMBDA(x)");
+    assert_error(
+        eval_in(&mut e, "=LAMBDA(x)"),
+        ExcelErrorKind::Calc,
+        "LAMBDA(x)",
+    );
 }
