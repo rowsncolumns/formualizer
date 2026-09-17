@@ -451,7 +451,7 @@ impl ReferenceAdjuster {
 
                 match self.adjust_cell_ref_with_policy(&temp_ref, op, policy) {
                     None => ReferenceType::Cell {
-                        sheet: Some("#REF".to_string()),
+                        sheet: Some(ReferenceType::ref_error_sheet_marker(sheet.as_deref())),
                         row: 0,
                         col: 0,
                         row_abs: *row_abs,
@@ -477,12 +477,10 @@ impl ReferenceAdjuster {
                 },
                 Some(crate::reference::SharedRef::Range(range)),
             ) => {
-                let is_unbounded_column = range.start_row.is_none() && range.end_row.is_none();
-                let is_unbounded_row = range.start_col.is_none() && range.end_col.is_none();
-                if is_unbounded_column || is_unbounded_row {
-                    return reference.clone();
-                }
-
+                // Whole-column (`B:B`, rows unbounded) and whole-row (`3:3`, columns unbounded)
+                // references shift like any range along the axis they DO bound — Excel turns
+                // `=SUM(3:3)` into `=SUM(4:4)` when a row is inserted above — and are untouched
+                // by an edit on the orthogonal axis (the `None` bounds below stay `None`).
                 let sr = range.start_row;
                 let sc = range.start_col;
                 let er = range.end_row;
@@ -535,7 +533,9 @@ impl ReferenceAdjuster {
                                 (Some(adj_start), Some(adj_end))
                             } else if range_start >= *start && range_end < start + count {
                                 return ReferenceType::Range {
-                                    sheet: Some("#REF".to_string()),
+                                    sheet: Some(ReferenceType::ref_error_sheet_marker(
+                                        sheet.as_deref(),
+                                    )),
                                     start_row: Some(0),
                                     start_col: Some(0),
                                     end_row: Some(0),
@@ -599,7 +599,9 @@ impl ReferenceAdjuster {
                                 (Some(adj_start), Some(adj_end))
                             } else if range_start >= *start && range_end < start + count {
                                 return ReferenceType::Range {
-                                    sheet: Some("#REF".to_string()),
+                                    sheet: Some(ReferenceType::ref_error_sheet_marker(
+                                        sheet.as_deref(),
+                                    )),
                                     start_row: Some(0),
                                     start_col: Some(0),
                                     end_row: Some(0),
@@ -652,6 +654,60 @@ impl ReferenceAdjuster {
             }
             _ => reference.clone(),
         }
+    }
+}
+
+impl ReferenceAdjuster {
+    /// Does any reference in `ast` (scoped to the edited sheet) reach the rows/columns a shift
+    /// moves — the cells at or after the insert/delete point along the edited axis? A formula
+    /// whose text the shift leaves alone can still see different values afterwards: `=SUM(B:B)`
+    /// under a row insert, `=COUNTA(A1:A10)` when a row is deleted inside it and the range
+    /// shrinks back onto the same cells. Callers mark such formulas dirty so no stale cached
+    /// value survives the edit.
+    pub fn ast_touches_shift(
+        &self,
+        ast: &ASTNode,
+        op: &ShiftOperation,
+        scope: &StructuralShiftScope,
+    ) -> bool {
+        use formualizer_parse::parser::ReferenceType;
+        let (rows, at) = match op {
+            ShiftOperation::InsertRows { before, .. } => (true, *before),
+            ShiftOperation::DeleteRows { start, .. } => (true, *start),
+            ShiftOperation::InsertColumns { before, .. } => (false, *before),
+            ShiftOperation::DeleteColumns { start, .. } => (false, *start),
+        };
+        ast.get_dependencies().into_iter().any(|reference| {
+            let sheet = match reference {
+                ReferenceType::Cell { sheet, .. } | ReferenceType::Range { sheet, .. } => {
+                    sheet.as_deref()
+                }
+                _ => return false,
+            };
+            if !scope.reference_targets_op_sheet(sheet, op) {
+                return false;
+            }
+            // 1-based end bound along the edited axis; `None` (whole row/column) reaches the end
+            // of the sheet and always crosses the shift line.
+            let end = match reference {
+                ReferenceType::Cell { row, col, .. } => Some(if rows { *row } else { *col }),
+                ReferenceType::Range {
+                    end_row, end_col, ..
+                } => {
+                    if rows {
+                        *end_row
+                    } else {
+                        *end_col
+                    }
+                }
+                _ => None,
+            };
+            match end {
+                None => true,
+                // `at` is 0-based, `end` 1-based: the cell at 0-based `at` is 1-based `at + 1`.
+                Some(end) => end > at,
+            }
+        })
     }
 }
 
@@ -1566,5 +1622,170 @@ mod tests {
             assert_eq!(*start_row, Some(5)); // Start unchanged
             assert_eq!(*end_row, Some(15)); // End contracted from 20 to 15
         }
+    }
+
+    fn only_reference(ast: &ASTNode) -> formualizer_parse::parser::ReferenceType {
+        match &ast.node_type {
+            ASTNodeType::Reference { reference, .. } => reference.clone(),
+            ASTNodeType::Function { args, .. } => only_reference(&args[0]),
+            ASTNodeType::BinaryOp { left, .. } => only_reference(left),
+            other => panic!("no reference in {other:?}"),
+        }
+    }
+
+    /// REF-04: `=SUM(3:3)` with a row inserted above shifts to `=SUM(4:4)`; the whole-column
+    /// `B:B` in the same edit is left alone.
+    #[test]
+    fn whole_row_reference_shifts_on_row_insert_and_whole_column_does_not() {
+        let adjuster = ReferenceAdjuster::new();
+        let op = ShiftOperation::InsertRows {
+            sheet_id: 0,
+            before: 1,
+            count: 1,
+        };
+        let adjusted = adjuster
+            .adjust_ast_if_changed(&parse("=SUM(3:3)").unwrap(), &op)
+            .expect("whole-row ref below the insert shifts");
+        assert_eq!(only_reference(&adjusted).to_excel_string(), "4:4");
+        assert!(
+            adjuster
+                .adjust_ast_if_changed(&parse("=SUM(B:B)").unwrap(), &op)
+                .is_none(),
+            "a whole-column ref has no row bound to shift"
+        );
+    }
+
+    /// REF-05: `=SUM(B:B)` with a column inserted at A shifts to `=SUM(C:C)`.
+    #[test]
+    fn whole_column_reference_shifts_on_column_insert() {
+        let adjuster = ReferenceAdjuster::new();
+        let op = ShiftOperation::InsertColumns {
+            sheet_id: 0,
+            before: 0,
+            count: 1,
+        };
+        let adjusted = adjuster
+            .adjust_ast_if_changed(&parse("=SUM(B:B)").unwrap(), &op)
+            .expect("whole-column ref right of the insert shifts");
+        assert_eq!(only_reference(&adjusted).to_excel_string(), "C:C");
+        // Absolute whole-column refs keep their anchors.
+        let adjusted = adjuster
+            .adjust_ast_if_changed(&parse("=SUM($B:$B)").unwrap(), &op)
+            .expect("absolute whole-column ref tracks the insert too");
+        assert_eq!(only_reference(&adjusted).to_excel_string(), "$C:$C");
+    }
+
+    #[test]
+    fn whole_row_reference_inside_deleted_band_becomes_ref_error() {
+        let adjuster = ReferenceAdjuster::new();
+        let op = ShiftOperation::DeleteRows {
+            sheet_id: 0,
+            start: 2,
+            count: 1,
+        };
+        let adjusted = adjuster
+            .adjust_ast_if_changed(&parse("=SUM(3:3)").unwrap(), &op)
+            .expect("deleted whole-row ref changes");
+        let reference = only_reference(&adjusted);
+        assert!(reference.is_ref_error());
+        assert_eq!(reference.to_excel_string(), "#REF!");
+        // A whole-row ref below the band shifts up.
+        let adjusted = adjuster
+            .adjust_ast_if_changed(&parse("=SUM(5:6)").unwrap(), &op)
+            .expect("whole-row ref below the band shifts up");
+        assert_eq!(only_reference(&adjusted).to_excel_string(), "4:5");
+    }
+
+    /// REF-15: a sheet-qualified reference whose target row is deleted keeps its qualifier in
+    /// the marker so the text prints as `Sheet1!#REF!` (what Excel writes), never a bare `#REF!`.
+    #[test]
+    fn sheet_qualified_deleted_target_keeps_qualifier_in_marker() {
+        let adjuster = ReferenceAdjuster::new();
+        let op = ShiftOperation::DeleteRows {
+            sheet_id: 0,
+            start: 2,
+            count: 1,
+        };
+        let scope = StructuralShiftScope {
+            formula_sheet_id: 1,
+            op_sheet_name: "Sheet1",
+        };
+        let adjusted = adjuster
+            .adjust_ast_if_changed_scoped(&parse("=Sheet1!A3").unwrap(), &op, &scope)
+            .expect("qualified ref into the deleted row changes");
+        let reference = only_reference(&adjusted);
+        assert!(reference.is_ref_error());
+        match &reference {
+            formualizer_parse::parser::ReferenceType::Cell { sheet, .. } => {
+                assert_eq!(sheet.as_deref(), Some("#REF:Sheet1"));
+                assert_eq!(
+                    formualizer_parse::parser::ReferenceType::ref_error_original_sheet(
+                        sheet.as_deref().unwrap()
+                    ),
+                    Some("Sheet1")
+                );
+            }
+            other => panic!("expected a cell marker, got {other:?}"),
+        }
+        assert_eq!(reference.to_excel_string(), "Sheet1!#REF!");
+        assert_eq!(reference.normalise(), "Sheet1!#REF!");
+        // A fully deleted qualified range keeps the qualifier too.
+        let adjusted = adjuster
+            .adjust_ast_if_changed_scoped(
+                &parse("=SUM('My Data'!A3:B3)").unwrap(),
+                &op,
+                &StructuralShiftScope {
+                    formula_sheet_id: 1,
+                    op_sheet_name: "My Data",
+                },
+            )
+            .expect("qualified range inside the band changes");
+        assert_eq!(
+            only_reference(&adjusted).to_excel_string(),
+            "'My Data'!#REF!"
+        );
+        // Unqualified stays the bare marker / bare token.
+        let adjusted = adjuster
+            .adjust_ast_if_changed(&parse("=A3+1").unwrap(), &op)
+            .expect("unqualified ref into the deleted row changes");
+        let reference = only_reference(&adjusted);
+        assert_eq!(
+            match &reference {
+                formualizer_parse::parser::ReferenceType::Cell { sheet, .. } => sheet.as_deref(),
+                _ => None,
+            },
+            Some("#REF")
+        );
+        assert_eq!(reference.to_excel_string(), "#REF!");
+    }
+
+    /// A formula whose text a shift leaves alone can still read moved cells (`B:B` under a row
+    /// insert, a range ending below the shift line); one ending above the line cannot.
+    #[test]
+    fn ast_touches_shift_covers_stripe_and_crossing_ranges_only() {
+        let adjuster = ReferenceAdjuster::new();
+        let scope = StructuralShiftScope {
+            formula_sheet_id: 0,
+            op_sheet_name: "Sheet1",
+        };
+        let insert_row_2 = ShiftOperation::InsertRows {
+            sheet_id: 0,
+            before: 1,
+            count: 1,
+        };
+        assert!(adjuster.ast_touches_shift(&parse("=SUM(B:B)").unwrap(), &insert_row_2, &scope));
+        assert!(adjuster.ast_touches_shift(&parse("=SUM(A1:A3)").unwrap(), &insert_row_2, &scope));
+        assert!(!adjuster.ast_touches_shift(&parse("=A1+1").unwrap(), &insert_row_2, &scope));
+        assert!(
+            !adjuster.ast_touches_shift(&parse("=SUM(Other!B:B)").unwrap(), &insert_row_2, &scope),
+            "a reference into another sheet is out of scope"
+        );
+        let insert_col_a = ShiftOperation::InsertColumns {
+            sheet_id: 0,
+            before: 0,
+            count: 1,
+        };
+        assert!(adjuster.ast_touches_shift(&parse("=SUM(3:3)").unwrap(), &insert_col_a, &scope));
+        assert!(adjuster.ast_touches_shift(&parse("=A1").unwrap(), &insert_col_a, &scope));
     }
 }

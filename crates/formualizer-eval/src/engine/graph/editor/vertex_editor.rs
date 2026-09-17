@@ -932,20 +932,26 @@ impl<'g> VertexEditor<'g> {
                 formula_sheet_id: self.graph.get_sheet_id(id),
                 op_sheet_name: &op_sheet_name,
             };
-            if let Some(ast) = self.get_formula_ast(id)
-                && let Some(adjusted) = adjuster.adjust_ast_if_changed_scoped(&ast, &op, &scope)
-            {
-                if self.has_logger() {
-                    self.log_change(ChangeEvent::FormulaAdjusted {
-                        id,
-                        addr: self.graph.get_cell_ref_for_vertex(id),
-                        old_ast: ast.clone(),
-                        new_ast: adjusted.clone(),
-                    });
+            if let Some(ast) = self.get_formula_ast(id) {
+                if let Some(adjusted) = adjuster.adjust_ast_if_changed_scoped(&ast, &op, &scope) {
+                    if self.has_logger() {
+                        self.log_change(ChangeEvent::FormulaAdjusted {
+                            id,
+                            addr: self.graph.get_cell_ref_for_vertex(id),
+                            old_ast: ast.clone(),
+                            new_ast: adjusted.clone(),
+                        });
+                    }
+                    self.graph.update_vertex_formula(id, adjusted)?;
+                    self.graph.mark_vertex_dirty(id);
+                    summary.formulas_updated += 1;
+                } else if adjuster.ast_touches_shift(&ast, &op, &scope) {
+                    // Text unchanged but the cells it reads moved under it (a whole-column
+                    // `B:B` under a row insert, a range the delete shrank back onto the same
+                    // address): the stripe/range edges don't fire for a geometric shift, so the
+                    // formula would keep its pre-edit cached value.
+                    self.graph.mark_vertex_dirty(id);
                 }
-                self.graph.update_vertex_formula(id, adjusted)?;
-                self.graph.mark_vertex_dirty(id);
-                summary.formulas_updated += 1;
             }
         }
 
@@ -1061,20 +1067,26 @@ impl<'g> VertexEditor<'g> {
                 formula_sheet_id: self.graph.get_sheet_id(id),
                 op_sheet_name: &op_sheet_name,
             };
-            if let Some(ast) = self.get_formula_ast(id)
-                && let Some(adjusted) = adjuster.adjust_ast_if_changed_scoped(&ast, &op, &scope)
-            {
-                if self.has_logger() {
-                    self.log_change(ChangeEvent::FormulaAdjusted {
-                        id,
-                        addr: self.graph.get_cell_ref_for_vertex(id),
-                        old_ast: ast.clone(),
-                        new_ast: adjusted.clone(),
-                    });
+            if let Some(ast) = self.get_formula_ast(id) {
+                if let Some(adjusted) = adjuster.adjust_ast_if_changed_scoped(&ast, &op, &scope) {
+                    if self.has_logger() {
+                        self.log_change(ChangeEvent::FormulaAdjusted {
+                            id,
+                            addr: self.graph.get_cell_ref_for_vertex(id),
+                            old_ast: ast.clone(),
+                            new_ast: adjusted.clone(),
+                        });
+                    }
+                    self.graph.update_vertex_formula(id, adjusted)?;
+                    self.graph.mark_vertex_dirty(id);
+                    summary.formulas_updated += 1;
+                } else if adjuster.ast_touches_shift(&ast, &op, &scope) {
+                    // Text unchanged but the cells it reads moved under it (a whole-column
+                    // `B:B` under a row insert, a range the delete shrank back onto the same
+                    // address): the stripe/range edges don't fire for a geometric shift, so the
+                    // formula would keep its pre-edit cached value.
+                    self.graph.mark_vertex_dirty(id);
                 }
-                self.graph.update_vertex_formula(id, adjusted)?;
-                self.graph.mark_vertex_dirty(id);
-                summary.formulas_updated += 1;
             }
         }
 
@@ -1180,20 +1192,26 @@ impl<'g> VertexEditor<'g> {
                 formula_sheet_id: self.graph.get_sheet_id(id),
                 op_sheet_name: &op_sheet_name,
             };
-            if let Some(ast) = self.get_formula_ast(id)
-                && let Some(adjusted) = adjuster.adjust_ast_if_changed_scoped(&ast, &op, &scope)
-            {
-                if self.has_logger() {
-                    self.log_change(ChangeEvent::FormulaAdjusted {
-                        id,
-                        addr: self.graph.get_cell_ref_for_vertex(id),
-                        old_ast: ast.clone(),
-                        new_ast: adjusted.clone(),
-                    });
+            if let Some(ast) = self.get_formula_ast(id) {
+                if let Some(adjusted) = adjuster.adjust_ast_if_changed_scoped(&ast, &op, &scope) {
+                    if self.has_logger() {
+                        self.log_change(ChangeEvent::FormulaAdjusted {
+                            id,
+                            addr: self.graph.get_cell_ref_for_vertex(id),
+                            old_ast: ast.clone(),
+                            new_ast: adjusted.clone(),
+                        });
+                    }
+                    self.graph.update_vertex_formula(id, adjusted)?;
+                    self.graph.mark_vertex_dirty(id);
+                    summary.formulas_updated += 1;
+                } else if adjuster.ast_touches_shift(&ast, &op, &scope) {
+                    // Text unchanged but the cells it reads moved under it (a whole-column
+                    // `B:B` under a row insert, a range the delete shrank back onto the same
+                    // address): the stripe/range edges don't fire for a geometric shift, so the
+                    // formula would keep its pre-edit cached value.
+                    self.graph.mark_vertex_dirty(id);
                 }
-                self.graph.update_vertex_formula(id, adjusted)?;
-                self.graph.mark_vertex_dirty(id);
-                summary.formulas_updated += 1;
             }
         }
 
@@ -1309,20 +1327,26 @@ impl<'g> VertexEditor<'g> {
                 formula_sheet_id: self.graph.get_sheet_id(id),
                 op_sheet_name: &op_sheet_name,
             };
-            if let Some(ast) = self.get_formula_ast(id)
-                && let Some(adjusted) = adjuster.adjust_ast_if_changed_scoped(&ast, &op, &scope)
-            {
-                if self.has_logger() {
-                    self.log_change(ChangeEvent::FormulaAdjusted {
-                        id,
-                        addr: self.graph.get_cell_ref_for_vertex(id),
-                        old_ast: ast.clone(),
-                        new_ast: adjusted.clone(),
-                    });
+            if let Some(ast) = self.get_formula_ast(id) {
+                if let Some(adjusted) = adjuster.adjust_ast_if_changed_scoped(&ast, &op, &scope) {
+                    if self.has_logger() {
+                        self.log_change(ChangeEvent::FormulaAdjusted {
+                            id,
+                            addr: self.graph.get_cell_ref_for_vertex(id),
+                            old_ast: ast.clone(),
+                            new_ast: adjusted.clone(),
+                        });
+                    }
+                    self.graph.update_vertex_formula(id, adjusted)?;
+                    self.graph.mark_vertex_dirty(id);
+                    summary.formulas_updated += 1;
+                } else if adjuster.ast_touches_shift(&ast, &op, &scope) {
+                    // Text unchanged but the cells it reads moved under it (a whole-column
+                    // `B:B` under a row insert, a range the delete shrank back onto the same
+                    // address): the stripe/range edges don't fire for a geometric shift, so the
+                    // formula would keep its pre-edit cached value.
+                    self.graph.mark_vertex_dirty(id);
                 }
-                self.graph.update_vertex_formula(id, adjusted)?;
-                self.graph.mark_vertex_dirty(id);
-                summary.formulas_updated += 1;
             }
         }
 

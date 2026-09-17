@@ -1309,7 +1309,13 @@ impl<'a> SpanTokenizer<'a> {
                 {
                     true
                 }
-                TokenType::Operand if prev.subtype == TokenSubType::Range => true,
+                // A structural edit that deletes a spill anchor writes `=#REF!#`: the postfix
+                // stays on the error literal so the text re-parses (and evaluates to `#REF!`).
+                TokenType::Operand
+                    if matches!(prev.subtype, TokenSubType::Range | TokenSubType::Error) =>
+                {
+                    true
+                }
                 _ => false,
             },
             None => false,
@@ -1888,7 +1894,11 @@ impl Tokenizer {
                 {
                     true
                 }
-                TokenType::Operand if p.subtype == TokenSubType::Range => true,
+                TokenType::Operand
+                    if matches!(p.subtype, TokenSubType::Range | TokenSubType::Error) =>
+                {
+                    true
+                }
                 _ => false,
             },
             None => false,

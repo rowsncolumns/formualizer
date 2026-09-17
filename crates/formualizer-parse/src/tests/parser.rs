@@ -1438,6 +1438,35 @@ mod tests {
             assert!(crate::parser::parse("=#").is_err());
         }
 
+        /// A structural edit that deletes a spill anchor writes `=#REF!#` (Excel keeps the
+        /// postfix on the error token). It must re-parse as the spill operator over the error
+        /// literal — and print back the same way — instead of being an unparseable formula.
+        #[test]
+        fn test_spill_postfix_on_ref_error_literal() {
+            for ast in [
+                parse_formula("=#REF!#").expect("classic"),
+                crate::parser::parse("=#REF!#").expect("span"),
+            ] {
+                match ast.node_type {
+                    ASTNodeType::UnaryOp { op, expr } => {
+                        assert_eq!(op, "#");
+                        match expr.node_type {
+                            ASTNodeType::Literal(formualizer_common::LiteralValue::Error(e)) => {
+                                assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Ref);
+                            }
+                            other => panic!("expected the #REF! literal, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected UnaryOp(#), got {other:?}"),
+                }
+            }
+            assert_eq!(pretty_parse_render("=#REF!#").expect("pretty"), "=#REF!#");
+            assert_eq!(
+                pretty_parse_render("=SUM(#REF!#)+1").expect("pretty"),
+                "=SUM(#REF!#) + 1"
+            );
+        }
+
         #[test]
         fn test_spill_display_roundtrip() {
             // parse → pretty → parse must yield the same AST shape.
@@ -3147,6 +3176,48 @@ mod structured_references {
     #[test]
     fn rejects_garbage_inside_combination() {
         expect_parse_err("=Table1[[#Data],junk]");
+    }
+
+    /// Excel writes `Table1[@#REF!]` / `Table1[#REF!]` when the referenced table column was
+    /// deleted: `#REF!` is a column specifier (a column no table has), not a special item.
+    #[test]
+    fn ref_error_column_specifier_parses_as_a_column() {
+        assert_eq!(
+            parse_both("=Table1[#REF!]").unwrap(),
+            ReferenceType::Table(TableReference {
+                name: "Table1".to_string(),
+                specifier: Some(TableSpecifier::Column("#REF!".to_string())),
+            })
+        );
+        assert_eq!(
+            parse_both("=Table1[@#REF!]").unwrap(),
+            ReferenceType::Table(TableReference {
+                name: "Table1".to_string(),
+                specifier: Some(TableSpecifier::Combination(vec![
+                    Box::new(TableSpecifier::SpecialItem(SpecialItem::ThisRow)),
+                    Box::new(TableSpecifier::Column("#REF!".to_string())),
+                ])),
+            })
+        );
+        assert_eq!(
+            parse_both("=Table1[[#This Row],[#REF!]]").unwrap(),
+            ReferenceType::Table(TableReference {
+                name: "Table1".to_string(),
+                specifier: Some(TableSpecifier::Combination(vec![
+                    Box::new(TableSpecifier::SpecialItem(SpecialItem::ThisRow)),
+                    Box::new(TableSpecifier::Column("#REF!".to_string())),
+                ])),
+            })
+        );
+        // Other `#` items stay special items (and unknown ones stay rejected).
+        assert!(matches!(
+            parse_both("=Table1[#Headers]").unwrap(),
+            ReferenceType::Table(TableReference {
+                specifier: Some(TableSpecifier::SpecialItem(SpecialItem::Headers)),
+                ..
+            })
+        ));
+        assert!(crate::parse("=Table1[#Bogus]").is_err());
     }
 
     #[test]
