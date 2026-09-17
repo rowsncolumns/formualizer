@@ -1265,7 +1265,7 @@ impl Function for NFn {
 /// Implicit intersection of a multi-cell range with the formula cell: an Nx1 range picks by
 /// row, a 1xM range by column, a block by both; no intersection is `#VALUE!`. A materialised
 /// array (the `__tmp` backing sheet) is anchored at the formula cell, so its top-left wins.
-fn implicit_intersect(
+pub(crate) fn implicit_intersect(
     rv: &crate::engine::range_view::RangeView<'_>,
     current: Option<crate::reference::CellRef>,
 ) -> LiteralValue {
