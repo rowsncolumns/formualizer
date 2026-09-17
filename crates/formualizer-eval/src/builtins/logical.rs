@@ -145,15 +145,17 @@ impl Function for FalseFn {
 pub struct AndFn;
 /// Returns TRUE only when all supplied values evaluate to TRUE.
 ///
-/// `AND` evaluates arguments left to right and short-circuits on a decisive `FALSE`.
+/// `AND` evaluates every argument left to right. A `FALSE` anywhere decides the result, but it
+/// never hides an error or a non-boolean direct text argument elsewhere — Excel does not
+/// short-circuit `AND`/`OR`: `=AND(FALSE, 1/0)` is `#DIV/0!` and `=AND("x", FALSE)` is `#VALUE!`.
 ///
 /// # Remarks
 /// - Booleans and numbers are accepted (`0` is FALSE, non-zero is TRUE).
 /// - Blank cells inside a reference are ignored (an omitted direct argument is FALSE).
 /// - Text inside a reference is ignored; a direct text argument must be `TRUE`/`FALSE` or it
-///   yields `#VALUE!` unless a prior FALSE short-circuits.
+///   yields `#VALUE!`, whatever the other arguments are.
 /// - A reference that holds no logical or numeric value at all yields `#VALUE!`.
-/// - If no decisive FALSE is found, the first encountered error is returned.
+/// - The first error in argument order is returned, even when another argument is FALSE.
 ///
 /// # Examples
 ///
@@ -169,6 +171,12 @@ pub struct AndFn;
 /// expected: "#VALUE!"
 /// ```
 ///
+/// ```yaml,sandbox
+/// title: "A FALSE does not hide an invalid operand"
+/// formula: '=AND("x", FALSE)'
+/// expected: "#VALUE!"
+/// ```
+///
 /// ```yaml,docs
 /// related:
 ///   - OR
@@ -176,7 +184,7 @@ pub struct AndFn;
 ///   - XOR
 /// faq:
 ///   - q: "What happens with blanks and text in AND?"
-///     a: "Blanks and text inside references are ignored; a direct non-boolean text yields #VALUE!, as does a reference with no logical values."
+///     a: "Blanks and text inside references are ignored; a direct non-boolean text yields #VALUE! even when another argument is FALSE, as does a reference with no logical values."
 /// ```
 /// [formualizer-docgen:schema:start]
 /// Name: AND
@@ -209,8 +217,12 @@ impl Function for AndFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let mut first_error: Option<LiteralValue> = None;
+        // Excel evaluates every argument: a FALSE decides the value, but an error or a
+        // non-coercible direct operand in ANY position is the result instead. The first such
+        // operand (in argument order) returns as soon as it is seen; a decisive FALSE only wins
+        // once every remaining argument has been checked.
         let mut saw_logical = false;
+        let mut all_true = true;
         for h in args {
             let from_range = h.range_view().is_ok();
             let it = h.lazy_values_owned()?;
@@ -219,70 +231,35 @@ impl Function for AndFn {
                     LiteralValue::Text(_) => match logical_text_arg(&v, from_range) {
                         None => continue,
                         Some(Ok(b)) => LiteralValue::Boolean(b),
-                        Some(Err(_)) => {
-                            if first_error.is_none() {
-                                first_error = Some(LiteralValue::Error(
-                                    ExcelError::new_value().with_message(
-                                        "AND expects logical/numeric inputs; text is not coercible",
-                                    ),
-                                ));
-                            }
-                            continue;
-                        }
+                        Some(Err(_)) => return Ok(not_logical("AND")),
                     },
                     // Blank cells inside a reference are ignored, like text.
                     LiteralValue::Empty if from_range => continue,
                     v => v,
                 };
                 match v {
-                    LiteralValue::Error(_) => {
-                        if first_error.is_none() {
-                            first_error = Some(v);
-                        }
-                    }
+                    LiteralValue::Error(_) => return Ok(crate::traits::CalcValue::Scalar(v)),
+                    // An omitted direct argument counts as FALSE.
                     LiteralValue::Empty => {
-                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-                            false,
-                        )));
+                        saw_logical = true;
+                        all_true = false;
                     }
                     LiteralValue::Boolean(b) => {
                         saw_logical = true;
-                        if !b {
-                            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-                                false,
-                            )));
-                        }
+                        all_true &= b;
                     }
                     LiteralValue::Number(n) => {
                         saw_logical = true;
-                        if n == 0.0 {
-                            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-                                false,
-                            )));
-                        }
+                        all_true &= n != 0.0;
                     }
                     LiteralValue::Int(i) => {
                         saw_logical = true;
-                        if i == 0 {
-                            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-                                false,
-                            )));
-                        }
+                        all_true &= i != 0;
                     }
-                    _ => {
-                        // Non-coercible (e.g., Text) → #VALUE! candidate with message
-                        if first_error.is_none() {
-                            first_error =
-                                Some(LiteralValue::Error(ExcelError::new_value().with_message(
-                                    "AND expects logical/numeric inputs; text is not coercible",
-                                )));
-                        }
-                    }
+                    // Non-coercible (e.g. a nested array) → #VALUE!
+                    _ => return Ok(not_logical("AND")),
                 }
             }
-        }
-        if let Some(err) = first_error {
-            return Ok(crate::traits::CalcValue::Scalar(err));
         }
         // Excel: a reference holding only text/blanks leaves nothing to test → #VALUE!.
         if !saw_logical {
@@ -291,7 +268,7 @@ impl Function for AndFn {
             )));
         }
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-            true,
+            all_true,
         )))
     }
 }
@@ -302,15 +279,17 @@ impl Function for AndFn {
 pub struct OrFn;
 /// Returns TRUE when any supplied value evaluates to TRUE.
 ///
-/// `OR` evaluates arguments left to right and short-circuits on a decisive `TRUE`.
+/// `OR` evaluates every argument left to right. A `TRUE` anywhere decides the result, but it
+/// never hides an error or a non-boolean direct text argument elsewhere — Excel does not
+/// short-circuit `AND`/`OR`: `=OR(TRUE, 1/0)` is `#DIV/0!` and `=OR("x", TRUE)` is `#VALUE!`.
 ///
 /// # Remarks
 /// - Booleans and numbers are accepted (`0` is FALSE, non-zero is TRUE).
 /// - Blank cells inside a reference are ignored (an omitted direct argument is FALSE).
 /// - Text inside a reference is ignored; a direct text argument must be `TRUE`/`FALSE` or it
-///   yields `#VALUE!` if no prior TRUE short-circuits.
+///   yields `#VALUE!`, whatever the other arguments are.
 /// - A reference that holds no logical or numeric value at all yields `#VALUE!`.
-/// - If no TRUE is found, the first encountered error is returned.
+/// - The first error in argument order is returned, even when another argument is TRUE.
 ///
 /// # Examples
 ///
@@ -326,6 +305,12 @@ pub struct OrFn;
 /// expected: "#VALUE!"
 /// ```
 ///
+/// ```yaml,sandbox
+/// title: "A TRUE does not hide an invalid operand"
+/// formula: '=OR("x", TRUE)'
+/// expected: "#VALUE!"
+/// ```
+///
 /// ```yaml,docs
 /// related:
 ///   - AND
@@ -333,7 +318,7 @@ pub struct OrFn;
 ///   - XOR
 /// faq:
 ///   - q: "How does OR treat blanks and text?"
-///     a: "Blanks and text inside references are ignored; a direct non-boolean text yields #VALUE!, as does a reference with no logical values."
+///     a: "Blanks and text inside references are ignored; a direct non-boolean text yields #VALUE! even when another argument is TRUE, as does a reference with no logical values."
 /// ```
 /// [formualizer-docgen:schema:start]
 /// Name: OR
@@ -366,8 +351,10 @@ impl Function for OrFn {
         args: &'c [ArgumentHandle<'a, 'b>],
         _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        let mut first_error: Option<LiteralValue> = None;
+        // Mirror of `AND`: every argument is evaluated; the first error / non-coercible direct
+        // operand returns immediately, a decisive TRUE only wins after the last argument.
         let mut saw_logical = false;
+        let mut any_true = false;
         for h in args {
             let from_range = h.range_view().is_ok();
             let it = h.lazy_values_owned()?;
@@ -376,70 +363,35 @@ impl Function for OrFn {
                     LiteralValue::Text(_) => match logical_text_arg(&v, from_range) {
                         None => continue,
                         Some(Ok(b)) => LiteralValue::Boolean(b),
-                        Some(Err(_)) => {
-                            if first_error.is_none() {
-                                first_error = Some(LiteralValue::Error(
-                                    ExcelError::new_value().with_message(
-                                        "OR expects logical/numeric inputs; text is not coercible",
-                                    ),
-                                ));
-                            }
-                            continue;
-                        }
+                        Some(Err(_)) => return Ok(not_logical("OR")),
                     },
                     v => v,
                 };
                 match v {
-                    LiteralValue::Error(_) => {
-                        if first_error.is_none() {
-                            first_error = Some(v);
-                        }
-                    }
+                    LiteralValue::Error(_) => return Ok(crate::traits::CalcValue::Scalar(v)),
                     LiteralValue::Empty => {
-                        // Blank cells inside a reference are ignored; an omitted
-                        // direct argument counts as FALSE.
+                        // Blank cells inside a reference are ignored; an omitted direct
+                        // argument counts as FALSE.
                         if !from_range {
                             saw_logical = true;
                         }
                     }
                     LiteralValue::Boolean(b) => {
                         saw_logical = true;
-                        if b {
-                            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-                                true,
-                            )));
-                        }
+                        any_true |= b;
                     }
                     LiteralValue::Number(n) => {
                         saw_logical = true;
-                        if n != 0.0 {
-                            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-                                true,
-                            )));
-                        }
+                        any_true |= n != 0.0;
                     }
                     LiteralValue::Int(i) => {
                         saw_logical = true;
-                        if i != 0 {
-                            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-                                true,
-                            )));
-                        }
+                        any_true |= i != 0;
                     }
-                    _ => {
-                        // Non-coercible → #VALUE! candidate with message
-                        if first_error.is_none() {
-                            first_error =
-                                Some(LiteralValue::Error(ExcelError::new_value().with_message(
-                                    "OR expects logical/numeric inputs; text is not coercible",
-                                )));
-                        }
-                    }
+                    // Non-coercible (e.g. a nested array) → #VALUE!
+                    _ => return Ok(not_logical("OR")),
                 }
             }
-        }
-        if let Some(err) = first_error {
-            return Ok(crate::traits::CalcValue::Scalar(err));
         }
         // Excel: a reference holding only text/blanks leaves nothing to test → #VALUE!.
         if !saw_logical {
@@ -448,7 +400,7 @@ impl Function for OrFn {
             )));
         }
         Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-            false,
+            any_true,
         )))
     }
 }
@@ -575,6 +527,14 @@ fn if_truthy(v: &LiteralValue, from_reference: bool) -> Result<bool, ExcelError>
         LiteralValue::Error(e) => Err(e.clone()),
         _ => Err(ExcelError::new_value().with_message("IF condition must be boolean or number")),
     }
+}
+
+/// `#VALUE!` for an AND/OR operand that cannot be read as a logical: a direct text argument that
+/// is not `TRUE`/`FALSE`, or a nested array. Excel reports it regardless of the other arguments.
+fn not_logical<'b>(function: &str) -> crate::traits::CalcValue<'b> {
+    crate::traits::CalcValue::Scalar(LiteralValue::Error(ExcelError::new_value().with_message(
+        format!("{function} expects logical/numeric inputs; text is not coercible"),
+    )))
 }
 
 /// Text handed to AND/OR/XOR: Excel ignores text inside references and arrays
@@ -773,8 +733,10 @@ mod tests {
         );
     }
 
+    /// rowsncolumns/spreadsheet#642 B-08 — Excel evaluates every AND argument: a decisive FALSE
+    /// never skips the rest (which is how `=AND(FALSE, 1/0)` comes out `#DIV/0!`).
     #[test]
-    fn and_short_circuits_on_false_without_evaluating_rest() {
+    fn and_evaluates_every_argument_after_a_decisive_false() {
         let counter = Arc::new(AtomicUsize::new(0));
         let wb = TestWorkbook::new()
             .with_function(Arc::new(AndFn))
@@ -803,13 +765,14 @@ mod tests {
         assert_eq!(out, LiteralValue::Boolean(false));
         assert_eq!(
             counter.load(Ordering::SeqCst),
-            0,
-            "COUNTING should not be evaluated"
+            1,
+            "COUNTING is evaluated even after a decisive FALSE"
         );
     }
 
+    /// rowsncolumns/spreadsheet#642 B-08 — the OR mirror: a decisive TRUE never skips the rest.
     #[test]
-    fn or_short_circuits_on_true_without_evaluating_rest() {
+    fn or_evaluates_every_argument_after_a_decisive_true() {
         let counter = Arc::new(AtomicUsize::new(0));
         let wb = TestWorkbook::new()
             .with_function(Arc::new(OrFn))
@@ -838,13 +801,14 @@ mod tests {
         assert_eq!(out, LiteralValue::Boolean(true));
         assert_eq!(
             counter.load(Ordering::SeqCst),
-            0,
-            "COUNTING should not be evaluated"
+            1,
+            "COUNTING is evaluated even after a decisive TRUE"
         );
     }
 
+    /// A TRUE inside an array argument does not stop OR from evaluating the next argument either.
     #[test]
-    fn or_range_arg_short_circuits_on_first_true_before_evaluating_next_arg() {
+    fn or_array_arg_with_a_true_still_evaluates_the_next_argument() {
         let counter = Arc::new(AtomicUsize::new(0));
         let wb = TestWorkbook::new()
             .with_function(Arc::new(OrFn))
@@ -882,13 +846,13 @@ mod tests {
         assert_eq!(out, LiteralValue::Boolean(true));
         assert_eq!(
             counter.load(Ordering::SeqCst),
-            0,
-            "COUNTING should not be evaluated"
+            1,
+            "COUNTING is evaluated even after a TRUE in the array"
         );
     }
 
     #[test]
-    fn and_returns_first_error_when_no_decisive_false() {
+    fn and_returns_the_first_error() {
         let err_counter = Arc::new(AtomicUsize::new(0));
         let wb = TestWorkbook::new()
             .with_function(Arc::new(AndFn))
@@ -926,8 +890,10 @@ mod tests {
         );
     }
 
+    /// rowsncolumns/spreadsheet#642 B-08 — `=OR(TRUE, NA())` is `#N/A` in Excel: an error operand
+    /// is never short-circuited away by a decisive TRUE.
     #[test]
-    fn or_does_not_evaluate_error_after_true() {
+    fn or_propagates_an_error_after_a_decisive_true() {
         let err_counter = Arc::new(AtomicUsize::new(0));
         let wb = TestWorkbook::new()
             .with_function(Arc::new(OrFn))
@@ -936,7 +902,7 @@ mod tests {
         let fctx = ctx.function_context(None);
         let or = ctx.context.get_function("", "OR").unwrap();
 
-        // OR(TRUE, ERRORFN()) => TRUE and ERRORFN not evaluated
+        // OR(TRUE, ERRORFN()) => #VALUE! — ERRORFN is evaluated and its error wins.
         let a_true = formualizer_parse::parser::ASTNode::new(
             formualizer_parse::parser::ASTNodeType::Literal(LiteralValue::Boolean(true)),
             None,
@@ -953,12 +919,113 @@ mod tests {
             ArgumentHandle::new(&errcall, &ctx),
         ];
         let out = or.eval(&hs, &fctx).unwrap().into_literal();
-        assert_eq!(out, LiteralValue::Boolean(true));
+        match out {
+            LiteralValue::Error(e) => assert_eq!(e.to_string(), "#VALUE!"),
+            other => panic!("expected the error operand to win, got {other:?}"),
+        }
         assert_eq!(
             err_counter.load(Ordering::SeqCst),
-            0,
-            "ERRORFN should not be evaluated"
+            1,
+            "ERRORFN is evaluated once"
         );
+    }
+
+    /// rowsncolumns/spreadsheet#642 B-08 — `=AND(FALSE, NA())` is `#N/A` in Excel: the decisive
+    /// FALSE does not mask an error operand that follows it.
+    #[test]
+    fn and_decisive_false_does_not_mask_a_later_error() {
+        let err_counter = Arc::new(AtomicUsize::new(0));
+        let wb = TestWorkbook::new()
+            .with_function(Arc::new(AndFn))
+            .with_function(Arc::new(ErrorFn(err_counter.clone())));
+        let ctx = interp(&wb);
+        let fctx = ctx.function_context(None);
+        let and = ctx.context.get_function("", "AND").unwrap();
+
+        let a_false = formualizer_parse::parser::ASTNode::new(
+            formualizer_parse::parser::ASTNodeType::Literal(LiteralValue::Boolean(false)),
+            None,
+        );
+        let errcall = formualizer_parse::parser::ASTNode::new(
+            formualizer_parse::parser::ASTNodeType::Function {
+                name: "ERRORFN".into(),
+                args: vec![],
+            },
+            None,
+        );
+        let hs = vec![
+            ArgumentHandle::new(&a_false, &ctx),
+            ArgumentHandle::new(&errcall, &ctx),
+        ];
+        let out = and.eval(&hs, &fctx).unwrap().into_literal();
+        match out {
+            LiteralValue::Error(e) => assert_eq!(e.to_string(), "#VALUE!"),
+            other => panic!("expected the error operand to win, got {other:?}"),
+        }
+        assert_eq!(err_counter.load(Ordering::SeqCst), 1);
+    }
+
+    /// rowsncolumns/spreadsheet#642 B-08 — a direct text operand that is not TRUE/FALSE is
+    /// `#VALUE!` whatever the other arguments are: `=AND("Test", FALSE)`, `=OR("Test", TRUE)`.
+    #[test]
+    fn invalid_direct_text_is_value_error_even_beside_a_decisive_operand() {
+        let wb = TestWorkbook::new()
+            .with_function(Arc::new(AndFn))
+            .with_function(Arc::new(OrFn));
+        let ctx = interp(&wb);
+        let fctx = ctx.function_context(None);
+        let and = ctx.context.get_function("", "AND").unwrap();
+        let or = ctx.context.get_function("", "OR").unwrap();
+
+        let text = formualizer_parse::parser::ASTNode::new(
+            formualizer_parse::parser::ASTNodeType::Literal(LiteralValue::Text("Test".into())),
+            None,
+        );
+        let a_false = formualizer_parse::parser::ASTNode::new(
+            formualizer_parse::parser::ASTNodeType::Literal(LiteralValue::Boolean(false)),
+            None,
+        );
+        let a_true = formualizer_parse::parser::ASTNode::new(
+            formualizer_parse::parser::ASTNodeType::Literal(LiteralValue::Boolean(true)),
+            None,
+        );
+        for (f, hs) in [
+            (
+                &and,
+                vec![
+                    ArgumentHandle::new(&text, &ctx),
+                    ArgumentHandle::new(&a_false, &ctx),
+                ],
+            ),
+            (
+                &and,
+                vec![
+                    ArgumentHandle::new(&a_false, &ctx),
+                    ArgumentHandle::new(&text, &ctx),
+                ],
+            ),
+            (
+                &or,
+                vec![
+                    ArgumentHandle::new(&text, &ctx),
+                    ArgumentHandle::new(&a_true, &ctx),
+                ],
+            ),
+            (
+                &or,
+                vec![
+                    ArgumentHandle::new(&a_true, &ctx),
+                    ArgumentHandle::new(&text, &ctx),
+                ],
+            ),
+        ] {
+            match f.eval(&hs, &fctx).unwrap().into_literal() {
+                LiteralValue::Error(e) => {
+                    assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Value)
+                }
+                other => panic!("expected #VALUE!, got {other:?}"),
+            }
+        }
     }
 
     #[test]
