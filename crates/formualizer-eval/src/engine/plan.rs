@@ -63,7 +63,7 @@ pub enum DependencyPlanAst<'a> {
     Arena(AstNodeId),
 }
 
-fn collect_references_arena(
+pub(crate) fn collect_references_arena(
     data_store: &DataStore,
     ast_id: AstNodeId,
     sheet_reg: &SheetRegistry,

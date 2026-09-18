@@ -465,3 +465,152 @@ fn structured_ref_this_row_via_direct_interpreter_eval() {
     let v = interp.evaluate_ast(&ast).unwrap().into_literal();
     assert_eq!(v, LiteralValue::Number(40.0));
 }
+
+/// A structured reference over a CALCULATED column must be scheduled after the column's own
+/// formulas. The formula's graph edge points at the table vertex (stripe range deps — dirty
+/// propagation only), so without table-aware virtual deps `=SUM(Sales[Price])` installed in the
+/// same batch as the `[@Amount]*2` cells (a graph rebuild) evaluates first and reads blanks, then
+/// lags one edit behind forever.
+#[test]
+fn structured_ref_over_calculated_column_evaluates_after_the_column_formulas() {
+    let ctx = crate::test_workbook::TestWorkbook::new();
+    let mut engine: Engine<_> = Engine::new(ctx, EvalConfig::default());
+    engine.add_sheet("Sheet1").unwrap();
+    for (col, header) in ["Item", "Amount", "Price"].iter().enumerate() {
+        engine
+            .set_cell_value(
+                "Sheet1",
+                1,
+                col as u32 + 1,
+                LiteralValue::Text((*header).into()),
+            )
+            .unwrap();
+    }
+    engine
+        .set_cell_value("Sheet1", 2, 1, LiteralValue::Text("a".into()))
+        .unwrap();
+    engine
+        .set_cell_value("Sheet1", 2, 2, LiteralValue::Number(10.0))
+        .unwrap();
+    engine
+        .set_cell_value("Sheet1", 3, 1, LiteralValue::Text("b".into()))
+        .unwrap();
+    engine
+        .set_cell_value("Sheet1", 3, 2, LiteralValue::Number(15.0))
+        .unwrap();
+    let sheet_id = engine.sheet_id("Sheet1").unwrap();
+    let start = CellRef::new(sheet_id, Coord::from_excel(1, 1, true, true));
+    let end = CellRef::new(sheet_id, Coord::from_excel(3, 3, true, true));
+    engine
+        .define_table(
+            "Sales",
+            RangeRef::new(start, end),
+            true,
+            vec!["Item".into(), "Amount".into(), "Price".into()],
+            false,
+        )
+        .unwrap();
+
+    // One batch, structured-ref consumers FIRST (row-major order of a rebuilt graph).
+    let parse = |f: &str| formualizer_parse::parser::parse(f).unwrap();
+    engine
+        .bulk_set_formulas(
+            "Sheet1",
+            vec![
+                (1, 5, parse("=SUM(Sales[Price])")),
+                (1, 6, parse("=SUM(Sales[[#Data],[Price]])")),
+                (1, 7, parse("=SUM(C2:C3)")),
+                (2, 3, parse("=[@Amount]*2")),
+                (3, 3, parse("=[@Amount]*2")),
+            ],
+        )
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    let value = |engine: &Engine<_>, row: u32, col: u32| engine.get_cell_value("Sheet1", row, col);
+    assert_eq!(value(&engine, 1, 5), Some(LiteralValue::Number(50.0)));
+    assert_eq!(value(&engine, 1, 6), Some(LiteralValue::Number(50.0)));
+    assert_eq!(value(&engine, 1, 7), Some(LiteralValue::Number(50.0)));
+
+    // An edit that re-fires the calculated column re-fires the structured refs AFTER it.
+    engine
+        .set_cell_value("Sheet1", 2, 2, LiteralValue::Number(20.0))
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    assert_eq!(value(&engine, 2, 3), Some(LiteralValue::Number(40.0)));
+    assert_eq!(value(&engine, 1, 5), Some(LiteralValue::Number(70.0)));
+    assert_eq!(value(&engine, 1, 6), Some(LiteralValue::Number(70.0)));
+    assert_eq!(value(&engine, 1, 7), Some(LiteralValue::Number(70.0)));
+}
+
+/// Chained calculated columns (`Total` reads `Price`, `Price` reads `Amount`) plus a totals-row
+/// `[#Totals]` consumer: every hop orders after its precedents, and a totals-row formula over the
+/// table body does not see itself (the data body excludes the totals row — no false cycle).
+#[test]
+fn structured_ref_chain_and_totals_row_order_after_calculated_columns() {
+    let ctx = crate::test_workbook::TestWorkbook::new();
+    let mut engine: Engine<_> = Engine::new(ctx, EvalConfig::default());
+    engine.add_sheet("Sheet1").unwrap();
+    for (col, header) in ["Item", "Amount", "Price", "Total"].iter().enumerate() {
+        engine
+            .set_cell_value(
+                "Sheet1",
+                1,
+                col as u32 + 1,
+                LiteralValue::Text((*header).into()),
+            )
+            .unwrap();
+    }
+    engine
+        .set_cell_value("Sheet1", 2, 2, LiteralValue::Number(10.0))
+        .unwrap();
+    engine
+        .set_cell_value("Sheet1", 3, 2, LiteralValue::Number(15.0))
+        .unwrap();
+    let sheet_id = engine.sheet_id("Sheet1").unwrap();
+    let start = CellRef::new(sheet_id, Coord::from_excel(1, 1, true, true));
+    let end = CellRef::new(sheet_id, Coord::from_excel(4, 4, true, true));
+    engine
+        .define_table(
+            "Sales",
+            RangeRef::new(start, end),
+            true,
+            vec![
+                "Item".into(),
+                "Amount".into(),
+                "Price".into(),
+                "Total".into(),
+            ],
+            true,
+        )
+        .unwrap();
+    let parse = |f: &str| formualizer_parse::parser::parse(f).unwrap();
+    engine
+        .bulk_set_formulas(
+            "Sheet1",
+            vec![
+                // Consumers first: an outside cell over Total, the totals-row SUBTOTAL over
+                // Price, and an outside cell over the totals row itself.
+                (1, 6, parse("=SUM(Sales[Total])")),
+                (4, 3, parse("=SUBTOTAL(109,Sales[Price])")),
+                (1, 7, parse("=Sales[[#Totals],[Price]]")),
+                (2, 4, parse("=[@Price]+1")),
+                (3, 4, parse("=[@Price]+1")),
+                (2, 3, parse("=[@Amount]*2")),
+                (3, 3, parse("=[@Amount]*2")),
+            ],
+        )
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    let value = |engine: &Engine<_>, row: u32, col: u32| engine.get_cell_value("Sheet1", row, col);
+    assert_eq!(value(&engine, 1, 6), Some(LiteralValue::Number(52.0)));
+    assert_eq!(value(&engine, 4, 3), Some(LiteralValue::Number(50.0)));
+    assert_eq!(value(&engine, 1, 7), Some(LiteralValue::Number(50.0)));
+
+    engine
+        .set_cell_value("Sheet1", 3, 2, LiteralValue::Number(25.0))
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    assert_eq!(value(&engine, 1, 6), Some(LiteralValue::Number(72.0)));
+    assert_eq!(value(&engine, 4, 3), Some(LiteralValue::Number(70.0)));
+    assert_eq!(value(&engine, 1, 7), Some(LiteralValue::Number(70.0)));
+}

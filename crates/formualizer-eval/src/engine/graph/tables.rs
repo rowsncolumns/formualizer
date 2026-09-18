@@ -59,6 +59,10 @@ impl DependencyGraph {
         }
     }
 
+    pub(crate) fn has_tables(&self) -> bool {
+        !self.tables.is_empty()
+    }
+
     pub fn table_by_vertex(&self, vertex: VertexId) -> Option<&TableEntry> {
         self.table_vertex_lookup
             .get(&vertex)

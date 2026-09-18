@@ -2,6 +2,7 @@ use crate::engine::VertexId;
 use crate::engine::VertexKind;
 use crate::engine::eval::Engine;
 use crate::formula_plane::region_index::Region;
+use crate::structured::{Rect, lower_structured_rect};
 use crate::traits::{
     EvaluationContext, FunctionProvider, NamedRangeResolver, Range, RangeResolver,
     ReferenceResolver, Resolver, SourceResolver, Table, TableResolver,
@@ -282,8 +283,19 @@ impl<'a, R: EvaluationContext> EvaluationContext for DynamicRefCollector<'a, R> 
                     self.collected.lock().unwrap().insert(vid);
                 }
             }
-            ReferenceType::Table(_) => {
-                // Table references might be tricky, skip for now or resolve from graph if possible
+            ReferenceType::Table(tref) => {
+                // The table vertex only dirties dependents; ordering needs the concrete
+                // rectangle the reference selects (this-row forms were rewritten at ingest).
+                if let Some((sheet_id, rect)) = structured_reference_rect(self.engine, tref, None) {
+                    let sheet_name = self.engine.graph.sheet_name(sheet_id);
+                    self.collect_formula_vertices_in_rect(
+                        sheet_name,
+                        rect.start_row,
+                        rect.start_col,
+                        rect.end_row,
+                        rect.end_col,
+                    );
+                }
             }
             _ => {}
         }
@@ -382,33 +394,131 @@ impl RangeVirtualDepProvider {
                     continue;
                 }
 
-                if let Some(index) = engine.graph.sheet_index(sheet_id) {
-                    let sr0 = sr.saturating_sub(1);
-                    let er0 = er.saturating_sub(1);
-                    let sc0 = sc.saturating_sub(1);
-                    let ec0 = ec.saturating_sub(1);
-                    for u in index.vertices_in_col_range(sc0, ec0) {
-                        let pc = engine.graph.vertex_coord(u);
-                        let row0 = pc.row();
-                        if row0 < sr0 || row0 > er0 {
-                            continue;
-                        }
-                        match engine.graph.get_vertex_kind(u) {
-                            VertexKind::FormulaScalar | VertexKind::FormulaArray => {
-                                if (engine.graph.is_dirty(u) || engine.graph.is_volatile(u))
-                                    && u != v
-                                {
-                                    deps.push(u);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+                push_dirty_formula_vertices_in_rect(engine, v, sheet_id, sr, sc, er, ec, &mut deps);
+            }
+        }
+        // Structured references: the formula's graph edge points at the TABLE vertex, whose
+        // range deps are stripes (dirty propagation only). Without the rectangle the reference
+        // actually selects, a `=SUM(Table[Calc])` over a calculated column is dirtied by the
+        // column's edits but scheduled in the same layer as the column's own formulas — it
+        // reads their stale values (or blanks on a fresh graph). Lower each table reference
+        // to its rectangle and order the formula after the dirty formulas inside it.
+        if depends_on_table(engine, v) {
+            let current_row = engine.graph.get_cell_ref(v).map(|c| c.coord.row() + 1);
+            for (sheet_id, rect) in table_reference_rects(engine, v, current_row) {
+                push_dirty_formula_vertices_in_rect(
+                    engine,
+                    v,
+                    sheet_id,
+                    rect.start_row,
+                    rect.start_col,
+                    rect.end_row,
+                    rect.end_col,
+                    &mut deps,
+                );
             }
         }
         deps
     }
+}
+
+/// Push the dirty / volatile formula vertices inside a 1-based inclusive rectangle (excluding
+/// `v` itself) — the vertices `v` must be scheduled after.
+#[allow(clippy::too_many_arguments)]
+fn push_dirty_formula_vertices_in_rect<R: EvaluationContext>(
+    engine: &Engine<R>,
+    v: VertexId,
+    sheet_id: crate::SheetId,
+    sr: u32,
+    sc: u32,
+    er: u32,
+    ec: u32,
+    deps: &mut Vec<VertexId>,
+) {
+    let Some(index) = engine.graph.sheet_index(sheet_id) else {
+        return;
+    };
+    let sr0 = sr.saturating_sub(1);
+    let er0 = er.saturating_sub(1);
+    let sc0 = sc.saturating_sub(1);
+    let ec0 = ec.saturating_sub(1);
+    for u in index.vertices_in_col_range(sc0, ec0) {
+        let pc = engine.graph.vertex_coord(u);
+        let row0 = pc.row();
+        if row0 < sr0 || row0 > er0 {
+            continue;
+        }
+        match engine.graph.get_vertex_kind(u) {
+            VertexKind::FormulaScalar | VertexKind::FormulaArray => {
+                if (engine.graph.is_dirty(u) || engine.graph.is_volatile(u)) && u != v {
+                    deps.push(u);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Does `v` carry a graph edge to a table vertex (i.e. its formula holds a structured reference
+/// the ingest did not rewrite into plain cell references)?
+fn depends_on_table<R: EvaluationContext>(engine: &Engine<R>, v: VertexId) -> bool {
+    if !engine.graph.has_tables() {
+        return false;
+    }
+    let is_table = |d: &VertexId| engine.graph.get_vertex_kind(*d) == VertexKind::Table;
+    match engine.graph.dependencies_slice(v) {
+        Some(deps) => deps.iter().any(is_table),
+        None => engine.graph.get_dependencies(v).iter().any(is_table),
+    }
+}
+
+/// The concrete rectangles selected by the structured references in `v`'s formula, with the
+/// table's sheet. References that fail to lower (unknown table / column, a this-row form with
+/// no row context) are skipped — evaluation reports those errors itself.
+fn table_reference_rects<R: EvaluationContext>(
+    engine: &Engine<R>,
+    v: VertexId,
+    current_row: Option<u32>,
+) -> Vec<(crate::SheetId, Rect)> {
+    let Some(ast_id) = engine.graph.get_formula_id(v) else {
+        return Vec::new();
+    };
+    let policy = formualizer_parse::parser::CollectPolicy {
+        expand_small_ranges: false,
+        range_expansion_limit: 0,
+        include_names: false,
+    };
+    let Ok(refs) = crate::engine::plan::collect_references_arena(
+        engine.graph.data_store(),
+        ast_id,
+        engine.graph.sheet_reg(),
+        &policy,
+    ) else {
+        return Vec::new();
+    };
+    refs.iter()
+        .filter_map(|r| match r {
+            ReferenceType::Table(tref) => structured_reference_rect(engine, tref, current_row),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Lower one structured reference against the engine's table definition: the table's sheet id
+/// plus the 1-based inclusive rectangle it selects. `None` when the table is undefined or the
+/// specifier does not lower (see [`crate::structured::lower_structured_rect`]).
+fn structured_reference_rect<R: EvaluationContext>(
+    engine: &Engine<R>,
+    tref: &TableReference,
+    current_row: Option<u32>,
+) -> Option<(crate::SheetId, Rect)> {
+    if tref.name.is_empty() {
+        return None;
+    }
+    let geom = engine.table_geometry(&tref.name)?;
+    let sheet_id = engine.graph.sheet_id(geom.sheet.as_deref()?)?;
+    let rect = lower_structured_rect(&geom, tref.specifier.as_ref(), current_row).ok()?;
+    Some((sheet_id, rect))
 }
 
 pub struct VirtualDepBuilder<'a, R: EvaluationContext> {
