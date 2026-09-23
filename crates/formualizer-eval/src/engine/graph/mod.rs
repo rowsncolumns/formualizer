@@ -146,7 +146,10 @@ impl DenseSourceRects {
     fn push_cell_source(&mut self, graph: &DependencyGraph, vertex_id: VertexId) -> bool {
         if !matches!(
             graph.store.kind(vertex_id),
-            VertexKind::Cell | VertexKind::Empty | VertexKind::FormulaScalar | VertexKind::FormulaArray
+            VertexKind::Cell
+                | VertexKind::Empty
+                | VertexKind::FormulaScalar
+                | VertexKind::FormulaArray
         ) {
             return false;
         }
@@ -174,7 +177,8 @@ impl DenseSourceRects {
         for (sheet_id, rect) in self.per_sheet {
             let area = (u64::from(rect.end_row - rect.start_row) + 1)
                 * (u64::from(rect.end_col - rect.start_col) + 1);
-            let dense = rect.cells.len() >= Self::MIN_CELLS && (rect.cells.len() as u64) * 2 >= area;
+            let dense =
+                rect.cells.len() >= Self::MIN_CELLS && (rect.cells.len() as u64) * 2 >= area;
             if dense {
                 to_visit.extend(graph.collect_range_dependents_for_rect(
                     sheet_id,

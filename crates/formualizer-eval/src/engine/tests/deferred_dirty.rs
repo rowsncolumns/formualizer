@@ -271,7 +271,13 @@ fn dense_rectangle_edit_marks_every_range_dependent_once() {
         }
     }
     set_formula(&mut engine, "Sheet1", 1, 12, "=SUM(A1:J40)");
-    set_formula(&mut engine, "Sheet1", 2, 12, "=SUMIFS(B1:B40,A1:A40,\">20\")");
+    set_formula(
+        &mut engine,
+        "Sheet1",
+        2,
+        12,
+        "=SUMIFS(B1:B40,A1:A40,\">20\")",
+    );
     // A formula that reads only a cell the bulk edit will skip (a hole in the rectangle).
     set_formula(&mut engine, "Sheet1", 3, 12, "=E20*2");
     engine.evaluate_all().unwrap();
