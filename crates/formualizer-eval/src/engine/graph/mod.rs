@@ -112,6 +112,86 @@ pub enum DependencyRef {
 }
 
 /// A key representing a coarse-grained section of a sheet
+
+/// Cell-kind sources of one `mark_dirty_many` call, grouped per sheet with their bounding box.
+///
+/// A bulk edit (clearing or writing a rectangle of a fact table) used to collect range dependents
+/// once PER SOURCE CELL: every cell walked its column/row/block stripes, hashed the ~20k `SUMIFS`
+/// that read the table into a fresh candidate set and precision-checked each one — O(cells ×
+/// dependents), a 14k-cell clear spending a minute in `collect_range_dependents_for_rect`. When
+/// the sources of a sheet fill at least half of their bounding box, the box is collected ONCE
+/// instead: `collect_range_dependents_for_rect` over the box returns every formula whose range
+/// overlaps any source cell (plus, at most, formulas overlapping only a hole in the box — an
+/// extra evaluation that recomputes the same value, never a missed one). Sparse sets keep the
+/// exact per-cell walk.
+#[derive(Default)]
+struct DenseSourceRects {
+    per_sheet: FxHashMap<SheetId, DenseSourceRect>,
+}
+
+struct DenseSourceRect {
+    cells: Vec<VertexId>,
+    start_row: u32,
+    start_col: u32,
+    end_row: u32,
+    end_col: u32,
+}
+
+impl DenseSourceRects {
+    /// Bulk edits below this many cell sources take the exact per-cell path unconditionally.
+    const MIN_CELLS: usize = 16;
+
+    /// Queue a cell-kind source for grouped collection. Returns `false` when the vertex is not a
+    /// sheet cell (names, externals) so the caller collects it on its own.
+    fn push_cell_source(&mut self, graph: &DependencyGraph, vertex_id: VertexId) -> bool {
+        if !matches!(
+            graph.store.kind(vertex_id),
+            VertexKind::Cell | VertexKind::Empty | VertexKind::FormulaScalar | VertexKind::FormulaArray
+        ) {
+            return false;
+        }
+        let view = graph.store.view(vertex_id);
+        let (row, col) = (view.row(), view.col());
+        let rect = self
+            .per_sheet
+            .entry(view.sheet_id())
+            .or_insert_with(|| DenseSourceRect {
+                cells: Vec::new(),
+                start_row: row,
+                start_col: col,
+                end_row: row,
+                end_col: col,
+            });
+        rect.cells.push(vertex_id);
+        rect.start_row = rect.start_row.min(row);
+        rect.start_col = rect.start_col.min(col);
+        rect.end_row = rect.end_row.max(row);
+        rect.end_col = rect.end_col.max(col);
+        true
+    }
+
+    fn collect_range_dependents(self, graph: &DependencyGraph, to_visit: &mut Vec<VertexId>) {
+        for (sheet_id, rect) in self.per_sheet {
+            let area = (u64::from(rect.end_row - rect.start_row) + 1)
+                * (u64::from(rect.end_col - rect.start_col) + 1);
+            let dense = rect.cells.len() >= Self::MIN_CELLS && (rect.cells.len() as u64) * 2 >= area;
+            if dense {
+                to_visit.extend(graph.collect_range_dependents_for_rect(
+                    sheet_id,
+                    rect.start_row,
+                    rect.start_col,
+                    rect.end_row,
+                    rect.end_col,
+                ));
+            } else {
+                for vertex_id in rect.cells {
+                    to_visit.extend(graph.collect_range_dependents_for_vertex(vertex_id));
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct StripeKey {
     pub sheet_id: SheetId,
@@ -2603,6 +2683,7 @@ impl DependencyGraph {
         let mut affected = FxHashSet::default();
         let mut to_visit = Vec::new();
         let mut visited_for_propagation = FxHashSet::default();
+        let mut dense_rects = DenseSourceRects::default();
 
         for &vertex_id in vertex_ids {
             // Only mark the source vertex as dirty if it's a formula.
@@ -2639,9 +2720,12 @@ impl DependencyGraph {
                     }
                 }
 
-                to_visit.extend(self.collect_range_dependents_for_vertex(vertex_id));
+                if !dense_rects.push_cell_source(self, vertex_id) {
+                    to_visit.extend(self.collect_range_dependents_for_vertex(vertex_id));
+                }
             }
         }
+        dense_rects.collect_range_dependents(self, &mut to_visit);
 
         while let Some(id) = to_visit.pop() {
             if !visited_for_propagation.insert(id) {

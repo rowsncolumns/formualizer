@@ -255,3 +255,90 @@ fn propagation_is_normal_after_scope_ends() {
         Some(LiteralValue::Number(30.0))
     );
 }
+
+/// A dense rectangle of edits (clearing or writing a block of a fact table) collects range
+/// dependents once for the rectangle instead of once per cell. Formulas over the block, over one
+/// of its columns, and over a hole inside it must all end up correct.
+#[test]
+fn dense_rectangle_edit_marks_every_range_dependent_once() {
+    let mut engine = Engine::new(TestWorkbook::new(), EvalConfig::default());
+    // 40 rows × 10 cols of values in A1:J40; each cell = row index.
+    for row in 1..=40u32 {
+        for col in 1..=10u32 {
+            engine
+                .set_cell_value("Sheet1", row, col, LiteralValue::Number(row as f64))
+                .unwrap();
+        }
+    }
+    set_formula(&mut engine, "Sheet1", 1, 12, "=SUM(A1:J40)");
+    set_formula(&mut engine, "Sheet1", 2, 12, "=SUMIFS(B1:B40,A1:A40,\">20\")");
+    // A formula that reads only a cell the bulk edit will skip (a hole in the rectangle).
+    set_formula(&mut engine, "Sheet1", 3, 12, "=E20*2");
+    engine.evaluate_all().unwrap();
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 1, 12),
+        Some(LiteralValue::Number(10.0 * 820.0))
+    );
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 2, 12),
+        Some(LiteralValue::Number((21..=40).sum::<u32>() as f64))
+    );
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 3, 12),
+        Some(LiteralValue::Number(40.0))
+    );
+
+    // Clear everything except E20 in one deferred scope: 399 sources, 400-cell bounding box.
+    engine.begin_deferred_dirty();
+    for row in 1..=40u32 {
+        for col in 1..=10u32 {
+            if (row, col) == (20, 5) {
+                continue;
+            }
+            engine
+                .set_cell_value("Sheet1", row, col, LiteralValue::Empty)
+                .unwrap();
+        }
+    }
+    engine.end_deferred_dirty();
+    engine.evaluate_all().unwrap();
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 1, 12),
+        Some(LiteralValue::Number(20.0)),
+        "SUM over the block sees the one surviving cell"
+    );
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 2, 12),
+        Some(LiteralValue::Number(0.0)),
+        "SUMIFS over the cleared columns is empty"
+    );
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 3, 12),
+        Some(LiteralValue::Number(40.0)),
+        "the hole's dependent keeps its value (an extra evaluation is fine, a wrong one is not)"
+    );
+
+    // Refill the block with new values in one scope; every roll-up follows.
+    engine.begin_deferred_dirty();
+    for row in 1..=40u32 {
+        for col in 1..=10u32 {
+            engine
+                .set_cell_value("Sheet1", row, col, LiteralValue::Number(1.0))
+                .unwrap();
+        }
+    }
+    engine.end_deferred_dirty();
+    engine.evaluate_all().unwrap();
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 1, 12),
+        Some(LiteralValue::Number(400.0))
+    );
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 2, 12),
+        Some(LiteralValue::Number(0.0))
+    );
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 3, 12),
+        Some(LiteralValue::Number(2.0))
+    );
+}

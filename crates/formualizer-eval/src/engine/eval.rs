@@ -16982,6 +16982,12 @@ where
         let _ = self.graph.end_deferred_dirty();
     }
 
+    /// Whether a deferred-dirty scope is open (see `Engine::begin_deferred_dirty`). Hosts that
+    /// must evaluate mid-batch close the scope first and reopen it afterwards.
+    pub fn deferred_dirty_active(&self) -> bool {
+        self.graph.deferred_dirty_active()
+    }
+
     /// Total vertices processed by dirty-propagation BFS loops since graph
     /// creation. Perf-shape observability only (cross-crate tests assert
     /// batched edits propagate O(component), not O(edits × component)).
