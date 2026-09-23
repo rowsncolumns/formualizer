@@ -178,6 +178,11 @@ pub struct DependencyGraph {
     /// When `false` (Arrow-canonical mode), the graph does not store values for cell/formula
     /// vertices. Arrow (base + overlays) is the sole value store for sheet cells.
     value_cache_enabled: bool,
+    /// Per-sheet term of the data snapshot id (see `Engine::sheet_data_snapshot_id`). Bumped by a
+    /// sheet-attributed edit AND by every formula result committed onto the sheet, so caches keyed
+    /// on a sheet's data (lookup indexes, criteria masks) can never outlive a recalculation that
+    /// rewrote one of the cells they were built from.
+    sheet_snapshot_offsets: FxHashMap<SheetId, u64>,
 
     /// Debug-only instrumentation: count attempts to read *cell/formula* graph values while
     /// caching is disabled (canonical mode guard).
@@ -1202,6 +1207,7 @@ impl DependencyGraph {
             // Phase 1 (ticket 610): Arrow-truth is the only supported mode.
             // The dependency graph does not cache cell/formula literal payloads.
             value_cache_enabled: false,
+            sheet_snapshot_offsets: FxHashMap::default(),
             #[cfg(debug_assertions)]
             graph_value_read_attempts: AtomicU64::new(0),
             cell_to_vertex: std::collections::HashMap::with_hasher(CoordBuildHasher),
@@ -2808,6 +2814,46 @@ impl DependencyGraph {
         }
     }
 
+    /// Does any volatile formula (`TODAY()`, `RAND()`, …) live inside the rectangle on `sheet_id`?
+    ///
+    /// Walks whichever side is smaller: the volatile set — normally a handful of cells — or the
+    /// rectangle's cells. The per-cell scan alone made every `*IFS` mask request O(rows) of hash
+    /// lookups, which is what a 20k-formula roll-up sheet pays 40k times per recalculation.
+    pub(crate) fn rect_contains_volatile(
+        &self,
+        sheet_id: SheetId,
+        start_row: u32,
+        start_col: u32,
+        end_row: u32,
+        end_col: u32,
+    ) -> bool {
+        if start_row > end_row || start_col > end_col {
+            return false;
+        }
+        let area = (u64::from(end_row - start_row) + 1) * (u64::from(end_col - start_col) + 1);
+        if (self.volatile_vertices.len() as u64) <= area {
+            return self.volatile_vertices.iter().any(|&id| {
+                if !self.store.vertex_exists_active(id) || self.store.sheet_id(id) != sheet_id {
+                    return false;
+                }
+                let coord = self.store.coord(id);
+                (start_row..=end_row).contains(&coord.row())
+                    && (start_col..=end_col).contains(&coord.col())
+            });
+        }
+        for row in start_row..=end_row {
+            for col in start_col..=end_col {
+                let cell_ref = self.make_cell_ref_internal(sheet_id, row, col);
+                if let Some(vertex_id) = self.get_vertex_id_for_address(&cell_ref)
+                    && self.is_volatile(*vertex_id)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// 🔮 Scalability Hook: Clear volatile vertices after evaluation cycle
     pub fn clear_volatile_flags(&mut self) {
         self.volatile_vertices.clear();
@@ -3310,8 +3356,26 @@ impl DependencyGraph {
     // The old AoS Vertex struct has been eliminated in favor of direct
     // access to columnar data through the VertexStore
 
+    /// Rotate `sheet_id`'s snapshot term: its data changed, so anything cached from it is stale.
+    pub(crate) fn bump_sheet_snapshot(&mut self, sheet_id: SheetId) {
+        *self.sheet_snapshot_offsets.entry(sheet_id).or_insert(0) += 1;
+    }
+
+    pub(crate) fn sheet_snapshot_offset(&self, sheet_id: SheetId) -> u64 {
+        self.sheet_snapshot_offsets
+            .get(&sheet_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Updates the cached value of a formula vertex.
     pub(crate) fn update_vertex_value(&mut self, vertex_id: VertexId, value: LiteralValue) {
+        if matches!(
+            self.store.kind(vertex_id),
+            VertexKind::Cell | VertexKind::FormulaScalar | VertexKind::FormulaArray
+        ) {
+            self.bump_sheet_snapshot(self.store.sheet_id(vertex_id));
+        }
         if !self.value_cache_enabled {
             // Canonical mode: cell/formula vertices must not store values in the graph.
             match self.store.kind(vertex_id) {

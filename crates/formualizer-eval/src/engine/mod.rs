@@ -4,6 +4,7 @@
 
 pub mod arrow_ingest;
 pub(crate) mod convergence;
+pub mod criteria_mask_cache;
 pub mod effects;
 pub mod eval;
 pub mod eval_delta;

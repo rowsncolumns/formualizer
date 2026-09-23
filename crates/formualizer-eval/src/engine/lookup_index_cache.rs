@@ -26,7 +26,7 @@ pub enum LookupAxis {
     RowInView(usize),
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LookupHashKey {
     Number(u64),
     Text(Box<str>),

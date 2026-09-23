@@ -1,6 +1,10 @@
 use crate::SheetId;
 use crate::arrow_store::{OverlayFragment, OverlayValue, SheetStore};
 use crate::engine::arena::AstNodeId;
+use crate::engine::criteria_mask_cache::{
+    CriteriaMaskCache, CriteriaMaskCacheReport, CriteriaMaskKey,
+    DEFAULT_CRITERIA_MASK_CACHE_MAX_BYTES, PredicateKey,
+};
 use crate::engine::eval_delta::{
     DeltaCollector, DeltaMode, EvalDelta, EvalDeltaCompatibilityPolicy,
 };
@@ -913,7 +917,6 @@ pub struct Engine<R> {
     /// term, so snapshot-keyed caches over OTHER sheets (lookup indexes, used-bounds) survive.
     /// `sheet_data_snapshot_id(sheet) = snapshot_id + offset[sheet]` — a global bump still
     /// invalidates every sheet.
-    sheet_snapshot_offsets: rustc_hash::FxHashMap<SheetId, u64>,
     topology_epoch: u64,
     cached_static_schedule: Option<CachedScheduleEntry>,
     cached_mixed_topology: Option<CachedMixedTopology>,
@@ -940,6 +943,8 @@ pub struct Engine<R> {
     // Snapshot-scoped final used-axis bounds for open-ended references.
     used_axis_bounds_cache: std::sync::RwLock<Option<UsedAxisBoundsCache>>,
     lookup_index_cache: LookupIndexCache,
+    /// Snapshot-scoped `*IF(S)` criteria masks shared by every formula reading the same column.
+    criteria_mask_cache: CriteriaMaskCache,
     source_cache: Arc<std::sync::RwLock<SourceCache>>,
     /// Identity binding for opaque source-family preparations.
     source_formula_token: Arc<()>,
@@ -2543,7 +2548,6 @@ where
             thread_pool,
             recalc_epoch: 0,
             snapshot_id: std::sync::atomic::AtomicU64::new(1),
-            sheet_snapshot_offsets: rustc_hash::FxHashMap::default(),
             topology_epoch: 0,
             cached_static_schedule: None,
             cached_mixed_topology: None,
@@ -2561,6 +2565,7 @@ where
             row_bounds_cache: std::sync::RwLock::new(None),
             used_axis_bounds_cache: std::sync::RwLock::new(None),
             lookup_index_cache: LookupIndexCache::new(lookup_cache_max_bytes),
+            criteria_mask_cache: CriteriaMaskCache::new(DEFAULT_CRITERIA_MASK_CACHE_MAX_BYTES),
             source_cache: Arc::new(std::sync::RwLock::new(SourceCache::default())),
             source_formula_token: Arc::new(()),
             recalc_plan_token: Arc::new(()),
@@ -2680,7 +2685,6 @@ where
             thread_pool: Some(thread_pool),
             recalc_epoch: 0,
             snapshot_id: std::sync::atomic::AtomicU64::new(1),
-            sheet_snapshot_offsets: rustc_hash::FxHashMap::default(),
             topology_epoch: 0,
             cached_static_schedule: None,
             cached_mixed_topology: None,
@@ -2698,6 +2702,7 @@ where
             row_bounds_cache: std::sync::RwLock::new(None),
             used_axis_bounds_cache: std::sync::RwLock::new(None),
             lookup_index_cache: LookupIndexCache::new(lookup_cache_max_bytes),
+            criteria_mask_cache: CriteriaMaskCache::new(DEFAULT_CRITERIA_MASK_CACHE_MAX_BYTES),
             source_cache: Arc::new(std::sync::RwLock::new(SourceCache::default())),
             source_formula_token: Arc::new(()),
             recalc_plan_token: Arc::new(()),
@@ -3457,30 +3462,21 @@ where
         self.lookup_index_cache.report()
     }
 
+    pub fn criteria_mask_cache_report(&self) -> CriteriaMaskCacheReport {
+        self.criteria_mask_cache.report()
+    }
+
     fn lookup_view_contains_volatile(&self, view: &RangeView<'_>, sheet_id: SheetId) -> bool {
-        let start_row = view.start_row();
-        let end_row = view.end_row();
-        let start_col = view.start_col();
-        let end_col = view.end_col();
-        for row in start_row..=end_row {
-            let Ok(row_u32) = u32::try_from(row) else {
-                return true;
-            };
-            for col in start_col..=end_col {
-                let Ok(col_u32) = u32::try_from(col) else {
-                    return true;
-                };
-                let cell_ref = self
-                    .graph
-                    .make_cell_ref_internal(sheet_id, row_u32, col_u32);
-                if let Some(vertex_id) = self.graph.get_vertex_id_for_address(&cell_ref)
-                    && self.graph.is_volatile(*vertex_id)
-                {
-                    return true;
-                }
-            }
-        }
-        false
+        let (Ok(start_row), Ok(end_row), Ok(start_col), Ok(end_col)) = (
+            u32::try_from(view.start_row()),
+            u32::try_from(view.end_row()),
+            u32::try_from(view.start_col()),
+            u32::try_from(view.end_col()),
+        ) else {
+            return true;
+        };
+        self.graph
+            .rect_contains_volatile(sheet_id, start_row, start_col, end_row, end_col)
     }
 
     fn build_lookup_index_impl(
@@ -5211,14 +5207,14 @@ where
     /// (lookup indexes, used-bounds) survive. Unattributable edits must keep using the global
     /// bump, which invalidates every sheet.
     pub fn mark_data_edited_on_sheet(&mut self, sheet_id: SheetId) {
-        *self.sheet_snapshot_offsets.entry(sheet_id).or_insert(0) += 1;
+        self.graph.bump_sheet_snapshot(sheet_id);
         self.has_edited = true;
     }
 
     /// Sheet-scoped counterpart of [`Self::mark_topology_edited`]: same schedule/topology
     /// invalidation, but the snapshot bump is confined to the edited sheet.
     pub fn mark_topology_edited_on_sheet(&mut self, sheet_id: SheetId) {
-        *self.sheet_snapshot_offsets.entry(sheet_id).or_insert(0) += 1;
+        self.graph.bump_sheet_snapshot(sheet_id);
         self.topology_epoch = self.topology_epoch.wrapping_add(1);
         self.graph.bump_topology_revision();
         self.clear_cached_static_schedule();
@@ -5243,12 +5239,8 @@ where
     /// keys derived from a SPECIFIC sheet's data (lookup indexes, used-bounds) key on this, so a
     /// sheet-attributed edit elsewhere doesn't invalidate them.
     pub fn sheet_data_snapshot_id(&self, sheet_id: SheetId) -> u64 {
-        self.data_snapshot_id().wrapping_add(
-            self.sheet_snapshot_offsets
-                .get(&sheet_id)
-                .copied()
-                .unwrap_or(0),
-        )
+        self.data_snapshot_id()
+            .wrapping_add(self.graph.sheet_snapshot_offset(sheet_id))
     }
 
     /// Mark a topology-changing edit: bump snapshot + topology epoch and invalidate cached schedules.
@@ -23781,7 +23773,36 @@ where
         if sheet_rows == 0 || view.start_row() >= sheet_rows {
             return Some(std::sync::Arc::new(arrow_array::BooleanArray::new_null(0)));
         }
-        compute_criteria_mask(view, col_in_view, pred)
+        // Snapshot-scoped cache (see `criteria_mask_cache`): every `*IF(S)` cell reading the same
+        // column with the same predicate shares one mask per data snapshot of that sheet.
+        let key = self.graph.sheet_id(view.sheet_name()).and_then(|sheet_id| {
+            let pred_key = match PredicateKey::from_predicate(pred) {
+                Some(k) => k,
+                None => {
+                    self.criteria_mask_cache.note_skipped_unkeyable();
+                    return None;
+                }
+            };
+            if self.lookup_view_contains_volatile(view, sheet_id) {
+                self.criteria_mask_cache.note_skipped_volatile();
+                return None;
+            }
+            Some(CriteriaMaskKey {
+                sheet_id,
+                start_row: u32::try_from(view.start_row()).ok()?,
+                start_col: u32::try_from(view.start_col()).ok()?,
+                end_row: u32::try_from(view.end_row()).ok()?,
+                end_col: u32::try_from(view.end_col()).ok()?,
+                col_in_view: u32::try_from(col_in_view).ok()?,
+                pred: pred_key,
+                snapshot_id: self.sheet_data_snapshot_id(sheet_id),
+            })
+        });
+        let Some(key) = key else {
+            return compute_criteria_mask(view, col_in_view, pred);
+        };
+        self.criteria_mask_cache
+            .get_or_build(key, || compute_criteria_mask(view, col_in_view, pred))
     }
 
     fn build_row_visibility_mask(
