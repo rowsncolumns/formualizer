@@ -214,6 +214,160 @@ mod tests {
         assert!(engine.resolve_range_view(&r, "Sheet1").is_err());
     }
 
+    /// rowsncolumns/spreadsheet#939 Z-07: a host mirroring a document that holds `Sheet1`
+    /// beside `SHEET1` registers two engine sheets; each exact spelling resolves to its own
+    /// sheet and a spelling neither holds falls back to the first-registered one.
+    #[test]
+    fn add_sheet_admits_exact_spelling_siblings_and_each_resolves_to_itself() {
+        let mut graph = create_test_graph();
+        let lower = graph.sheet_id("Sheet1").expect("default sheet");
+        let upper = graph.add_sheet("SHEET1").unwrap();
+        assert_ne!(upper, lower, "SHEET1 is its own sheet beside Sheet1");
+        assert_eq!(
+            graph.add_sheet("SHEET1").unwrap(),
+            upper,
+            "idempotent on the exact spelling"
+        );
+        assert_eq!(graph.sheet_id("Sheet1"), Some(lower));
+        assert_eq!(graph.sheet_id("SHEET1"), Some(upper));
+        assert_eq!(
+            graph.sheet_id("sheet1"),
+            Some(lower),
+            "unheld spelling → first registered"
+        );
+
+        graph
+            .set_cell_value("Sheet1", 1, 1, LiteralValue::Number(10.0))
+            .unwrap();
+        graph
+            .set_cell_value("SHEET1", 1, 1, LiteralValue::Number(5.0))
+            .unwrap();
+        let a1_lower = graph
+            .get_vertex_id_for_address(&graph.make_cell_ref("Sheet1", 1, 1))
+            .unwrap();
+        let a1_upper = graph
+            .get_vertex_id_for_address(&graph.make_cell_ref("SHEET1", 1, 1))
+            .unwrap();
+        assert_ne!(a1_lower, a1_upper, "each sibling holds its own A1");
+        assert_eq!(
+            graph.get_vertex_id_for_address(&graph.make_cell_ref("sheet1", 1, 1)),
+            Some(a1_lower),
+            "an unheld spelling reads the first-registered sibling's cell"
+        );
+    }
+
+    /// The evaluation view of the same pair: each title's formulas compute over the OTHER title's
+    /// cells when they name it, and an edit on one sibling reaches only the formulas that read it.
+    #[test]
+    fn exact_spelling_siblings_evaluate_over_their_own_cells() {
+        use crate::engine::{Engine, EvalConfig};
+        use crate::test_workbook::TestWorkbook;
+
+        let mut engine = Engine::new(TestWorkbook::new(), EvalConfig::default());
+        let lower = engine.sheet_id("Sheet1").expect("default sheet");
+        let upper = engine.add_sheet("SHEET1").unwrap();
+        assert_ne!(lower, upper);
+        engine
+            .set_cell_value("Sheet1", 1, 1, LiteralValue::Number(10.0))
+            .unwrap();
+        engine
+            .set_cell_value("SHEET1", 1, 1, LiteralValue::Number(5.0))
+            .unwrap();
+        engine
+            .set_cell_formula("Sheet1", 1, 2, parse("=SHEET1!A1+1").unwrap())
+            .unwrap();
+        engine
+            .set_cell_formula("SHEET1", 1, 2, parse("=Sheet1!A1+1").unwrap())
+            .unwrap();
+        engine
+            .set_cell_formula("Sheet1", 1, 3, parse("=sheet1!A1+1").unwrap())
+            .unwrap();
+        engine.evaluate_all().unwrap();
+        assert_eq!(
+            engine.get_cell_value("Sheet1", 1, 1),
+            Some(LiteralValue::Number(10.0))
+        );
+        assert_eq!(
+            engine.get_cell_value("SHEET1", 1, 1),
+            Some(LiteralValue::Number(5.0))
+        );
+        assert_eq!(
+            engine.get_cell_value("Sheet1", 1, 2),
+            Some(LiteralValue::Number(6.0)),
+            "=SHEET1!A1+1 on Sheet1 reads SHEET1"
+        );
+        assert_eq!(
+            engine.get_cell_value("SHEET1", 1, 2),
+            Some(LiteralValue::Number(11.0)),
+            "=Sheet1!A1+1 on SHEET1 reads Sheet1"
+        );
+        assert_eq!(
+            engine.get_cell_value("Sheet1", 1, 3),
+            Some(LiteralValue::Number(11.0)),
+            "=sheet1!A1+1 falls back to the first-registered sibling"
+        );
+
+        engine
+            .set_cell_value("SHEET1", 1, 1, LiteralValue::Number(7.0))
+            .unwrap();
+        engine.evaluate_all().unwrap();
+        assert_eq!(
+            engine.get_cell_value("Sheet1", 1, 2),
+            Some(LiteralValue::Number(8.0))
+        );
+        assert_eq!(
+            engine.get_cell_value("SHEET1", 1, 2),
+            Some(LiteralValue::Number(11.0))
+        );
+        assert_eq!(
+            engine.get_cell_value("Sheet1", 1, 3),
+            Some(LiteralValue::Number(11.0))
+        );
+    }
+
+    /// Re-casing a sheet's own title is a rename (Excel allows `Data` → `DATA` in place and
+    /// rewrites the references to it); a title another sheet holds in any casing is refused.
+    #[test]
+    fn rename_recases_own_title_and_refuses_another_sheets_case_variant() {
+        use formualizer_parse::pretty::canonical_formula;
+
+        let mut graph = create_test_graph();
+        let data = graph.add_sheet("Data").unwrap();
+        graph
+            .set_cell_value("Data", 1, 1, LiteralValue::Number(5.0))
+            .unwrap();
+        graph
+            .set_cell_formula("Sheet1", 2, 1, parse("=Data!A1+10").unwrap())
+            .unwrap();
+
+        graph.rename_sheet(data, "DATA").unwrap();
+        assert_eq!(graph.sheet_name(data), "DATA");
+        assert_eq!(graph.sheet_id("DATA"), Some(data));
+        assert_eq!(
+            graph.sheet_id("Data"),
+            Some(data),
+            "folded lookup follows the re-cased sheet"
+        );
+        let v = graph
+            .get_vertex_id_for_address(&graph.make_cell_ref("Sheet1", 2, 1))
+            .unwrap();
+        let ast = graph.get_formula(*v).expect("formula kept");
+        let text = canonical_formula(&ast);
+        assert!(
+            text.contains("DATA!A1"),
+            "reference re-cased with the sheet: {text}"
+        );
+
+        // Sheet1 → `data` collides with DATA by case: refused, nothing renamed.
+        let sheet1 = graph.sheet_id("Sheet1").unwrap();
+        assert!(graph.rename_sheet(sheet1, "data").is_err());
+        assert_eq!(graph.sheet_name(sheet1), "Sheet1");
+        assert_eq!(graph.sheet_name(data), "DATA");
+        // Renaming to the exact same title stays a no-op.
+        graph.rename_sheet(data, "DATA").unwrap();
+        assert_eq!(graph.sheet_name(data), "DATA");
+    }
+
     #[test]
     fn test_sheet_reference_resolution_is_case_insensitive() {
         use crate::engine::{Engine, EvalConfig};
