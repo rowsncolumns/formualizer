@@ -4413,6 +4413,24 @@ impl DependencyGraph {
         self.store.set_coord(id, coord);
     }
 
+    /// Move a vertex's entry in its sheet's spatial index (for VertexEditor). The index answers
+    /// range queries — `virtual_deps` resolves a compressed range dependency (a large named range,
+    /// a whole-column reference) to the formula vertices inside it through it — so it has to
+    /// follow `move_vertex`: a shifted formula that stays indexed at its pre-shift coordinate is
+    /// found inside a range it does not occupy, and a named range redefined over that column then
+    /// counts the formula reading it as a precedent — the scheduler reports a false cycle and the
+    /// formula evaluates as circular.
+    #[doc(hidden)]
+    pub fn update_sheet_index_coord(&mut self, id: VertexId, old: AbsCoord, new: AbsCoord) {
+        if old == new {
+            return;
+        }
+        let sheet_id = self.store.sheet_id(id);
+        if let Some(index) = self.sheet_indexes.get_mut(&sheet_id) {
+            index.update_vertex(old, new, id);
+        }
+    }
+
     /// Update edge cache coordinate
     #[doc(hidden)]
     pub fn update_edge_coord(&mut self, id: VertexId, coord: AbsCoord) {
