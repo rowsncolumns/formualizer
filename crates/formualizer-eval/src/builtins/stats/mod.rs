@@ -8501,6 +8501,27 @@ impl Function for FTestFn {
     }
 }
 
+/// Excel's CHISQ.TEST degrees of freedom for an `actual_range` of `rows × cols` numeric points:
+/// `(rows−1)(cols−1)` for a genuine 2-D contingency table, `cols−1` for a single row and `rows−1`
+/// for a single column (both 1-D cases are the classic goodness-of-fit `k−1`). Falls back to
+/// `n−1` when the shape cannot be determined or the range holds non-numeric cells (its numeric
+/// point count no longer matches `rows × cols`).
+fn chisq_test_df(actual: &ArgumentHandle, n: usize) -> Result<f64, ExcelError> {
+    let shape: Option<(usize, usize)> = if let Some(arr) = actual.inline_array_literal()? {
+        Some((arr.len(), arr.first().map_or(0, |row| row.len())))
+    } else if let Ok(view) = actual.range_view() {
+        Some(view.dims())
+    } else {
+        None
+    };
+    Ok(match shape {
+        Some((rows, cols)) if rows * cols == n && rows > 1 && cols > 1 => {
+            ((rows - 1) * (cols - 1)) as f64
+        }
+        _ => n.saturating_sub(1) as f64,
+    })
+}
+
 /* ─────────────────────────── CHISQ.TEST ──────────────────────────── */
 
 /// Returns the right-tail p-value from a chi-square goodness-of-fit style comparison.
@@ -8510,7 +8531,8 @@ impl Function for FTestFn {
 /// # Remarks
 /// - `actual_range` and `expected_range` must contain the same number of numeric points.
 /// - Expected values must be strictly greater than `0`.
-/// - Requires at least two categories (`df >= 1`).
+/// - Degrees of freedom follow Excel: `(rows−1)(cols−1)` for a 2-D `actual_range`, `k−1` for a
+///   single row or column. Requires `df >= 1`.
 /// - Returns `#N/A` for length mismatches or empty inputs, and `#NUM!` for invalid expected values.
 ///
 /// # Examples
@@ -8601,8 +8623,9 @@ impl Function for ChisqTestFn {
             chi_sq += (obs - exp).powi(2) / exp;
         }
 
-        // Degrees of freedom = number of categories - 1
-        let df = (actual.len() - 1) as f64;
+        // Degrees of freedom follow the SHAPE of actual_range, as in Excel (spreadsheet#939 G-06):
+        // r > 1 and c > 1 → (r−1)(c−1); a single row → c−1; a single column → r−1.
+        let df = chisq_test_df(&args[0], actual.len())?;
 
         if df < 1.0 {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
