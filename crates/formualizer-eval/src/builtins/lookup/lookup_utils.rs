@@ -21,6 +21,63 @@ pub fn value_to_f64_lenient(v: &LiteralValue) -> Option<f64> {
     }
 }
 
+/// Excel's SORT / SORTBY collation rank (spreadsheet#939 G-05): numbers (incl. dates/times) sort
+/// before text, text before logicals, logicals before errors. Blanks are handled by the caller
+/// (`sort_ordering`) because they go LAST in both directions.
+fn sort_type_rank(v: &LiteralValue) -> u8 {
+    match v {
+        LiteralValue::Int(_)
+        | LiteralValue::Number(_)
+        | LiteralValue::Date(_)
+        | LiteralValue::DateTime(_)
+        | LiteralValue::Time(_)
+        | LiteralValue::Duration(_) => 0,
+        LiteralValue::Text(_) => 1,
+        LiteralValue::Boolean(_) => 2,
+        LiteralValue::Error(_) => 3,
+        // Arrays/pending never appear as sort keys in practice; keep them after every real value.
+        LiteralValue::Array(_) | LiteralValue::Pending => 4,
+        LiteralValue::Empty => 5,
+    }
+}
+
+/// Excel's ascending SORT / SORTBY comparison of two keys: type rank first (numbers < text <
+/// logicals < errors), then within the type — numbers numerically, text case-insensitively (a
+/// numeric-looking text such as `"10"` stays text), `FALSE < TRUE`, errors by kind. Unlike
+/// `cmp_for_lookup`, no cross-type numeric coercion happens: `2` and `"b"` never compare equal.
+pub fn cmp_for_sort(a: &LiteralValue, b: &LiteralValue) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (ra, rb) = (sort_type_rank(a), sort_type_rank(b));
+    if ra != rb {
+        return ra.cmp(&rb);
+    }
+    match (a, b) {
+        (LiteralValue::Text(x), LiteralValue::Text(y)) => x.to_lowercase().cmp(&y.to_lowercase()),
+        (LiteralValue::Boolean(x), LiteralValue::Boolean(y)) => x.cmp(y),
+        (LiteralValue::Error(x), LiteralValue::Error(y)) => (x.kind as u8).cmp(&(y.kind as u8)),
+        _ if ra == 0 => match (a.as_serial_number(), b.as_serial_number()) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+            _ => Ordering::Equal,
+        },
+        _ => Ordering::Equal,
+    }
+}
+
+/// The ordering SORT / SORTBY use for one key: `cmp_for_sort`, reversed when `ascending` is false —
+/// except that blank cells stay LAST in both directions, exactly like Excel.
+pub fn sort_ordering(a: &LiteralValue, b: &LiteralValue, ascending: bool) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (matches!(a, LiteralValue::Empty), matches!(b, LiteralValue::Empty)) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => {
+            let o = cmp_for_sort(a, b);
+            if ascending { o } else { o.reverse() }
+        }
+    }
+}
+
 /// Case-insensitive text equality (no wildcards).
 pub fn text_equal_ci(a: &str, b: &str) -> bool {
     a.to_lowercase() == b.to_lowercase()

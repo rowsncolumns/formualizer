@@ -20,7 +20,9 @@
 //! - PERFORMANCE: streaming FILTER without full materialization; UNIQUE using smallvec for tiny sets.
 
 use super::super::utils::collapse_if_scalar;
-use super::lookup_utils::{PreparedLookupMatcher, cmp_for_lookup, value_to_f64_lenient};
+use super::lookup_utils::{
+    PreparedLookupMatcher, cmp_for_lookup, sort_ordering, value_to_f64_lenient,
+};
 use crate::args::{ArgSchema, CoercionPolicy, ShapeKind};
 use crate::engine::lookup_index_cache::LookupAxis;
 use crate::function::Function; // FnCaps imported via macro
@@ -1057,11 +1059,13 @@ impl Function for SortFn {
             };
             keys.push(((*idx - 1) as usize, order >= 0));
         }
+        // Excel collation: numbers < text < logicals < errors, descending reverses the type order,
+        // blanks last either way (spreadsheet#939 G-05).
         let compare_keys = |a: &[LiteralValue], b: &[LiteralValue]| -> std::cmp::Ordering {
             for (key_idx, ascending) in &keys {
-                let cmp = cmp_for_lookup(&a[*key_idx], &b[*key_idx]).unwrap_or(0);
-                if cmp != 0 {
-                    return if *ascending { cmp.cmp(&0) } else { 0.cmp(&cmp) };
+                let cmp = sort_ordering(&a[*key_idx], &b[*key_idx], *ascending);
+                if cmp != std::cmp::Ordering::Equal {
+                    return cmp;
                 }
             }
             std::cmp::Ordering::Equal
@@ -1329,14 +1333,13 @@ impl Function for SortByFn {
             indexed_rows.push((r, row_vals));
         }
 
-        // Sort using all criteria
+        // Sort using all criteria — the same Excel collation as SORT (numbers < text < logicals <
+        // errors, blanks last in both directions); each key/order pair is applied left-to-right.
         indexed_rows.sort_by(|a, b| {
             for (by_values, ascending) in &sort_criteria {
-                let val_a = &by_values[a.0];
-                let val_b = &by_values[b.0];
-                let cmp = cmp_for_lookup(val_a, val_b).unwrap_or(0);
-                if cmp != 0 {
-                    return if *ascending { cmp.cmp(&0) } else { 0.cmp(&cmp) };
+                let cmp = sort_ordering(&by_values[a.0], &by_values[b.0], *ascending);
+                if cmp != std::cmp::Ordering::Equal {
+                    return cmp;
                 }
             }
             std::cmp::Ordering::Equal
