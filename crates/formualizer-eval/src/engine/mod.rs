@@ -1211,6 +1211,21 @@ pub struct SpillConfig {
 /// Cells in a full Excel sheet — the default [`SpillConfig::max_spill_cells`].
 pub const EXCEL_SHEET_CELLS: u64 = 1_048_576 * 16_384;
 
+impl SpillConfig {
+    /// [`Self::max_spill_cells`] as a `usize` bound for in-memory snapshots, saturating at
+    /// `usize::MAX` and never below 1. `max_spill_cells` is a `u64` and the default
+    /// ([`EXCEL_SHEET_CELLS`] = 2^34) does not fit a 32-bit `usize`: a plain `as usize` cast
+    /// truncates it to 0 on wasm32, so every spill snapshot was emptied and the
+    /// `first().expect("non-empty spill cells")` that followed trapped the whole engine the
+    /// moment a row or column holding a dynamic-array anchor was deleted
+    /// (rowsncolumns/spreadsheet#939 K-01).
+    pub fn snapshot_cell_cap(&self) -> usize {
+        usize::try_from(self.max_spill_cells)
+            .unwrap_or(usize::MAX)
+            .max(1)
+    }
+}
+
 impl Default for SpillConfig {
     fn default() -> Self {
         Self {

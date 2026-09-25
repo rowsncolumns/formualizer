@@ -25327,13 +25327,14 @@ where
             return None;
         }
 
-        let max = self.config.spill.max_spill_cells as usize;
+        // Saturating: the u64 cap must never truncate to 0 (it did on wasm32 — spreadsheet#939 K-01).
+        let max = self.config.spill.snapshot_cell_cap();
         let mut cells = cells;
         if cells.len() > max {
             cells.truncate(max);
         }
 
-        let first = *cells.first().expect("non-empty spill cells");
+        let first = *cells.first()?;
         let sheet_name = self.graph.sheet_name(first.sheet_id).to_string();
         let row0 = first.coord.row();
         let col0 = first.coord.col();
