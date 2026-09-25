@@ -1644,6 +1644,11 @@ impl DependencyGraph {
         end_row0: u32,
         end_col0: u32,
     ) -> Vec<VertexId> {
+        // A zero-sized shape hands us an inverted rectangle (`end = start + 0 - 1`); an inverted
+        // `BTreeMap::range` panics, and in wasm that aborts the whole engine.
+        if end_row0 < start_row0 || end_col0 < start_col0 {
+            return Vec::new();
+        }
         let mut anchors = self
             .spill_cells_by_sheet
             .get(&sheet_id)

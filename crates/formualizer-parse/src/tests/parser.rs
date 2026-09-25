@@ -923,6 +923,47 @@ mod tests {
         }
     }
 
+    /// rowsncolumns/spreadsheet#939 G-02: Excel refuses a ragged array constant at entry. The
+    /// engine's AST arena stores constants as a rectangular `rows × cols` block and asserted on the
+    /// mismatch — a wasm panic that killed the whole engine — so the parser must reject it first.
+    #[test]
+    fn ragged_array_literal_is_a_parse_error() {
+        for formula in [
+            "={1,2;3}",
+            "={1;2,3}",
+            "={1,2;3,4,5}",
+            "=SUM({1,2;3})",
+            "={\"a\",\"b\";\"c\"}",
+        ] {
+            let err = parse_formula(formula).expect_err(formula);
+            assert!(
+                err.message.contains("same length"),
+                "{formula}: unexpected message {}",
+                err.message
+            );
+        }
+    }
+
+    /// Rectangular constants (any width, single row, single column) still parse.
+    #[test]
+    fn rectangular_array_literals_still_parse() {
+        for (formula, rows, cols) in [
+            ("={1,2;3,4}", 2, 2),
+            ("={1,2,3}", 1, 3),
+            ("={1;2;3}", 3, 1),
+            ("={1,2;3,4;5,6}", 3, 2),
+        ] {
+            let ast = parse_formula(formula).expect(formula);
+            match ast.node_type {
+                ASTNodeType::Array(r) => {
+                    assert_eq!(r.len(), rows, "{formula}");
+                    assert!(r.iter().all(|row| row.len() == cols), "{formula}");
+                }
+                other => panic!("{formula}: expected Array, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn test_complex_formula() {
         let ast = parse_formula("=IF(AND(A1>0,B1<10),SUM(C1:C10)/COUNT(C1:C10),\"N/A\")").unwrap();

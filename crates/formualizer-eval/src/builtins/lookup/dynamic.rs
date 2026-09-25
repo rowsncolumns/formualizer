@@ -3208,6 +3208,14 @@ impl Function for TransposeFn {
 
 /* ───────────────────────── TAKE() ───────────────────────── */
 
+/// Excel's `#CALC!` for a function whose array result has no rows or no columns (an "empty
+/// array"); TAKE / DROP return it instead of a `0×n` shape (rowsncolumns/spreadsheet#939 G-01).
+fn empty_array_calc_error<'b>() -> crate::traits::CalcValue<'b> {
+    crate::traits::CalcValue::Scalar(LiteralValue::Error(
+        ExcelError::new(ExcelErrorKind::Calc).with_message("Empty array"),
+    ))
+}
+
 #[derive(Debug)]
 pub struct TakeFn;
 /// Returns a subset from the start or end of rows and optional columns.
@@ -3325,9 +3333,7 @@ impl Function for TakeFn {
         };
         let (rows, cols) = view.dims();
         if rows == 0 || cols == 0 {
-            return Ok(crate::traits::CalcValue::Range(
-                crate::engine::range_view::RangeView::from_owned_rows(vec![], _ctx.date_system()),
-            ));
+            return Ok(empty_array_calc_error());
         }
 
         let height = rows as i64;
@@ -3379,10 +3385,9 @@ impl Function for TakeFn {
             (0usize, width as usize)
         };
 
+        // Excel: TAKE(rng,0) / DROP(rng,<every row>) is `#CALC!` — there is no zero-sized array.
         if row_start >= row_end || col_start >= col_end {
-            return Ok(crate::traits::CalcValue::Range(
-                crate::engine::range_view::RangeView::from_owned_rows(vec![], _ctx.date_system()),
-            ));
+            return Ok(empty_array_calc_error());
         }
 
         let mut out: Vec<Vec<LiteralValue>> = Vec::with_capacity(row_end - row_start);
@@ -3514,9 +3519,7 @@ impl Function for DropFn {
         };
         let (rows, cols) = view.dims();
         if rows == 0 || cols == 0 {
-            return Ok(crate::traits::CalcValue::Range(
-                crate::engine::range_view::RangeView::from_owned_rows(vec![], _ctx.date_system()),
-            ));
+            return Ok(empty_array_calc_error());
         }
 
         let height = rows as i64;
@@ -3557,10 +3560,9 @@ impl Function for DropFn {
             (0usize, width as usize)
         };
 
+        // Excel: TAKE(rng,0) / DROP(rng,<every row>) is `#CALC!` — there is no zero-sized array.
         if row_start >= row_end || col_start >= col_end {
-            return Ok(crate::traits::CalcValue::Range(
-                crate::engine::range_view::RangeView::from_owned_rows(vec![], _ctx.date_system()),
-            ));
+            return Ok(empty_array_calc_error());
         }
 
         let mut out: Vec<Vec<LiteralValue>> = Vec::with_capacity(row_end - row_start);
@@ -4533,6 +4535,63 @@ mod tests {
             .unwrap()
             .into_literal();
         assert_eq!(v, LiteralValue::Number(1.0));
+    }
+
+    /// rowsncolumns/spreadsheet#939 G-01: Excel has no zero-sized array — `TAKE(rng,0)`,
+    /// `TAKE(rng,,0)` and `DROP(rng,<every row>)` show `#CALC!`. Returning a `0×n` range instead
+    /// reached the spill planner with an inverted rectangle and trapped the engine.
+    #[test]
+    fn take_and_drop_empty_result_is_calc_error() {
+        let wb = TestWorkbook::new()
+            .with_function(Arc::new(TakeFn))
+            .with_function(Arc::new(DropFn))
+            .with_cell_a1("Sheet1", "A1", LiteralValue::Int(1))
+            .with_cell_a1("Sheet1", "A2", LiteralValue::Int(2))
+            .with_cell_a1("Sheet1", "B1", LiteralValue::Int(3))
+            .with_cell_a1("Sheet1", "B2", LiteralValue::Int(4));
+        let ctx = wb.interpreter();
+        let arr = range("A1:B2", 1, 1, 2, 2);
+        let fctx = ctx.function_context(None);
+        let calc = |name: &str, args: &[ASTNode]| {
+            let f = ctx.context.get_function("", name).unwrap();
+            let handles: Vec<ArgumentHandle> =
+                args.iter().map(|a| ArgumentHandle::new(a, &ctx)).collect();
+            f.dispatch(&handles, &fctx).unwrap().into_literal()
+        };
+        let zero = lit(LiteralValue::Int(0));
+        let two = lit(LiteralValue::Int(2));
+        let neg_two = lit(LiteralValue::Int(-2));
+        let five = lit(LiteralValue::Int(5));
+        for (label, v) in [
+            ("TAKE(A1:B2,0)", calc("TAKE", &[arr.clone(), zero.clone()])),
+            (
+                "TAKE(A1:B2,2,0)",
+                calc("TAKE", &[arr.clone(), two.clone(), zero.clone()]),
+            ),
+            ("DROP(A1:B2,2)", calc("DROP", &[arr.clone(), two.clone()])),
+            (
+                "DROP(A1:B2,-2)",
+                calc("DROP", &[arr.clone(), neg_two.clone()]),
+            ),
+            ("DROP(A1:B2,5)", calc("DROP", &[arr.clone(), five.clone()])),
+            (
+                "DROP(A1:B2,0,2)",
+                calc("DROP", &[arr.clone(), zero.clone(), two.clone()]),
+            ),
+        ] {
+            assert!(
+                matches!(&v, LiteralValue::Error(e) if e.kind == ExcelErrorKind::Calc),
+                "{label} → {v:?}"
+            );
+        }
+        // A non-empty result is unchanged.
+        assert_eq!(
+            calc("TAKE", &[arr.clone(), two.clone(), two.clone()]),
+            LiteralValue::Array(vec![
+                vec![LiteralValue::Number(1.0), LiteralValue::Number(3.0)],
+                vec![LiteralValue::Number(2.0), LiteralValue::Number(4.0)],
+            ])
+        );
     }
 
     #[test]

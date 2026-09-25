@@ -3120,6 +3120,21 @@ impl Parser {
             }
         }
 
+        // Excel refuses a ragged constant (`{1,2;3}`) at entry: every row must have the width of
+        // the first. Rejecting it here keeps the arena's rectangular `rows × cols` layout an
+        // invariant instead of a runtime assertion (rowsncolumns/spreadsheet#939 G-02).
+        let width = rows.first().map(|r| r.len()).unwrap_or(0);
+        if let Some(bad) = rows.iter().position(|r| r.len() != width) {
+            return Err(ParserError {
+                message: format!(
+                    "Array constant rows must have the same length: row 1 has {width} element(s), row {} has {}",
+                    bad + 1,
+                    rows[bad].len()
+                ),
+                position: Some(self.position),
+            });
+        }
+
         let contains_volatile = rows
             .iter()
             .flat_map(|r| r.iter())

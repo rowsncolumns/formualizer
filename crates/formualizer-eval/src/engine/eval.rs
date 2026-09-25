@@ -17131,7 +17131,7 @@ where
         // If array result, perform spill from the anchor cell
         match result {
             Ok(cv) => {
-                let result_literal = cv.into_literal();
+                let result_literal = empty_array_as_calc_error(cv.into_literal());
                 match result_literal {
                     LiteralValue::Array(rows) => {
                         // Update kind to FormulaArray for tracking
@@ -21628,7 +21628,7 @@ where
         // Only formula vertices spill dynamic arrays into the grid.
         let is_formula = matches!(kind, VertexKind::FormulaScalar | VertexKind::FormulaArray);
         if is_formula {
-            match result {
+            match empty_array_as_calc_error(result) {
                 LiteralValue::Array(rows) => {
                     self.apply_array_result_from_parallel(
                         vertex_id,
@@ -24830,7 +24830,7 @@ where
             }]);
         }
 
-        match computed_value {
+        match empty_array_as_calc_error(computed_value) {
             LiteralValue::Array(rows) => self.plan_array_effects(vertex_id, rows),
             other => self.plan_scalar_effects(vertex_id, other),
         }
@@ -26188,5 +26188,19 @@ where
         }
         self.flush_computed_write_buffer(&mut computed_writes)?;
         Ok(layer.vertices.len())
+    }
+}
+
+/// Excel has no zero-sized array: a formula whose result has no rows or no columns shows `#CALC!`
+/// (an "empty array" calc error). Normalising here — the one place every array result passes
+/// through before spill planning — keeps a `0×n` / `n×0` shape out of the spill machinery, whose
+/// inverted `anchor..=anchor+0-1` rectangles trapped the engine
+/// (rowsncolumns/spreadsheet#939 G-01).
+fn empty_array_as_calc_error(value: LiteralValue) -> LiteralValue {
+    match value {
+        LiteralValue::Array(rows) if rows.is_empty() || rows.iter().any(|r| r.is_empty()) => {
+            LiteralValue::Error(ExcelError::new(ExcelErrorKind::Calc).with_message("Empty array"))
+        }
+        other => other,
     }
 }
