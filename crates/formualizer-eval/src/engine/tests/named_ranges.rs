@@ -2366,3 +2366,213 @@ fn large_named_range_redefined_after_a_column_insert_does_not_cycle_through_the_
         "the redefined name keeps tracking its column"
     );
 }
+
+// ── Reference-valued named formulas (rowsncolumns/spreadsheet#939 K-03) ─────────────────────────
+// A defined name whose refers-to is a formula that evaluates to a REFERENCE — the classic dynamic
+// range `=OFFSET($A$1,0,0,COUNTA($A:$A),1)`, a plain `=Sheet1!$A$1:$A$3`, or another name — is a
+// range to every consumer in Excel: `SUM(Name)` sums the cells, `ROWS(Name)` counts them,
+// `INDEX(Name,2)` picks one and `=Name` spills. Value-valued named formulas (`=Data*2`) keep an
+// array result's shape.
+
+fn formula_name(text: &str) -> NamedDefinition {
+    NamedDefinition::Formula {
+        ast: parse(text).unwrap(),
+        dependencies: Vec::new(),
+        range_deps: Vec::new(),
+    }
+}
+
+fn seed_column(engine: &mut Engine<TestWorkbook>, values: &[f64]) {
+    for (i, v) in values.iter().enumerate() {
+        engine
+            .set_cell_value("Sheet1", i as u32 + 1, 1, LiteralValue::Number(*v))
+            .unwrap();
+    }
+}
+
+fn number_at(engine: &Engine<TestWorkbook>, row: u32, col: u32) -> f64 {
+    match engine.get_cell_value("Sheet1", row, col) {
+        Some(LiteralValue::Number(n)) => n,
+        other => panic!("expected a number at ({row},{col}), got {other:?}"),
+    }
+}
+
+#[test]
+fn dynamic_offset_counta_name_is_a_range_that_grows_with_the_data() {
+    let mut engine = Engine::new(TestWorkbook::new(), canonical_cfg());
+    seed_column(&mut engine, &[1.0, 2.0, 3.0]);
+    engine
+        .define_name(
+            "Dyn",
+            formula_name("=OFFSET(Sheet1!$A$1,0,0,COUNTA(Sheet1!$A:$A),1)"),
+            NameScope::Workbook,
+        )
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 1, 3, parse("=SUM(Dyn)").unwrap())
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 2, 3, parse("=ROWS(Dyn)").unwrap())
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 3, 3, parse("=INDEX(Dyn,2)").unwrap())
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    assert_eq!(number_at(&engine, 1, 3), 6.0, "SUM(Dyn)");
+    assert_eq!(number_at(&engine, 2, 3), 3.0, "ROWS(Dyn)");
+    assert_eq!(number_at(&engine, 3, 3), 2.0, "INDEX(Dyn,2)");
+
+    // Appending a value grows the name (Excel: the OFFSET/COUNTA idiom).
+    engine
+        .set_cell_value("Sheet1", 4, 1, LiteralValue::Number(4.0))
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    assert_eq!(number_at(&engine, 1, 3), 10.0, "SUM(Dyn) after append");
+    assert_eq!(number_at(&engine, 2, 3), 4.0, "ROWS(Dyn) after append");
+}
+
+#[test]
+fn fixed_offset_name_follows_edits_inside_the_window_it_covers() {
+    // `=OFFSET($A$1,0,0,3,1)` has a static edge to A1 only; OFFSET is volatile, so an edit to A2
+    // must still reach `=SUM(Fixed)`.
+    let mut engine = Engine::new(TestWorkbook::new(), canonical_cfg());
+    seed_column(&mut engine, &[1.0, 2.0, 3.0]);
+    engine
+        .define_name(
+            "Fixed",
+            formula_name("=OFFSET(Sheet1!$A$1,0,0,3,1)"),
+            NameScope::Workbook,
+        )
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 1, 3, parse("=SUM(Fixed)").unwrap())
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    assert_eq!(number_at(&engine, 1, 3), 6.0);
+
+    engine
+        .set_cell_value("Sheet1", 2, 1, LiteralValue::Number(20.0))
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    assert_eq!(number_at(&engine, 1, 3), 24.0, "A2 edit reaches SUM(Fixed)");
+}
+
+#[test]
+fn plain_reference_named_formula_behaves_like_a_range_name() {
+    let mut engine = Engine::new(TestWorkbook::new(), canonical_cfg());
+    seed_column(&mut engine, &[1.0, 2.0, 3.0]);
+    engine
+        .define_name(
+            "RefName",
+            formula_name("=Sheet1!$A$1:$A$3"),
+            NameScope::Workbook,
+        )
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 1, 3, parse("=SUM(RefName)").unwrap())
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 2, 3, parse("=INDEX(RefName,3)").unwrap())
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    assert_eq!(number_at(&engine, 1, 3), 6.0);
+    assert_eq!(number_at(&engine, 2, 3), 3.0);
+
+    engine
+        .set_cell_value("Sheet1", 1, 1, LiteralValue::Number(10.0))
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    assert_eq!(number_at(&engine, 1, 3), 15.0, "recalculates through the name");
+}
+
+#[test]
+fn name_defined_as_another_name_resolves_to_that_range() {
+    let mut engine = Engine::new(TestWorkbook::new(), canonical_cfg());
+    seed_column(&mut engine, &[1.0, 2.0, 3.0]);
+    let data = NamedDefinition::Range(RangeRef::new(
+        CellRef::new(0, Coord::from_excel(1, 1, true, true)),
+        CellRef::new(0, Coord::from_excel(3, 1, true, true)),
+    ));
+    engine
+        .define_name("Data", data, NameScope::Workbook)
+        .unwrap();
+    engine
+        .define_name("Alias", formula_name("=Data"), NameScope::Workbook)
+        .unwrap();
+    engine
+        .define_name("Twice", formula_name("=Data*2"), NameScope::Workbook)
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 1, 3, parse("=SUM(Alias)").unwrap())
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 2, 3, parse("=INDEX(Alias,2)").unwrap())
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 3, 3, parse("=ROWS(Alias)").unwrap())
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 4, 3, parse("=SUM(Twice)").unwrap())
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    assert_eq!(number_at(&engine, 1, 3), 6.0, "SUM(Alias)");
+    assert_eq!(number_at(&engine, 2, 3), 2.0, "INDEX(Alias,2)");
+    assert_eq!(number_at(&engine, 3, 3), 3.0, "ROWS(Alias)");
+    assert_eq!(number_at(&engine, 4, 3), 12.0, "SUM(Twice) keeps the array shape");
+
+    engine
+        .set_cell_value("Sheet1", 1, 1, LiteralValue::Number(10.0))
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    assert_eq!(number_at(&engine, 1, 3), 15.0, "SUM(Alias) after A1 edit");
+    assert_eq!(number_at(&engine, 4, 3), 30.0, "SUM(Twice) after A1 edit");
+}
+
+#[test]
+fn value_valued_named_formula_is_still_a_scalar() {
+    let mut engine = Engine::new(TestWorkbook::new(), canonical_cfg());
+    seed_column(&mut engine, &[1.0, 2.0, 3.0]);
+    engine
+        .define_name(
+            "Total",
+            formula_name("=SUM(Sheet1!$A$1:$A$3)*2"),
+            NameScope::Workbook,
+        )
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 1, 3, parse("=Total").unwrap())
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 2, 3, parse("=ISTEXT(Total)").unwrap())
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    assert_eq!(number_at(&engine, 1, 3), 12.0);
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 2, 3),
+        Some(LiteralValue::Boolean(false))
+    );
+}
+
+#[test]
+fn name_chain_that_loops_terminates_with_an_error() {
+    let mut engine = Engine::new(TestWorkbook::new(), canonical_cfg());
+    engine
+        .define_name(
+            "LoopB",
+            NamedDefinition::Literal(LiteralValue::Number(1.0)),
+            NameScope::Workbook,
+        )
+        .unwrap();
+    engine
+        .define_name("LoopA", formula_name("=LoopB"), NameScope::Workbook)
+        .unwrap();
+    engine
+        .update_name("LoopB", formula_name("=LoopA"), NameScope::Workbook)
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 1, 3, parse("=SUM(LoopA)").unwrap())
+        .unwrap();
+    // Must not recurse without bound; the value is an error or a number, never a hang.
+    engine.evaluate_all().unwrap();
+    assert!(engine.get_cell_value("Sheet1", 1, 3).is_some());
+}
