@@ -360,14 +360,57 @@ impl Function for IfErrorFn {
                 ExcelError::new_value(),
             )));
         }
-        match args[0].value() {
-            Ok(cv) => match cv.into_literal() {
-                LiteralValue::Error(_) => args[1].value(),
-                other => Ok(crate::traits::CalcValue::Scalar(other)),
-            },
-            Err(_) => args[1].value(),
-        }
+        lift_error_fallback(&args[0], &args[1], |_| true)
     }
+}
+
+/// `IFERROR` / `IFNA` over their value argument, element-wise when it is an array or a multi-cell
+/// range (Excel: `IFERROR(K1:K3,0)` spills `{0;0;0}`, `SUM(IFERROR(rng,0))` sums the non-error
+/// cells). Every element for which `caught` holds is replaced by the fallback, which broadcasts
+/// against the value's shape (a scalar fills every slot, an array is picked per element). The
+/// fallback stays lazy: it is evaluated only when at least one element needs it, so
+/// `IFERROR(A1:A3, expensive())` and `IFNA(x, 1/0)` keep their short-circuit semantics.
+fn lift_error_fallback<'a, 'b>(
+    value: &ArgumentHandle<'a, 'b>,
+    fallback: &ArgumentHandle<'a, 'b>,
+    caught: fn(&ExcelError) -> bool,
+) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+    use crate::lift::{Lifted, materialize, materialize_value, pick, target_shape};
+    use crate::traits::CalcValue;
+
+    let lifted = match value.value() {
+        Ok(cv) => materialize_value(cv)?,
+        Err(e) if caught(&e) => return fallback.value(),
+        Err(e) => return Err(e),
+    };
+    let (rows, shape) = match lifted {
+        Lifted::Scalar(LiteralValue::Error(e)) if caught(&e) => return fallback.value(),
+        Lifted::Scalar(v) => return Ok(CalcValue::Scalar(v)),
+        Lifted::Array(rows, shape) => (rows, shape),
+    };
+    let is_caught = |v: &LiteralValue| matches!(v, LiteralValue::Error(e) if caught(e));
+    if !rows.iter().flatten().any(is_caught) {
+        return Ok(CalcValue::Scalar(LiteralValue::Array(rows)));
+    }
+    let (fb_rows, fb_shape) = match materialize(fallback)? {
+        Lifted::Scalar(v) => (vec![vec![v]], (1, 1)),
+        Lifted::Array(r, s) => (r, s),
+    };
+    let (out_rows, out_cols) = target_shape(&[shape, fb_shape]);
+    let mut out = Vec::with_capacity(out_rows);
+    for i in 0..out_rows {
+        let mut row = Vec::with_capacity(out_cols);
+        for j in 0..out_cols {
+            let v = pick(&rows, shape, i, j);
+            row.push(if is_caught(&v) {
+                pick(&fb_rows, fb_shape, i, j)
+            } else {
+                v
+            });
+        }
+        out.push(row);
+    }
+    Ok(CalcValue::Scalar(LiteralValue::Array(out)))
 }
 
 #[derive(Debug)]
@@ -444,13 +487,9 @@ impl Function for IfNaFn {
                 ExcelError::new_value(),
             )));
         }
-        let v = args[0].value()?.into_literal();
-        match v {
-            LiteralValue::Error(ref e) if e.kind == formualizer_common::ExcelErrorKind::Na => {
-                args[1].value()
-            }
-            other => Ok(crate::traits::CalcValue::Scalar(other)),
-        }
+        lift_error_fallback(&args[0], &args[1], |e| {
+            e.kind == formualizer_common::ExcelErrorKind::Na
+        })
     }
 }
 

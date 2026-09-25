@@ -12,15 +12,21 @@ use crate::traits::{ArgumentHandle, CalcValue, FunctionContext};
 use formualizer_common::{ExcelError, ExcelErrorKind, LiteralValue};
 use formualizer_parse::parser::{ASTNode, ASTNodeType};
 
-type Shape = (usize, usize);
+pub(crate) type Shape = (usize, usize);
 
-enum Lifted {
+/// An evaluated argument, split into "one value" and "a grid of values" for broadcasting.
+pub(crate) enum Lifted {
     Scalar(LiteralValue),
     Array(Vec<Vec<LiteralValue>>, Shape),
 }
 
-fn materialize(arg: &ArgumentHandle<'_, '_>) -> Result<Lifted, ExcelError> {
-    Ok(match arg.value()? {
+pub(crate) fn materialize(arg: &ArgumentHandle<'_, '_>) -> Result<Lifted, ExcelError> {
+    materialize_value(arg.value()?)
+}
+
+/// A 1×1 array or range counts as a scalar so single-cell references keep the scalar path.
+pub(crate) fn materialize_value(value: CalcValue<'_>) -> Result<Lifted, ExcelError> {
+    Ok(match value {
         CalcValue::Scalar(LiteralValue::Array(rows)) => {
             let shape = (rows.len(), rows.first().map(|r| r.len()).unwrap_or(0));
             if shape == (1, 1) {
@@ -51,7 +57,7 @@ fn materialize(arg: &ArgumentHandle<'_, '_>) -> Result<Lifted, ExcelError> {
 
 /// Excel's operator/function broadcasting: a dimension of 1 stretches; otherwise the
 /// result takes the larger extent and cells a shorter operand does not reach become `#N/A`.
-fn target_shape(shapes: &[Shape]) -> Shape {
+pub(crate) fn target_shape(shapes: &[Shape]) -> Shape {
     shapes.iter().fold((1, 1), |(r, c), &(sr, sc)| {
         (
             if r == 1 { sr } else { r.max(sr) },
@@ -60,7 +66,7 @@ fn target_shape(shapes: &[Shape]) -> Shape {
     })
 }
 
-fn pick(rows: &[Vec<LiteralValue>], shape: Shape, i: usize, j: usize) -> LiteralValue {
+pub(crate) fn pick(rows: &[Vec<LiteralValue>], shape: Shape, i: usize, j: usize) -> LiteralValue {
     let r = if shape.0 == 1 { 0 } else { i };
     let c = if shape.1 == 1 { 0 } else { j };
     match rows.get(r).and_then(|row| row.get(c)) {
