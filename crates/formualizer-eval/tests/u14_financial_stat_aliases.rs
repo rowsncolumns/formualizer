@@ -113,9 +113,7 @@ fn ipmt_and_ppmt_reconcile_with_the_cumulative_windows_for_both_timings() {
                 1e-12,
             );
             assert_close(
-                &format!(
-                    "=PPMT(0.1,{per},3,100,0,{pay_type})-CUMPRINC(0.1,3,100,{per},{per},{pay_type})"
-                ),
+                &format!("=PPMT(0.1,{per},3,100,0,{pay_type})-CUMPRINC(0.1,3,100,{per},{per},{pay_type})"),
                 0.0,
                 1e-12,
             );
