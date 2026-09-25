@@ -985,7 +985,7 @@ impl<'a> Interpreter<'a> {
                         self.current_sheet,
                     );
 
-                    return Self::function_error_as_value(fun.dispatch(&handles, &fctx));
+                    return self.function_error_as_value(fun.dispatch(&handles, &fctx));
                 }
 
                 if let Some(callable) = self.resolve_local_callable(name) {
@@ -1668,12 +1668,78 @@ impl<'a> Interpreter<'a> {
     /// `#REF!` reference), which would otherwise bypass every argument-level handler and
     /// make IS* disagree with IFERROR on the same expression. Cancellation is the one
     /// genuine abort.
+    /// Every function result passes through here: an evaluation error becomes an error
+    /// *value* (Excel has no exceptions), and a non-finite number becomes `#NUM!`.
+    ///
+    /// Excel has no infinity or NaN — any function whose result overflows a double is
+    /// `#NUM!` (`EXP(710)`, `FACTDOUBLE(301)`, `COMBIN(1030,515)`, `SUMSQ(1E200,1E200)`,
+    /// `PRODUCT(1E200,1E200)`, `POWER(10,400)`). The operators already guard through
+    /// `sanitize_numeric`; guarding once at the dispatch boundary covers every builtin and
+    /// host function without each implementation having to remember it, so `ISNUMBER`,
+    /// `IFERROR`, `TEXT` and the cell writers never see an `inf`.
     fn function_error_as_value(
+        &self,
         result: Result<crate::traits::CalcValue<'a>, ExcelError>,
     ) -> Result<crate::traits::CalcValue<'a>, ExcelError> {
         match result {
             Err(e) if e.kind != ExcelErrorKind::Cancelled => {
                 Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)))
+            }
+            Ok(cv) => Ok(self.finite_function_result(cv)),
+            other => other,
+        }
+    }
+
+    fn finite_function_result(
+        &self,
+        cv: crate::traits::CalcValue<'a>,
+    ) -> crate::traits::CalcValue<'a> {
+        use crate::traits::CalcValue;
+        fn non_finite(v: &LiteralValue) -> bool {
+            matches!(v, LiteralValue::Number(n) if !n.is_finite())
+        }
+        fn to_num_error(v: &mut LiteralValue) {
+            if non_finite(v) {
+                *v = LiteralValue::Error(ExcelError::new_num());
+            }
+        }
+        match cv {
+            CalcValue::Scalar(LiteralValue::Number(n)) if !n.is_finite() => {
+                CalcValue::Scalar(LiteralValue::Error(ExcelError::new_num()))
+            }
+            CalcValue::Scalar(LiteralValue::Array(mut rows)) => {
+                for v in rows.iter_mut().flat_map(|r| r.iter_mut()) {
+                    to_num_error(v);
+                }
+                CalcValue::Scalar(LiteralValue::Array(rows))
+            }
+            // A borrowed range is a reference into the sheet (`INDEX`, `OFFSET`, `CHOOSE`
+            // over ranges): its cells were sanitized when they were computed, and scanning
+            // it would cost a full read of a range the function never materialized.
+            CalcValue::Range(rv) if rv.is_owned() => {
+                let mut dirty = false;
+                let _ = rv.for_each_cell(&mut |v| {
+                    if non_finite(v) {
+                        dirty = true;
+                        return Err(ExcelError::new_num());
+                    }
+                    Ok(())
+                });
+                if !dirty {
+                    return CalcValue::Range(rv);
+                }
+                let (rows, _) = rv.dims();
+                let mut data = Vec::with_capacity(rows);
+                let _ = rv.for_each_row(&mut |row| {
+                    let mut row = row.to_vec();
+                    row.iter_mut().for_each(to_num_error);
+                    data.push(row);
+                    Ok(())
+                });
+                CalcValue::Range(crate::engine::range_view::RangeView::from_owned_rows(
+                    data,
+                    self.context.date_system(),
+                ))
             }
             other => other,
         }
@@ -1693,7 +1759,7 @@ impl<'a> Interpreter<'a> {
                 self.current_cell,
                 self.current_sheet,
             );
-            return Self::function_error_as_value(fun.dispatch(&handles, &fctx));
+            return self.function_error_as_value(fun.dispatch(&handles, &fctx));
         }
 
         if let Some(callable) = self.resolve_local_callable(name) {

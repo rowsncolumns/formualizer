@@ -257,6 +257,12 @@ impl<'a> RangeView<'a> {
         }
     }
 
+    /// `true` when the view owns its cells (an array result built with
+    /// [`RangeView::from_owned_rows`]) rather than borrowing a sheet region.
+    pub fn is_owned(&self) -> bool {
+        matches!(self.backing, RangeBacking::Owned(_))
+    }
+
     pub fn dims(&self) -> (usize, usize) {
         (self.rows, self.cols)
     }
