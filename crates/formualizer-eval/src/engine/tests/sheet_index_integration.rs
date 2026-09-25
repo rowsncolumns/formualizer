@@ -1,3 +1,4 @@
+use crate::engine::graph::editor::vertex_editor::VertexEditor;
 use crate::engine::*;
 use formualizer_common::LiteralValue;
 use formualizer_parse::parser::{ASTNode, ASTNodeType, ReferenceType};
@@ -266,4 +267,48 @@ fn test_sheet_index_with_formulas() {
 
     // Total should be at least 3 vertices (may have placeholders)
     assert!(index.len() >= 3, "Should have at least 3 vertices total");
+}
+
+/// A structural shift moves vertices; the sheet index must move with them (`move_vertex`). It
+/// used to keep the pre-shift coordinate, so range queries found a shifted formula in a column it
+/// no longer occupies (rowsncolumns/spreadsheet#939 K-06).
+#[test]
+fn test_sheet_index_follows_vertices_moved_by_a_column_insert() {
+    let mut graph = DependencyGraph::new();
+    graph
+        .set_cell_value("Sheet1", 1, 3, LiteralValue::Number(1.0))
+        .unwrap(); // C1
+    let result = graph
+        .set_cell_formula("Sheet1", 2, 3, sum_formula(1, 3, 1, 3)) // C2 = C1+C1
+        .unwrap();
+    let formula_vertex = result.affected_vertices[0];
+    let sheet_id = graph.sheet_id("Sheet1").unwrap();
+    assert!(
+        graph
+            .sheet_index(sheet_id)
+            .unwrap()
+            .vertices_in_col_range(2, 2)
+            .contains(&formula_vertex),
+        "indexed at C before the shift"
+    );
+
+    {
+        let mut editor = VertexEditor::new(&mut graph);
+        editor.insert_columns(sheet_id, 0, 1).unwrap(); // insert before A: C → D
+    }
+
+    let index = graph.sheet_index(sheet_id).unwrap();
+    assert!(
+        !index.vertices_in_col_range(2, 2).contains(&formula_vertex),
+        "no longer indexed at the pre-shift column C"
+    );
+    assert!(
+        index.vertices_in_col_range(3, 3).contains(&formula_vertex),
+        "indexed at the post-shift column D"
+    );
+    assert_eq!(
+        index.vertices_in_col_range(2, 2).len(),
+        0,
+        "nothing is left behind in C"
+    );
 }

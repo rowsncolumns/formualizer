@@ -2290,3 +2290,79 @@ fn test_vertex_editor_change_log() {
         _ => panic!("Expected DeleteName event"),
     }
 }
+
+/// rowsncolumns/spreadsheet#939 K-06: `Col` = B1:B1000 (above `range_expansion_limit`, so the
+/// name depends on the range through stripes and `virtual_deps`), `=SUM(Col)` in C1. The host
+/// inserts a column before A (B5 → C5, C1 → D1) and — because the engine pins absolute name
+/// definitions — redefines `Col` as C1:C1000. The redefined name must not find the moved formula
+/// inside its range (it sits in D now): that made the scheduler report a cycle and `=SUM(Col)`
+/// evaluate as circular (0) instead of 8.
+#[test]
+fn large_named_range_redefined_after_a_column_insert_does_not_cycle_through_the_moved_formula() {
+    let mut engine = Engine::new(TestWorkbook::new(), canonical_cfg());
+    let sid = engine.sheet_id("Sheet1").unwrap();
+    let column_name = |col: u32| {
+        NamedDefinition::Range(RangeRef::new(
+            CellRef::new(sid, Coord::from_excel(1, col, true, true)),
+            CellRef::new(sid, Coord::from_excel(1000, col, true, true)),
+        ))
+    };
+
+    engine
+        .set_cell_value("Sheet1", 5, 2, LiteralValue::Number(8.0)) // B5
+        .unwrap();
+    engine
+        .define_name("Col", column_name(2), NameScope::Workbook)
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 1, 3, parse("=SUM(Col)").unwrap()) // C1
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 1, 3),
+        Some(LiteralValue::Number(8.0))
+    );
+
+    engine.insert_columns("Sheet1", 1, 1).unwrap();
+    engine.delete_name("Col", NameScope::Workbook).unwrap();
+    engine
+        .define_name("Col", column_name(3), NameScope::Workbook)
+        .unwrap();
+    engine.evaluate_all().unwrap();
+
+    assert!(
+        engine.last_cycle_cells().is_empty(),
+        "no cycle: the formula moved to D1, outside C1:C1000, got {:?}",
+        engine.last_cycle_cells()
+    );
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 1, 4),
+        Some(LiteralValue::Number(8.0)),
+        "=SUM(Col) at D1 reads C5"
+    );
+
+    // The sheet index moved the formula with the insert.
+    let d1 = engine
+        .graph
+        .get_vertex_for_cell(&CellRef::new(sid, Coord::from_excel(1, 4, true, true)))
+        .expect("the formula vertex now lives at D1");
+    let index = engine.graph.sheet_index(sid).expect("sheet index");
+    assert!(
+        !index.vertices_in_col_range(2, 2).contains(&d1),
+        "not indexed at C any more"
+    );
+    assert!(
+        index.vertices_in_col_range(3, 3).contains(&d1),
+        "indexed at D"
+    );
+
+    engine
+        .set_cell_value("Sheet1", 6, 3, LiteralValue::Number(2.0)) // C6, inside the name
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 1, 4),
+        Some(LiteralValue::Number(10.0)),
+        "the redefined name keeps tracking its column"
+    );
+}

@@ -748,6 +748,7 @@ impl<'g> VertexEditor<'g> {
 
         // Get old cell reference
         let old_cell_ref = self.graph.get_cell_ref_for_vertex(id);
+        let old_coord = self.graph.vertex_coord(id);
 
         // Create new cell reference
         let sheet_id = self.graph.get_sheet_id(id);
@@ -756,8 +757,10 @@ impl<'g> VertexEditor<'g> {
             Coord::new(new_coord.row(), new_coord.col(), true, true),
         );
 
-        // Update coordinate in store
+        // Update coordinate in store, and the sheet's spatial index that mirrors it
         self.graph.set_coord(id, new_coord);
+        self.graph
+            .update_sheet_index_coord(id, old_coord, new_coord);
 
         // Update edge cache coordinate if needed
         self.graph.update_edge_coord(id, new_coord);
