@@ -373,23 +373,65 @@ impl DependencyGraph {
                     unresolved_name_policy,
                 )?;
             }
-            super::super::arena::ast::AstNodeData::Function { .. } => {
+            super::super::arena::ast::AstNodeData::Function { name_id, .. } => {
+                let name = self.data_store.resolve_ast_string(name_id).to_string();
                 let args: Vec<AstNodeId> = self
                     .data_store
                     .get_args(ast_id)
                     .map_or_else(Vec::new, |args| args.to_vec());
-                for arg in args {
-                    self.extract_dependencies_recursive_arena(
-                        arg,
-                        current_sheet_id,
-                        dependencies,
-                        range_dependencies,
-                        created_placeholders,
-                        named_dependencies,
-                        unresolved_names,
-                        local_scopes,
-                        unresolved_name_policy,
-                    )?;
+                // See the AST walker: a named-lambda call depends on the name; LAMBDA / LET
+                // parameters are local names, never dependencies (spreadsheet#939 G-07).
+                self.push_named_callable_dependency(
+                    &name,
+                    current_sheet_id,
+                    dependencies,
+                    named_dependencies,
+                    local_scopes,
+                );
+                if let Some((names_at, body_at)) = local_binding_layout(&name, args.len()) {
+                    let mut scope = FxHashSet::default();
+                    for &i in &names_at {
+                        if let Some(n) = self.arena_local_binding_name(args[i]) {
+                            scope.insert(n.to_ascii_uppercase());
+                        }
+                    }
+                    local_scopes.push(scope);
+                    let mut result = Ok(());
+                    for (i, arg) in args.iter().enumerate() {
+                        if names_at.contains(&i) || !body_at.contains(&i) {
+                            continue;
+                        }
+                        result = self.extract_dependencies_recursive_arena(
+                            *arg,
+                            current_sheet_id,
+                            dependencies,
+                            range_dependencies,
+                            created_placeholders,
+                            named_dependencies,
+                            unresolved_names,
+                            local_scopes,
+                            unresolved_name_policy,
+                        );
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                    local_scopes.pop();
+                    result?;
+                } else {
+                    for arg in args {
+                        self.extract_dependencies_recursive_arena(
+                            arg,
+                            current_sheet_id,
+                            dependencies,
+                            range_dependencies,
+                            created_placeholders,
+                            named_dependencies,
+                            unresolved_names,
+                            local_scopes,
+                            unresolved_name_policy,
+                        )?;
+                    }
                 }
             }
             super::super::arena::ast::AstNodeData::Array { .. } => {
@@ -423,6 +465,48 @@ impl DependencyGraph {
                 ..
             } => Some(self.data_store.resolve_ast_string(*name_id).to_string()),
             _ => None,
+        }
+    }
+
+    /// A `LAMBDA` parameter / `LET` name in arena form: a bare name (`x`) or Excel's optional
+    /// spelling `[y]`, which the parser reads as a bare table reference.
+    fn arena_local_binding_name(&self, ast_id: AstNodeId) -> Option<String> {
+        use super::super::arena::ast::{AstNodeData, CompactRefType};
+        match self.data_store.get_node(ast_id)? {
+            AstNodeData::Reference {
+                ref_type: CompactRefType::NamedRange(name_id),
+                ..
+            }
+            | AstNodeData::Reference {
+                ref_type:
+                    CompactRefType::Table {
+                        name_id,
+                        specifier_id: None,
+                    },
+                ..
+            } => Some(self.data_store.resolve_ast_string(*name_id).to_string()),
+            _ => None,
+        }
+    }
+
+    /// `=Dbl(21)` where `Dbl` is a defined name: record the name as a dependency of the formula so
+    /// redefining the name recalculates its callers. Builtins are unaffected (a defined name that
+    /// happens to spell a builtin adds a harmless edge); a LET/LAMBDA-local `f(3)` is skipped.
+    fn push_named_callable_dependency(
+        &self,
+        name: &str,
+        current_sheet_id: SheetId,
+        dependencies: &mut FxHashSet<VertexId>,
+        named_dependencies: &mut Vec<VertexId>,
+        local_scopes: &[FxHashSet<String>],
+    ) {
+        let key = name.to_ascii_uppercase();
+        if local_scopes.iter().rev().any(|scope| scope.contains(&key)) {
+            return;
+        }
+        if let Some(named_range) = self.resolve_name_entry(name, current_sheet_id) {
+            dependencies.insert(named_range.vertex);
+            named_dependencies.push(named_range.vertex);
         }
     }
 
@@ -776,19 +860,66 @@ impl DependencyGraph {
                     unresolved_name_policy,
                 )?;
             }
-            ASTNodeType::Function { args, .. } => {
-                for arg in args {
-                    self.extract_dependencies_recursive(
-                        arg,
-                        current_sheet_id,
-                        dependencies,
-                        range_dependencies,
-                        created_placeholders,
-                        named_dependencies,
-                        unresolved_names,
-                        local_scopes,
-                        unresolved_name_policy,
-                    )?;
+            ASTNodeType::Function { name, args } => {
+                // A call to a lambda-valued defined name (`=Dbl(21)`) depends on that name, so
+                // redefining it recalculates the callers (spreadsheet#939 G-07).
+                self.push_named_callable_dependency(
+                    name,
+                    current_sheet_id,
+                    dependencies,
+                    named_dependencies,
+                    local_scopes,
+                );
+                // `LAMBDA(x,[y],body)` / `LET(n1,v1,…,body)` bind LOCAL names: they are not
+                // workbook names (an undefined one must not fail the formula) and never
+                // dependencies. Only the body and the LET values are walked.
+                let local = local_binding_layout(name, args.len());
+                if let Some((names_at, body_at)) = local {
+                    let mut scope = FxHashSet::default();
+                    for &i in &names_at {
+                        if let Some(n) = local_binding_name(&args[i]) {
+                            scope.insert(n.to_ascii_uppercase());
+                        }
+                    }
+                    local_scopes.push(scope);
+                    let walked = args
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| !names_at.contains(i))
+                        .filter(|(i, _)| body_at.contains(i));
+                    let mut result = Ok(());
+                    for (_, arg) in walked {
+                        result = self.extract_dependencies_recursive(
+                            arg,
+                            current_sheet_id,
+                            dependencies,
+                            range_dependencies,
+                            created_placeholders,
+                            named_dependencies,
+                            unresolved_names,
+                            local_scopes,
+                            unresolved_name_policy,
+                        );
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                    local_scopes.pop();
+                    result?;
+                } else {
+                    for arg in args {
+                        self.extract_dependencies_recursive(
+                            arg,
+                            current_sheet_id,
+                            dependencies,
+                            range_dependencies,
+                            created_placeholders,
+                            named_dependencies,
+                            unresolved_names,
+                            local_scopes,
+                            unresolved_name_policy,
+                        )?;
+                    }
                 }
             }
             ASTNodeType::Call { callee, args } => {
@@ -922,5 +1053,45 @@ impl DependencyGraph {
             }
             _ => false,
         }
+    }
+}
+
+/// A `LAMBDA` parameter / `LET` name in AST form: a bare name (`x`) or Excel's optional spelling
+/// `[y]`, which the parser reads as a bare table reference.
+fn local_binding_name(node: &ASTNode) -> Option<&str> {
+    match &node.node_type {
+        ASTNodeType::Reference {
+            reference: ReferenceType::NamedRange(name),
+            ..
+        } => Some(name.as_str()),
+        ASTNodeType::Reference {
+            reference: ReferenceType::Table(table),
+            ..
+        } if table.specifier.is_none() && !table.name.is_empty() => Some(table.name.as_str()),
+        _ => None,
+    }
+}
+
+/// Which arguments of a local-binding function are NAMES and which are expressions to walk,
+/// read from the function's own dependency contract (the registry is the single authority for
+/// `LET` / `LAMBDA` semantics): `LocalBindingPairs` → names at the even indices before the body,
+/// values at the odd ones plus the body; `LambdaParameters` → every argument but the body is a
+/// name. `None` for any other function or an arity the contract rejects.
+fn local_binding_layout(name: &str, arg_count: usize) -> Option<(Vec<usize>, Vec<usize>)> {
+    use crate::function_contract::FunctionArgumentDependencyContract as Arguments;
+    let contract = crate::function_registry::get("", name)?.dependency_contract(arg_count)?;
+    if arg_count == 0 {
+        return None;
+    }
+    let body = arg_count - 1;
+    match contract.arguments {
+        Arguments::LambdaParameters => Some(((0..body).collect(), vec![body])),
+        Arguments::LocalBindingPairs if arg_count >= 3 && arg_count % 2 == 1 => {
+            let names: Vec<usize> = (0..body).step_by(2).collect();
+            let mut walked: Vec<usize> = (1..body).step_by(2).collect();
+            walked.push(body);
+            Some((names, walked))
+        }
+        _ => None,
     }
 }

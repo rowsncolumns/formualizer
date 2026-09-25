@@ -6971,6 +6971,34 @@ impl Function for ZTestFn {
 /// ```
 #[derive(Debug)]
 pub struct TrendFn;
+
+/// Excel spills `TREND` / `GROWTH` in the orientation of `new_x` — or of `known_y` when `new_x`
+/// is omitted: a single-column input spills DOWN, anything else across (rowsncolumns/spreadsheet#939
+/// G-09). A 1×1 input is a scalar either way.
+fn regression_output_is_column(arg: &ArgumentHandle<'_, '_>) -> bool {
+    match arg.value() {
+        Ok(crate::traits::CalcValue::Range(rv)) => {
+            let (rows, cols) = rv.dims();
+            rows > 1 && cols == 1
+        }
+        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Array(rows))) => {
+            rows.len() > 1 && rows.iter().all(|r| r.len() == 1)
+        }
+        _ => false,
+    }
+}
+
+fn regression_output(
+    predicted: Vec<LiteralValue>,
+    column: bool,
+) -> crate::traits::CalcValue<'static> {
+    let rows = if column {
+        predicted.into_iter().map(|v| vec![v]).collect()
+    } else {
+        vec![predicted]
+    };
+    crate::traits::CalcValue::Scalar(LiteralValue::Array(rows))
+}
 /// [formualizer-docgen:schema:start]
 /// Name: TREND
 /// Type: TrendFn
@@ -7038,7 +7066,8 @@ impl Function for TrendFn {
         }
 
         // Get new_x's or use known_x's - check if argument is empty/omitted
-        let new_x_vals = if args.len() >= 3 && !is_arg_empty(&args[2]) {
+        let has_new_x = args.len() >= 3 && !is_arg_empty(&args[2]);
+        let new_x_vals = if has_new_x {
             collect_numeric_stats(&args[2..3])?
         } else {
             x_vals.clone()
@@ -7116,10 +7145,11 @@ impl Function for TrendFn {
             .map(|&x| LiteralValue::Number(slope * x + intercept))
             .collect();
 
-        // Return as 1xN array (row vector)
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Array(vec![
+        let shape_arg = if has_new_x { &args[2] } else { &args[0] };
+        Ok(regression_output(
             predicted,
-        ])))
+            regression_output_is_column(shape_arg),
+        ))
     }
 }
 
@@ -7228,7 +7258,8 @@ impl Function for GrowthFn {
         }
 
         // Get new_x's or use known_x's - check if argument is empty/omitted
-        let new_x_vals = if args.len() >= 3 && !is_arg_empty(&args[2]) {
+        let has_new_x = args.len() >= 3 && !is_arg_empty(&args[2]);
+        let new_x_vals = if has_new_x {
             collect_numeric_stats(&args[2..3])?
         } else {
             x_vals.clone()
@@ -7314,10 +7345,11 @@ impl Function for GrowthFn {
             .map(|&x| LiteralValue::Number(b * m.powf(x)))
             .collect();
 
-        // Return as 1xN array (row vector)
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Array(vec![
+        let shape_arg = if has_new_x { &args[2] } else { &args[0] };
+        Ok(regression_output(
             predicted,
-        ])))
+            regression_output_is_column(shape_arg),
+        ))
     }
 }
 

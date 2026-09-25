@@ -352,6 +352,14 @@ impl<'a, R: EvaluationContext> NamedRangeResolver for RecordingContext<'a, R> {
     fn named_range_is_constant(&self, name: &str) -> bool {
         self.engine.named_range_is_constant(name)
     }
+
+    fn named_lambda_ast(
+        &self,
+        name: &str,
+        current_sheet: &str,
+    ) -> Option<formualizer_parse::parser::ASTNode> {
+        self.engine.named_lambda_ast(name, current_sheet)
+    }
 }
 
 impl<'a, R: EvaluationContext> TableResolver for RecordingContext<'a, R> {
