@@ -2189,9 +2189,9 @@ impl Function for MaxIfsFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        eval_maxminifs(args, true)
+        eval_maxminifs(args, ctx, true)
     }
 }
 
@@ -2278,15 +2278,16 @@ impl Function for MinIfsFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
-        eval_maxminifs(args, false)
+        eval_maxminifs(args, ctx, false)
     }
 }
 
 /// Shared implementation for MAXIFS and MINIFS
 fn eval_maxminifs<'a, 'b>(
     args: &[ArgumentHandle<'a, 'b>],
+    ctx: &dyn FunctionContext<'b>,
     is_max: bool,
 ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
     // Validate argument count: must be target_range + N pairs
@@ -2312,7 +2313,8 @@ fn eval_maxminifs<'a, 'b>(
             let mut all_match = true;
             for i in (1..args.len()).step_by(2) {
                 let crit_val = args[i].value()?.into_literal();
-                let pred = crate::args::parse_criteria(&args[i + 1].value()?.into_literal())?;
+                let pred =
+                    crate::args::parse_criteria_in(&args[i + 1].value()?.into_literal(), ctx)?;
                 if !criteria_match(&pred, &crit_val) {
                     all_match = false;
                     break;
@@ -2346,7 +2348,7 @@ fn eval_maxminifs<'a, 'b>(
                 _ => None,
             },
         };
-        let pred = crate::args::parse_criteria(&args[i + 1].value()?.into_literal())?;
+        let pred = crate::args::parse_criteria_in(&args[i + 1].value()?.into_literal(), ctx)?;
         criteria_ranges.push(crit_view);
         predicates.push(pred);
     }

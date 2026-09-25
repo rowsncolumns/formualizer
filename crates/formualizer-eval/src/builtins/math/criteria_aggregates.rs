@@ -116,7 +116,7 @@ fn eval_if_family<'a, 'b>(
                 )),
             )));
         }
-        let pred = crate::args::parse_criteria(&args[1].value()?.into_literal())?;
+        let pred = crate::args::parse_criteria_in(&args[1].value()?.into_literal(), ctx)?;
         let crit_rv = args[0].range_view().ok();
         let crit_val = if crit_rv.is_none() {
             Some(non_reference_range_arg(&args[0])?)
@@ -173,7 +173,8 @@ fn eval_if_family<'a, 'b>(
                     val = Some(non_reference_range_arg(&args[i])?);
                 }
 
-                let pred = crate::args::parse_criteria(&args[i + 1].value()?.into_literal())?;
+                let pred =
+                    crate::args::parse_criteria_in(&args[i + 1].value()?.into_literal(), ctx)?;
                 crit_specs.push((rv, pred, val));
             }
         } else {
@@ -213,7 +214,8 @@ fn eval_if_family<'a, 'b>(
                     val = Some(non_reference_range_arg(&args[i])?);
                 }
 
-                let pred = crate::args::parse_criteria(&args[i + 1].value()?.into_literal())?;
+                let pred =
+                    crate::args::parse_criteria_in(&args[i + 1].value()?.into_literal(), ctx)?;
                 crit_specs.push((rv, pred, val));
             }
         }

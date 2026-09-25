@@ -131,6 +131,29 @@ pub fn too_few_arguments(min_args: usize, got: usize) -> ExcelError {
 /// matches blank cells and empty-string values, `"="` matches truly blank
 /// cells, `"<>"` matches every non-blank cell.
 pub fn parse_criteria(v: &LiteralValue) -> Result<CriteriaPredicate, ExcelError> {
+    parse_criteria_with(v, &|_| None)
+}
+
+/// [`parse_criteria`] for a worksheet-function argument: the value part of a text criterion
+/// that is not a number but parses as date/time text under the evaluating context's clock
+/// (`"1/1/2024"`, `">1/1/2024"`, `"<=2024-03-01"`, `"12:00 PM"`) is coerced to its serial,
+/// exactly as `"1/1/2024"+0` and `DATEVALUE` coerce it — Excel matches date cells with
+/// `COUNTIF(rng,"1/1/2024")` and `SUMIF(rng,">=3/1/2024",sum)`.
+pub fn parse_criteria_in(
+    v: &LiteralValue,
+    ctx: &dyn crate::traits::FunctionContext<'_>,
+) -> Result<CriteriaPredicate, ExcelError> {
+    parse_criteria_with(v, &|text| {
+        crate::coercion::parse_date_time_text_with_clock(text, ctx.clock())
+    })
+}
+
+/// [`parse_criteria`] with a fallback parser for the value part of a text criterion that is
+/// not a plain number (`date_text` returns the serial of date/time text, `None` otherwise).
+pub fn parse_criteria_with(
+    v: &LiteralValue,
+    date_text: &dyn Fn(&str) -> Option<f64>,
+) -> Result<CriteriaPredicate, ExcelError> {
     match v {
         LiteralValue::Text(s) => {
             let s_trim = s.trim();
@@ -163,7 +186,8 @@ pub fn parse_criteria(v: &LiteralValue) -> Result<CriteriaPredicate, ExcelError>
                             _ => unreachable!(),
                         });
                     }
-                    if let Some(n) = parse_criteria_number(rhs_trim) {
+                    if let Some(n) = parse_criteria_number(rhs_trim).or_else(|| date_text(rhs_trim))
+                    {
                         return Ok(match *op {
                             ">=" => CriteriaPredicate::Ge(n),
                             "<=" => CriteriaPredicate::Le(n),
@@ -223,7 +247,7 @@ pub fn parse_criteria(v: &LiteralValue) -> Result<CriteriaPredicate, ExcelError>
             } else if lower == "false" {
                 return Ok(CriteriaPredicate::Eq(LiteralValue::Boolean(false)));
             }
-            if let Some(n) = parse_criteria_number(&plain) {
+            if let Some(n) = parse_criteria_number(&plain).or_else(|| date_text(&plain)) {
                 return Ok(CriteriaPredicate::Eq(LiteralValue::Number(n)));
             }
             Ok(CriteriaPredicate::Eq(LiteralValue::Text(
@@ -240,7 +264,7 @@ pub fn parse_criteria(v: &LiteralValue) -> Result<CriteriaPredicate, ExcelError>
         LiteralValue::Array(arr) => {
             // Treat 1x1 array literals as scalars for criteria parsing
             if arr.len() == 1 && arr.first().map(|r| r.len()).unwrap_or(0) == 1 {
-                parse_criteria(&arr[0][0])
+                parse_criteria_with(&arr[0][0], date_text)
             } else {
                 Ok(CriteriaPredicate::Eq(LiteralValue::Array(arr.clone())))
             }
