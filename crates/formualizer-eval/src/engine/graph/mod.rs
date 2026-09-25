@@ -6,7 +6,9 @@ use crate::formula_plane::authority::FormulaAuthority;
 use formualizer_common::{
     CoordBuildHasher, ExcelError, ExcelErrorKind, LiteralValue, PackedSheetCell,
 };
-use formualizer_parse::parser::{ASTNode, ASTNodeType, ReferenceType};
+use formualizer_parse::parser::{
+    ASTNode, ASTNodeType, ReferenceType, SpecialItem, TableReference, TableSpecifier,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 #[cfg(debug_assertions)]
@@ -2479,20 +2481,44 @@ impl DependencyGraph {
         let involves_this_row = crate::structured::involves_this_row(spec);
 
         let table = if tref.name.is_empty() {
-            // This-row shorthand ([@Col], [@], [[#This Row],[Col]]): the table
-            // is the one containing the evaluating cell.
-            if !involves_this_row {
-                return Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
-                    "Unnamed structured reference form is not supported".to_string(),
-                ));
-            }
+            // Unqualified form: the table is the one containing the evaluating cell. Excel
+            // accepts every specifier this way inside a table — the this-row shorthand ([@Col],
+            // [@], [[#This Row],[Col]]) and the bare column / item forms its own totals row uses
+            // (`=SUBTOTAL(109,[Qty])`, `[[#Totals],[Qty]]`, `[#Totals]`); outside any table the
+            // reference is `#NAME?` (rowsncolumns/spreadsheet#939 K-07).
             let Some(table) = self.find_table_containing_cell(cell) else {
                 return Err(ExcelError::new(ExcelErrorKind::Name).with_message(
-                    "This-row structured reference used outside a table".to_string(),
+                    "Unqualified structured reference used outside a table".to_string(),
                 ));
             };
             table
         } else {
+            // The parser reads a bare `[X]` as the data-body shorthand of a table named X. Inside a
+            // table whose column is X and with no table of that name, it is Excel's unqualified
+            // column reference (`=SUBTOTAL(109,[Qty])` in the totals row): qualify it with the
+            // containing table (rowsncolumns/spreadsheet#939 K-07).
+            if !involves_this_row
+                && matches!(
+                    tref.specifier,
+                    Some(TableSpecifier::SpecialItem(SpecialItem::Data))
+                )
+                && self.resolve_table_entry(&tref.name).is_none()
+            {
+                if let Some(table) = self.find_table_containing_cell(cell) {
+                    if table.sheet_id() == cell.sheet_id {
+                        let column = tref.name.to_lowercase();
+                        if table.headers.iter().any(|h| h.to_lowercase() == column) {
+                            *tref = TableReference {
+                                name: table.name.clone(),
+                                specifier: Some(TableSpecifier::Column(std::mem::take(
+                                    &mut tref.name,
+                                ))),
+                            };
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
             // Named table: only this-row forms need the evaluating cell here;
             // everything else resolves at evaluation time.
             if !involves_this_row {
@@ -2508,6 +2534,13 @@ impl DependencyGraph {
             }
             table
         };
+
+        if !involves_this_row {
+            // A bare column / item form inside a table is that table's named form: qualify the
+            // reference so dependency extraction and evaluation resolve it like `Table[Col]`.
+            tref.name = table.name.clone();
+            return Ok(true);
+        }
 
         let geom = crate::structured::TableGeometry {
             sheet: None,
