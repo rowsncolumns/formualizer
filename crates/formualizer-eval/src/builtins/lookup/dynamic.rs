@@ -20,9 +20,7 @@
 //! - PERFORMANCE: streaming FILTER without full materialization; UNIQUE using smallvec for tiny sets.
 
 use super::super::utils::collapse_if_scalar;
-use super::lookup_utils::{
-    PreparedLookupMatcher, cmp_for_lookup, sort_ordering, value_to_f64_lenient,
-};
+use super::lookup_utils::{PreparedLookupMatcher, cmp_for_approx_lookup, sort_ordering};
 use crate::args::{ArgSchema, CoercionPolicy, ShapeKind};
 use crate::engine::lookup_index_cache::LookupAxis;
 use crate::function::Function; // FnCaps imported via macro
@@ -402,13 +400,9 @@ impl Function for XLookupFn {
                 }
             }
         } else if match_mode == -1 || match_mode == 1 {
-            let needle_num = value_to_f64_lenient(&needle);
-            let mut best_idx: Option<usize> = None;
-            let mut best_val: f64 = if match_mode == -1 {
-                f64::NEG_INFINITY
-            } else {
-                f64::INFINITY
-            };
+            // Excel's approximate-match order (numbers < text < logicals, no cross-type
+            // coercion) decides "next smaller" / "next larger" — spreadsheet#939 Z-08.
+            let mut best: Option<(usize, LiteralValue)> = None;
 
             let mut prev: Option<LiteralValue> = None;
             for i in 0..lookup_len {
@@ -418,36 +412,30 @@ impl Function for XLookupFn {
                     lookup_view.get_cell(0, i)
                 };
 
-                if let Some(p) = prev.as_ref() {
-                    let sorted_ok = cmp_for_lookup(p, &cand).is_some_and(|o| o <= 0);
-                    if !sorted_ok {
-                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                            ExcelError::new(ExcelErrorKind::Na),
-                        )));
-                    }
+                if let Some(p) = prev.as_ref()
+                    && cmp_for_approx_lookup(p, &cand) == std::cmp::Ordering::Greater
+                {
+                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                        ExcelError::new(ExcelErrorKind::Na),
+                    )));
                 }
                 prev = Some(cand.clone());
 
-                if cmp_for_lookup(&cand, &needle).is_some_and(|o| o == 0) {
-                    found = Some(i);
-                    break;
-                }
-
-                if let (Some(nn), Some(vv)) = (needle_num, value_to_f64_lenient(&cand)) {
-                    if match_mode == -1 {
-                        if vv <= nn && vv > best_val {
-                            best_val = vv;
-                            best_idx = Some(i);
+                match cmp_for_approx_lookup(&cand, &needle) {
+                    std::cmp::Ordering::Equal => {
+                        found = Some(i);
+                        break;
+                    }
+                    side => {
+                        if approx_candidate_improves(match_mode, side, &cand, best.as_ref()) {
+                            best = Some((i, cand));
                         }
-                    } else if vv >= nn && vv < best_val {
-                        best_val = vv;
-                        best_idx = Some(i);
                     }
                 }
             }
 
             if found.is_none() {
-                found = best_idx;
+                found = best.map(|(i, _)| i);
             }
         } else {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
@@ -733,14 +721,10 @@ impl Function for XMatchFn {
                 }
             }
         } else if match_mode == -1 || match_mode == 1 {
-            // Approximate match: -1 = exact or next smaller, 1 = exact or next larger
-            let needle_num = value_to_f64_lenient(&needle);
-            let mut best_idx: Option<usize> = None;
-            let mut best_val: f64 = if match_mode == -1 {
-                f64::NEG_INFINITY
-            } else {
-                f64::INFINITY
-            };
+            // Approximate match: -1 = exact or next smaller, 1 = exact or next larger, in
+            // Excel's approximate-match order (numbers < text < logicals, no cross-type
+            // coercion) — spreadsheet#939 Z-08.
+            let mut best: Option<(usize, LiteralValue)> = None;
 
             // Determine iteration direction based on search_mode
             let use_reverse = search_mode == -1 || search_mode == -2;
@@ -762,10 +746,11 @@ impl Function for XMatchFn {
                         lookup_view.get_cell(0, i)
                     };
                     if let Some(p) = prev.as_ref() {
+                        let order = cmp_for_approx_lookup(p, &cand);
                         let sorted_ok = if ascending {
-                            cmp_for_lookup(p, &cand).is_some_and(|o| o <= 0)
+                            order != std::cmp::Ordering::Greater
                         } else {
-                            cmp_for_lookup(p, &cand).is_some_and(|o| o >= 0)
+                            order != std::cmp::Ordering::Less
                         };
                         if !sorted_ok {
                             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
@@ -784,30 +769,21 @@ impl Function for XMatchFn {
                     lookup_view.get_cell(0, i)
                 };
 
-                if cmp_for_lookup(&cand, &needle).is_some_and(|o| o == 0) {
-                    found = Some(i);
-                    break;
-                }
-
-                if let (Some(nn), Some(vv)) = (needle_num, value_to_f64_lenient(&cand)) {
-                    if match_mode == -1 {
-                        // exact or next smaller
-                        if vv <= nn && vv > best_val {
-                            best_val = vv;
-                            best_idx = Some(i);
-                        }
-                    } else {
-                        // match_mode == 1: exact or next larger
-                        if vv >= nn && vv < best_val {
-                            best_val = vv;
-                            best_idx = Some(i);
+                match cmp_for_approx_lookup(&cand, &needle) {
+                    std::cmp::Ordering::Equal => {
+                        found = Some(i);
+                        break;
+                    }
+                    side => {
+                        if approx_candidate_improves(match_mode, side, &cand, best.as_ref()) {
+                            best = Some((i, cand));
                         }
                     }
                 }
             }
 
             if found.is_none() {
-                found = best_idx;
+                found = best.map(|(i, _)| i);
             }
         } else {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
@@ -824,6 +800,25 @@ impl Function for XMatchFn {
             ))),
         }
     }
+}
+
+/// `XLOOKUP` / `XMATCH` approximate selection: for match_mode -1 (next smaller) a candidate
+/// BELOW the needle beats the current best when it is larger; for match_mode 1 (next larger) a
+/// candidate ABOVE the needle beats it when it is smaller. `side` is the candidate's order
+/// relative to the needle (never `Equal` here).
+fn approx_candidate_improves(
+    match_mode: i64,
+    side: std::cmp::Ordering,
+    cand: &LiteralValue,
+    best: Option<&(usize, LiteralValue)>,
+) -> bool {
+    use std::cmp::Ordering;
+    let (wanted_side, better) = if match_mode == -1 {
+        (Ordering::Less, Ordering::Greater)
+    } else {
+        (Ordering::Greater, Ordering::Less)
+    };
+    side == wanted_side && best.is_none_or(|(_, b)| cmp_for_approx_lookup(cand, b) == better)
 }
 
 /// A numeric argument that may be a scalar or an array/range of numbers (`SORT`'s

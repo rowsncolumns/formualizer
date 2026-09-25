@@ -14,7 +14,7 @@
 //!   * If width > height  → search the first *row*, return from the last *row*.
 //!   * Otherwise          → search the first *column*, return from the last *column*.
 
-use super::lookup_utils::cmp_for_lookup;
+use super::lookup_utils::cmp_for_approx_lookup;
 use crate::args::{ArgSchema, CoercionPolicy, ShapeKind};
 use crate::function::Function;
 use crate::traits::{ArgumentHandle, CalcValue, FunctionContext};
@@ -32,10 +32,11 @@ fn approx_match_ascending(slice: &[LiteralValue], needle: &LiteralValue) -> Opti
     let mut hi: usize = slice.len();
     while lo < hi {
         let mid = (lo + hi) / 2;
-        match cmp_for_lookup(&slice[mid], needle) {
-            Some(c) if c > 0 => hi = mid,
-            Some(_) => lo = mid + 1,
-            None => hi = mid,
+        // Excel's approximate-match order: numbers < text < logicals, no cross-type coercion.
+        if cmp_for_approx_lookup(&slice[mid], needle) == std::cmp::Ordering::Greater {
+            hi = mid;
+        } else {
+            lo = mid + 1;
         }
     }
     if lo == 0 { None } else { Some(lo - 1) }
