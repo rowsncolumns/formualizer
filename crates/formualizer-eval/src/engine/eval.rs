@@ -4083,12 +4083,49 @@ where
         let demoted = self
             .commit_name_dependent_span_demotion(prepared)
             .map_err(Self::editor_error_to_excel)?;
+        let volatile = self.named_definition_is_volatile(&definition);
         self.graph.define_name(name, definition, scope)?;
+        self.graph.mark_name_volatile(name, scope, volatile)?;
         self.record_formula_plane_structural_change(StructuralScope::AllSheets);
         if !demoted {
             self.mark_topology_edited();
         }
         Ok(())
+    }
+
+    /// Whether a name's definition re-evaluates every calc: a named formula that calls a
+    /// volatile function anywhere (`=OFFSET(…)`, `=INDIRECT(…)`, `=TODAY()`), so its dependents
+    /// follow cells the definition has no static edge to.
+    fn named_definition_is_volatile(&self, definition: &NamedDefinition) -> bool {
+        match definition {
+            NamedDefinition::Formula { ast, .. } => self.ast_calls_volatile_function(ast),
+            _ => false,
+        }
+    }
+
+    fn ast_calls_volatile_function(&self, ast: &ASTNode) -> bool {
+        if ast.contains_volatile() {
+            return true;
+        }
+        match &ast.node_type {
+            ASTNodeType::Function { name, args } => {
+                crate::traits::FunctionProvider::function_capabilities(self, "", name)
+                    .is_some_and(|caps| caps.contains(FnCaps::VOLATILE))
+                    || args.iter().any(|arg| self.ast_calls_volatile_function(arg))
+            }
+            ASTNodeType::BinaryOp { left, right, .. } => {
+                self.ast_calls_volatile_function(left) || self.ast_calls_volatile_function(right)
+            }
+            ASTNodeType::UnaryOp { expr, .. } => self.ast_calls_volatile_function(expr),
+            ASTNodeType::Array(rows) => rows
+                .iter()
+                .any(|row| row.iter().any(|cell| self.ast_calls_volatile_function(cell))),
+            ASTNodeType::Call { callee, args } => {
+                self.ast_calls_volatile_function(callee)
+                    || args.iter().any(|arg| self.ast_calls_volatile_function(arg))
+            }
+            ASTNodeType::Literal(_) | ASTNodeType::Reference { .. } => false,
+        }
     }
 
     pub fn update_name(
@@ -4109,7 +4146,9 @@ where
         let demoted = self
             .commit_name_dependent_span_demotion(prepared)
             .map_err(Self::editor_error_to_excel)?;
+        let volatile = self.named_definition_is_volatile(&definition);
         self.graph.update_name(name, definition, scope)?;
+        self.graph.mark_name_volatile(name, scope, volatile)?;
         self.record_formula_plane_structural_change(StructuralScope::AllSheets);
         if !demoted {
             self.mark_topology_edited();
@@ -17601,21 +17640,13 @@ where
                     .unwrap_or_else(|| self.graph.make_cell_ref(sheet_name, 0, 0));
                 let interpreter = Interpreter::new_with_cell(self, sheet_name, cell_ref);
                 match interpreter.evaluate_ast(ast) {
+                    // An array-valued named formula (`Twice := =Data*2`) keeps its shape: the
+                    // cached value is what `SUM(Twice)` / `=Twice` read back through
+                    // `resolve_range_view`, and a scalar-only cache turned it into an error.
                     Ok(cv) => {
                         let value = cv.into_literal();
-                        match value {
-                            LiteralValue::Array(_) => {
-                                let err = ExcelError::new(ExcelErrorKind::NImpl)
-                                    .with_message("Array result in scalar named range".to_string());
-                                let err_val = LiteralValue::Error(err.clone());
-                                self.graph.update_vertex_value(vertex_id, err_val.clone());
-                                Ok(err_val)
-                            }
-                            other => {
-                                self.graph.update_vertex_value(vertex_id, other.clone());
-                                Ok(other)
-                            }
-                        }
+                        self.graph.update_vertex_value(vertex_id, value.clone());
+                        Ok(value)
                     }
                     Err(err) => {
                         let err_val = LiteralValue::Error(err.clone());
@@ -22651,6 +22682,158 @@ where
     }
 }
 
+thread_local! {
+    /// Nesting depth of formula-name reference resolution on this thread. A name defined through
+    /// another name (`Alias := =Data`, `Dyn := =OFFSET(Base,…)`) resolves through that name's own
+    /// definition; a chain that loops back onto itself must give up instead of recursing without
+    /// bound.
+    static FORMULA_NAME_REFERENCE_DEPTH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// Longest name→name definition chain followed before a reference-valued name is treated as a
+/// value (Excel reports the loop as a circular reference).
+const MAX_FORMULA_NAME_REFERENCE_DEPTH: u8 = 16;
+
+impl<R> Engine<R>
+where
+    R: EvaluationContext,
+{
+    /// The concrete cell/range a `Formula`-defined name denotes right now — `=Sheet1!$A$1:$A$3`,
+    /// `=OFFSET(…)`, `=INDEX(…)`, `=OtherName` — with an unqualified reference bound to the name's
+    /// sheet (its scope sheet, else `current_sheet`), as Excel does. `None` when the definition
+    /// evaluates to a value rather than a reference (`=SUM(…)*2`, `=Data*2`, `={1,2,3}`), when it
+    /// does not evaluate as a reference at all, or when a name→name chain loops.
+    pub(crate) fn formula_name_reference(
+        &self,
+        ast: &ASTNode,
+        scope: NameScope,
+        current_sheet: &str,
+    ) -> Option<ReferenceType> {
+        let depth = FORMULA_NAME_REFERENCE_DEPTH.with(|d| d.get());
+        if depth >= MAX_FORMULA_NAME_REFERENCE_DEPTH {
+            return None;
+        }
+        FORMULA_NAME_REFERENCE_DEPTH.with(|d| d.set(depth + 1));
+        let resolved = self.formula_name_reference_inner(ast, scope, current_sheet);
+        FORMULA_NAME_REFERENCE_DEPTH.with(|d| d.set(depth));
+        resolved
+    }
+
+    /// [`Self::resolve_range_view`] for a `Formula`-defined name (the caller holds the depth
+    /// guard): the concrete range it denotes when reference-valued, else its value — the cached
+    /// vertex value when the name has been evaluated, a live evaluation otherwise.
+    fn formula_name_view<'c>(
+        &'c self,
+        ast: &ASTNode,
+        scope: NameScope,
+        vertex: VertexId,
+        current_id: SheetId,
+        current_sheet: &str,
+    ) -> Result<RangeView<'c>, ExcelError> {
+        if let Some(concrete) = self.formula_name_reference(ast, scope, current_sheet) {
+            return self.resolve_range_view(&concrete, current_sheet);
+        }
+        let rows = match self.graph.get_value(vertex) {
+            Some(LiteralValue::Array(rows)) => rows,
+            Some(value) => vec![vec![value]],
+            None => {
+                let sheet_name = match scope {
+                    NameScope::Sheet(id) => self.graph.sheet_name(id),
+                    NameScope::Workbook => self.graph.sheet_name(current_id),
+                };
+                let interpreter = Interpreter::new(self, sheet_name);
+                match interpreter.evaluate_ast(ast) {
+                    Ok(crate::traits::CalcValue::Range(view)) => return Ok(view),
+                    Ok(cv) => match cv.into_literal() {
+                        LiteralValue::Array(rows) => rows,
+                        value => vec![vec![value]],
+                    },
+                    Err(err) => vec![vec![LiteralValue::Error(err)]],
+                }
+            }
+        };
+        Ok(RangeView::from_owned_rows(rows, self.config.date_system))
+    }
+
+    fn formula_name_reference_inner(
+        &self,
+        ast: &ASTNode,
+        scope: NameScope,
+        current_sheet: &str,
+    ) -> Option<ReferenceType> {
+        let sheet_name = match scope {
+            NameScope::Sheet(id) => self.graph.sheet_name(id),
+            NameScope::Workbook => current_sheet,
+        };
+        let interpreter = Interpreter::new(self, sheet_name);
+        match interpreter.evaluate_ast_as_reference(ast).ok()? {
+            ReferenceType::NamedRange(inner) => {
+                let current_id = self
+                    .graph
+                    .sheet_id(sheet_name)
+                    .unwrap_or_else(|| self.graph.default_sheet_id());
+                let entry = self.graph.resolve_name_entry(&inner, current_id)?;
+                match &entry.definition {
+                    NamedDefinition::Cell(c) => Some(ReferenceType::Cell {
+                        sheet: Some(self.graph.sheet_name(c.sheet_id).to_string()),
+                        row: c.coord.row() + 1,
+                        col: c.coord.col() + 1,
+                        row_abs: true,
+                        col_abs: true,
+                    }),
+                    NamedDefinition::Range(r) => Some(ReferenceType::Range {
+                        sheet: Some(self.graph.sheet_name(r.start.sheet_id).to_string()),
+                        start_row: Some(r.start.coord.row() + 1),
+                        start_col: Some(r.start.coord.col() + 1),
+                        end_row: Some(r.end.coord.row() + 1),
+                        end_col: Some(r.end.coord.col() + 1),
+                        start_row_abs: true,
+                        start_col_abs: true,
+                        end_row_abs: true,
+                        end_col_abs: true,
+                    }),
+                    NamedDefinition::Formula { ast: inner_ast, .. } => {
+                        self.formula_name_reference(inner_ast, entry.scope, sheet_name)
+                    }
+                    NamedDefinition::Literal(_) => None,
+                }
+            }
+            ReferenceType::Cell {
+                sheet,
+                row,
+                col,
+                ..
+            } => Some(ReferenceType::Cell {
+                sheet: Some(sheet.unwrap_or_else(|| sheet_name.to_string())),
+                row,
+                col,
+                row_abs: true,
+                col_abs: true,
+            }),
+            ReferenceType::Range {
+                sheet,
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                ..
+            } => Some(ReferenceType::Range {
+                sheet: Some(sheet.unwrap_or_else(|| sheet_name.to_string())),
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                start_row_abs: true,
+                start_col_abs: true,
+                end_row_abs: true,
+                end_col_abs: true,
+            }),
+            // Tables, 3-D and external references go through the values path.
+            _ => None,
+        }
+    }
+}
+
 impl<R> crate::traits::NamedRangeResolver for Engine<R>
 where
     R: EvaluationContext,
@@ -22711,7 +22894,11 @@ where
                 end_row_abs: true,
                 end_col_abs: true,
             }),
-            _ => None,
+            NamedDefinition::Formula { ast, .. } => {
+                let current_sheet = self.graph.sheet_name(self.graph.default_sheet_id());
+                self.formula_name_reference(ast, entry.scope, current_sheet)
+            }
+            NamedDefinition::Literal(_) => None,
         }
     }
 
@@ -23530,13 +23717,34 @@ where
                                 self.config.date_system,
                             ));
                         }
-                        NamedDefinition::Formula { .. } => {
-                            if let Some(value) = self.graph.get_value(named.vertex) {
+                        NamedDefinition::Formula { ast, .. } => {
+                            // A reference-valued definition (`=Sheet1!$A$1:$A$3`, the dynamic
+                            // `=OFFSET(…,COUNTA(…),1)`, `=OtherName`) IS the range it denotes
+                            // right now — `SUM`/`INDEX`/`ROWS` and a spilling `=Name` see the
+                            // live cells, as in Excel. Anything else is the formula's value,
+                            // with an array result keeping its shape. Name→name chains nest
+                            // through this branch; one that loops is a circular reference.
+                            let depth = FORMULA_NAME_REFERENCE_DEPTH.with(|d| d.get());
+                            if depth >= MAX_FORMULA_NAME_REFERENCE_DEPTH {
                                 return Ok(RangeView::from_owned_rows(
-                                    vec![vec![value]],
+                                    vec![vec![LiteralValue::Error(
+                                        ExcelError::new(ExcelErrorKind::Circ).with_message(
+                                            format!("Name {name} is defined through itself"),
+                                        ),
+                                    )]],
                                     self.config.date_system,
                                 ));
                             }
+                            FORMULA_NAME_REFERENCE_DEPTH.with(|d| d.set(depth + 1));
+                            let view = self.formula_name_view(
+                                ast,
+                                named.scope,
+                                named.vertex,
+                                current_id,
+                                current_sheet,
+                            );
+                            FORMULA_NAME_REFERENCE_DEPTH.with(|d| d.set(depth));
+                            return view;
                         }
                     }
                 }

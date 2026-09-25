@@ -415,6 +415,35 @@ impl DependencyGraph {
         }
     }
 
+    /// Flag the name's vertex volatile so it (and its dependents) re-evaluate every calc — for a
+    /// named formula built on a volatile function (`=OFFSET($A$1,0,0,3,1)`), which has no edge to
+    /// the cells it currently lands on. `Ok(false)` when the name is not defined in `scope`.
+    pub fn mark_name_volatile(
+        &mut self,
+        name: &str,
+        scope: NameScope,
+        volatile: bool,
+    ) -> Result<bool, ExcelError> {
+        let Some(canon_name) = self.canonical_name_in_scope(scope, name) else {
+            return Ok(false);
+        };
+        let vertex = match scope {
+            NameScope::Workbook => self.named_ranges.get(&canon_name).map(|nr| nr.vertex),
+            NameScope::Sheet(id) => self
+                .sheet_named_ranges
+                .get(&(id, canon_name))
+                .map(|nr| nr.vertex),
+        };
+        let Some(vertex) = vertex else {
+            return Ok(false);
+        };
+        self.mark_volatile(vertex, volatile);
+        if volatile {
+            self.mark_vertex_dirty(vertex);
+        }
+        Ok(true)
+    }
+
     /// Delete a named range
     pub fn delete_name(&mut self, name: &str, scope: NameScope) -> Result<(), ExcelError> {
         let Some(canon_name) = self.canonical_name_in_scope(scope, name) else {
