@@ -286,14 +286,14 @@ impl<'g> VertexEditor<'g> {
             return None;
         }
 
-        // Defensive bound for log payloads.
-        let max = self.graph.get_config().spill.max_spill_cells as usize;
+        // Defensive bound for log payloads (saturating: the u64 cap must never truncate to 0).
+        let max = self.graph.get_config().spill.snapshot_cell_cap();
         let mut cells = cells;
         if cells.len() > max {
             cells.truncate(max);
         }
 
-        let first = *cells.first().expect("non-empty spill cells");
+        let first = *cells.first()?;
         let sheet_name = self.graph.sheet_name(first.sheet_id).to_string();
         let row0 = first.coord.row();
         let col0 = first.coord.col();

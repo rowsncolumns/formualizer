@@ -67,6 +67,7 @@ mod engine_atomic_actions_618;
 
 mod index_unbounded_ranges;
 mod infinite_ranges;
+mod spill_anchor_delete_939;
 mod spill_atomic;
 mod spill_basic;
 mod spill_config_defaults;
