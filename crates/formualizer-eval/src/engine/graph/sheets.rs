@@ -5,14 +5,21 @@ use formualizer_common::{ExcelError, ExcelErrorKind, LiteralValue};
 impl DependencyGraph {
     /// Add a new sheet to the workbook.
     ///
-    /// Creates a new sheet with the given name. If a sheet with this name
-    /// already exists, returns its ID without error (idempotent operation).
+    /// Creates a new sheet with the given name. If a sheet with this EXACT
+    /// name already exists, returns its ID without error (idempotent
+    /// operation). A name that differs from an existing sheet's only by case
+    /// creates a second sheet: the host declares the sheets a document holds,
+    /// and a document may carry `Sheet1` beside `SHEET1` even though Excel
+    /// refuses to create the pair — folding them onto one engine sheet made
+    /// each title's formulas read (and write back onto) the other's cells.
+    /// Reference resolution stays exact-first with a case-folded fallback to
+    /// the first-registered sibling ([`crate::engine::sheet_registry::SheetRegistry`]).
     pub fn add_sheet(&mut self, name: &str) -> Result<SheetId, ExcelError> {
-        if let Some(id) = self.sheet_reg.get_id(name) {
+        if let Some(id) = self.sheet_reg.get_exact_id(name) {
             return Ok(id);
         }
 
-        let sheet_id = self.sheet_reg.id_for(name);
+        let sheet_id = self.sheet_reg.register_exact(name);
         self.sheet_indexes.entry(sheet_id).or_default();
 
         // Heal formulas that were waiting on this sheet name.
@@ -250,12 +257,17 @@ impl DependencyGraph {
             return Err(ExcelError::new(ExcelErrorKind::Value).with_message("Sheet does not exist"));
         }
 
-        if let Some(existing_id) = self.sheet_reg.get_id(new_name) {
-            if existing_id != sheet_id {
-                return Err(ExcelError::new(ExcelErrorKind::Value)
-                    .with_message(format!("Sheet '{new_name}' already exists")));
-            }
+        // Excel refuses a title another sheet holds in ANY casing; re-casing a
+        // sheet's own title (`Data` → `DATA`) is a real rename that rewrites
+        // the references to it, not a no-op.
+        if old_name == new_name {
             return Ok(());
+        }
+        if let Some(existing_id) = self.sheet_reg.get_id(new_name)
+            && existing_id != sheet_id
+        {
+            return Err(ExcelError::new(ExcelErrorKind::Value)
+                .with_message(format!("Sheet '{new_name}' already exists")));
         }
 
         self.sheet_reg.rename(sheet_id, new_name)?;

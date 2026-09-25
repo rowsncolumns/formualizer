@@ -71,7 +71,33 @@ impl SheetRegistry {
         if let Some(&id) = self.id_by_folded.get(&fold(name)) {
             return id;
         }
+        self.mint(name)
+    }
 
+    /// The id registered under EXACTLY this spelling — no case-folded
+    /// fallback. `None` for an unknown or removed name.
+    pub fn get_exact_id(&self, name: &str) -> Option<SheetId> {
+        self.id_by_name.get(name).copied()
+    }
+
+    /// Register a sheet the host declares to exist under EXACTLY this
+    /// spelling: the exact id when one is registered, otherwise a fresh sheet
+    /// — even when a case-variant sibling already exists. A host mirroring a
+    /// document that holds `Sheet1` beside `SHEET1` (Excel forbids the pair,
+    /// but a file can carry one) needs two engine sheets so each title's
+    /// cells and formulas stay its own; reference resolution stays
+    /// exact-first and the folded key keeps pointing at whichever sibling
+    /// registered first (`get_id("sheet1")` is deterministic). Contrast
+    /// [`SheetRegistry::id_for`], the reference-driven lookup-or-create that
+    /// resolves a case-variant to the existing sheet.
+    pub fn register_exact(&mut self, name: &str) -> SheetId {
+        if let Some(id) = self.get_exact_id(name) {
+            return id;
+        }
+        self.mint(name)
+    }
+
+    fn mint(&mut self, name: &str) -> SheetId {
         let id = self.name_by_id.len() as SheetId;
         self.name_by_id.push(name.to_string());
         self.id_by_name.insert(name.to_string(), id);
@@ -296,6 +322,39 @@ mod tests {
         reg.remove(s1).unwrap();
         assert_eq!(reg.active_span_ids("S3", "S2"), Some(vec![s3, s2]));
         assert!(reg.move_sheet(s1, 0).is_err());
+    }
+
+    #[test]
+    fn register_exact_mints_a_case_sibling_and_keeps_folded_lookup_on_the_first() {
+        let mut reg = SheetRegistry::new();
+        let data = reg.register_exact("Data");
+        assert_eq!(
+            reg.register_exact("Data"),
+            data,
+            "idempotent on the exact spelling"
+        );
+        let upper = reg.register_exact("DATA");
+        assert_ne!(upper, data, "an exact-spelling sibling is its own sheet");
+        assert_eq!(reg.get_exact_id("DATA"), Some(upper));
+        assert_eq!(
+            reg.get_exact_id("data"),
+            None,
+            "no folded fallback on the exact getter"
+        );
+        // Each spelling resolves to itself; a spelling neither sheet holds
+        // falls back to the FIRST registered sibling, on every call.
+        assert_eq!(reg.get_id("Data"), Some(data));
+        assert_eq!(reg.get_id("DATA"), Some(upper));
+        assert_eq!(reg.get_id("data"), Some(data));
+        assert_eq!(
+            reg.id_for("dAtA"),
+            data,
+            "reference-driven lookups never mint a third"
+        );
+        assert_eq!(reg.active_len(), 2);
+        // Removing the first hands the folded key to the survivor.
+        reg.remove(data).unwrap();
+        assert_eq!(reg.get_id("data"), Some(upper));
     }
 
     #[test]
