@@ -4588,8 +4588,8 @@ mod tests {
         assert_eq!(
             calc("TAKE", &[arr.clone(), two.clone(), two.clone()]),
             LiteralValue::Array(vec![
-                vec![LiteralValue::Int(1), LiteralValue::Int(3)],
-                vec![LiteralValue::Int(2), LiteralValue::Int(4)],
+                vec![LiteralValue::Number(1.0), LiteralValue::Number(3.0)],
+                vec![LiteralValue::Number(2.0), LiteralValue::Number(4.0)],
             ])
         );
     }
