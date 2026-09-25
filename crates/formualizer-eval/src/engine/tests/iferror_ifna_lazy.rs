@@ -103,17 +103,16 @@ fn iferror_arity_errors_are_value() {
 
 /* ───────────────────── array/spill semantics pin ─────────────────────
  *
- * IFERROR is whole-value in this engine: when arg0 evaluates to an array
- * (e.g. a broadcast division over ranges), the array passes through as-is —
- * element-wise errors inside the array are NOT replaced by the fallback.
- * The fallback is used only when arg0 itself is a (scalar) error / eval
- * failure. This pin guards that the lazy-dispatch change does not alter the
- * array path. (Laziness applies to the same `args[0].value()` call the eval
- * body already made; arrays were never materialized differently.)
+ * IFERROR lifts element-wise over an array arg0, as in Excel: when arg0 evaluates
+ * to an array (e.g. a broadcast division over ranges), every element that is an
+ * error is replaced by the (broadcast) fallback and every other element passes
+ * through (`IFERROR(A1:A3/B1:B3,0)` spills `{1;0;1}`; rowsncolumns/spreadsheet#939
+ * F-03). The fallback stays lazy — it is evaluated only when at least one element
+ * needs it — so the laziness pins below still hold on the array path.
  */
 
 #[test]
-fn iferror_array_arg_passes_array_through_with_elementwise_errors() {
+fn iferror_array_arg_replaces_elementwise_errors_with_the_fallback() {
     let wb = TestWorkbook::new();
     let mut engine = Engine::new(wb, EvalConfig::default());
     // A1:A3 = 1,2,3 ; B1=1, B2=0 (div error), B3=3
@@ -136,12 +135,11 @@ fn iferror_array_arg_passes_array_through_with_elementwise_errors() {
         engine.get_cell_value("Sheet1", 1, 3),
         Some(LiteralValue::Number(1.0))
     );
-    // Element-wise error inside the array is NOT replaced by the fallback.
+    // The element-wise #DIV/0! inside the array takes the fallback; the other elements pass through.
     match engine.get_cell_value("Sheet1", 2, 3) {
-        Some(LiteralValue::Error(e)) => {
-            assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Div)
-        }
-        other => panic!("expected #DIV/0! spilled at C2, got {other:?}"),
+        Some(LiteralValue::Int(0)) => {}
+        Some(LiteralValue::Number(n)) if n == 0.0 => {}
+        other => panic!("expected the fallback 0 spilled at C2, got {other:?}"),
     }
     assert_eq!(
         engine.get_cell_value("Sheet1", 3, 3),
