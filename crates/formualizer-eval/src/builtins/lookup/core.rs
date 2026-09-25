@@ -349,6 +349,25 @@ impl Function for MatchFn {
     }
 }
 
+/// Excel's `range_lookup` for `VLOOKUP` / `HLOOKUP` (spreadsheet#939 G-03).
+///
+/// OMITTED (`VLOOKUP(v,tbl,c)`) is `TRUE` — approximate match. A slot that is PRESENT but EMPTY
+/// (`VLOOKUP(v,tbl,c,)`, or a reference to a blank cell) evaluates to `0` in Excel and is therefore
+/// `FALSE` — exact match. Numbers follow the usual logical coercion (`0` → exact, anything else →
+/// approximate); booleans are taken as-is.
+fn range_lookup_flag(arg: Option<&ArgumentHandle<'_, '_>>) -> Result<bool, ExcelError> {
+    let Some(arg) = arg else {
+        return Ok(true);
+    };
+    Ok(match arg.value()?.into_literal() {
+        LiteralValue::Boolean(b) => b,
+        LiteralValue::Empty => false,
+        LiteralValue::Int(i) => i != 0,
+        LiteralValue::Number(n) => n != 0.0,
+        _ => true,
+    })
+}
+
 #[derive(Debug)]
 pub struct VLookupFn;
 /// Looks up a value in the first column of a table and returns a value from another column.
@@ -357,7 +376,9 @@ pub struct VLookupFn;
 ///
 /// # Remarks
 /// - `col_index_num` is 1-based and must be within the table width.
-/// - `range_lookup` defaults to `FALSE` in this engine (exact match by default).
+/// - `range_lookup` follows Excel: OMITTED (`VLOOKUP(v,tbl,c)`) means `TRUE` (approximate match
+///   against a sorted first column); a present-but-EMPTY slot (`VLOOKUP(v,tbl,c,)` or a blank
+///   cell) is `FALSE` (exact match), as is `0`.
 /// - When `range_lookup=TRUE`, approximate match logic is used against the first column.
 /// - If the lookup value is not found, returns `#N/A`.
 /// - If `col_index_num` is invalid, returns `#REF!` (or `#VALUE!` if non-numeric).
@@ -395,7 +416,7 @@ pub struct VLookupFn;
 ///   - MATCH
 /// faq:
 ///   - q: "What is the default behavior when range_lookup is omitted?"
-///     a: "This engine defaults range_lookup to FALSE, so VLOOKUP performs exact matching unless TRUE is explicitly provided."
+///     a: "Same as Excel: an omitted range_lookup is TRUE (approximate match), while an explicitly empty fourth argument (`VLOOKUP(v,tbl,c,)`) is FALSE (exact match)."
 ///   - q: "What happens if col_index_num points outside the table?"
 ///     a: "A numeric out-of-range column index returns #REF!, while a non-numeric col_index_num returns #VALUE!."
 /// ```
@@ -454,7 +475,7 @@ impl Function for VLookupFn {
                     repeating: None,
                     default: None,
                 },
-                // range_lookup (optional logical, default FALSE for safer exact default)
+                // range_lookup (optional logical; Excel's omitted default is TRUE = approximate)
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Logical],
                     required: false,
@@ -463,7 +484,7 @@ impl Function for VLookupFn {
                     coercion: CoercionPolicy::Logical,
                     max: None,
                     repeating: None,
-                    default: Some(LiteralValue::Boolean(false)),
+                    default: Some(LiteralValue::Boolean(true)),
                 },
             ]
         });
@@ -497,14 +518,7 @@ impl Function for VLookupFn {
                 ExcelError::new(ExcelErrorKind::Value),
             )));
         }
-        let approximate = if args.len() >= 4 {
-            match args[3].value()?.into_literal() {
-                LiteralValue::Boolean(b) => b,
-                _ => true,
-            }
-        } else {
-            false // engine chooses FALSE default (exact) rather than Excel's historical TRUE to avoid silent approximate matches
-        };
+        let approximate = range_lookup_flag(args.get(3))?;
         // Handle both cell references and array literals
         if let Some(table_ref) = table_ref_opt {
             let current_sheet = ctx.current_sheet();
@@ -620,7 +634,9 @@ pub struct HLookupFn;
 ///
 /// # Remarks
 /// - `row_index_num` is 1-based and must be within the table height.
-/// - `range_lookup` defaults to `FALSE` in this engine (exact match by default).
+/// - `range_lookup` follows Excel: OMITTED (`HLOOKUP(v,tbl,r)`) means `TRUE` (approximate match
+///   against a sorted first row); a present-but-EMPTY slot (`HLOOKUP(v,tbl,r,)` or a blank cell)
+///   is `FALSE` (exact match), as is `0`.
 /// - When `range_lookup=TRUE`, approximate match logic is used against the first row.
 /// - If the lookup value is not found, returns `#N/A`.
 /// - If `row_index_num` is invalid, returns `#REF!` (or `#VALUE!` if non-numeric).
@@ -658,7 +674,7 @@ pub struct HLookupFn;
 ///   - MATCH
 /// faq:
 ///   - q: "Does HLOOKUP default to exact or approximate matching?"
-///     a: "It defaults to exact matching in this engine because range_lookup defaults to FALSE."
+///     a: "Approximate, like Excel: an omitted range_lookup is TRUE. Pass FALSE, 0, or an empty fourth argument (`HLOOKUP(v,tbl,r,)`) for exact matching."
 ///   - q: "How are invalid row_index_num values reported?"
 ///     a: "If row_index_num is outside table height HLOOKUP returns #REF!; if it is non-numeric it returns #VALUE!."
 /// ```
@@ -717,7 +733,7 @@ impl Function for HLookupFn {
                     repeating: None,
                     default: None,
                 },
-                // range_lookup (optional logical, default FALSE for safer exact default)
+                // range_lookup (optional logical; Excel's omitted default is TRUE = approximate)
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Logical],
                     required: false,
@@ -726,7 +742,7 @@ impl Function for HLookupFn {
                     coercion: CoercionPolicy::Logical,
                     max: None,
                     repeating: None,
-                    default: Some(LiteralValue::Boolean(false)),
+                    default: Some(LiteralValue::Boolean(true)),
                 },
             ]
         });
@@ -760,14 +776,7 @@ impl Function for HLookupFn {
                 ExcelError::new(ExcelErrorKind::Value),
             )));
         }
-        let approximate = if args.len() >= 4 {
-            match args[3].value()?.into_literal() {
-                LiteralValue::Boolean(b) => b,
-                _ => true,
-            }
-        } else {
-            false
-        };
+        let approximate = range_lookup_flag(args.get(3))?;
         // Handle both cell references and array literals
         if let Some(table_ref) = table_ref_opt {
             let current_sheet = ctx.current_sheet();
