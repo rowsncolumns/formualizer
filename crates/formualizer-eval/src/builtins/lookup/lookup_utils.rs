@@ -67,7 +67,10 @@ pub fn cmp_for_sort(a: &LiteralValue, b: &LiteralValue) -> std::cmp::Ordering {
 /// except that blank cells stay LAST in both directions, exactly like Excel.
 pub fn sort_ordering(a: &LiteralValue, b: &LiteralValue, ascending: bool) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    match (matches!(a, LiteralValue::Empty), matches!(b, LiteralValue::Empty)) {
+    match (
+        matches!(a, LiteralValue::Empty),
+        matches!(b, LiteralValue::Empty),
+    ) {
         (true, true) => Ordering::Equal,
         (true, false) => Ordering::Greater,
         (false, true) => Ordering::Less,
@@ -76,6 +79,23 @@ pub fn sort_ordering(a: &LiteralValue, b: &LiteralValue, ascending: bool) -> std
             if ascending { o } else { o.reverse() }
         }
     }
+}
+
+/// Excel's APPROXIMATE-match comparator (`MATCH(…,1|-1)`, `VLOOKUP`/`HLOOKUP(…,TRUE)`, `LOOKUP`,
+/// `XLOOKUP`/`XMATCH` match_mode ±1) — spreadsheet#939 Z-08. The documented sort order of a
+/// range_lookup column is `…, -1, 0, 1, …, A–Z, FALSE, TRUE`: values compare by TYPE first
+/// (numbers < text < logicals < errors), then within the type exactly like `cmp_for_sort`, with NO
+/// cross-type coercion — `TRUE` is not 1 and `"1"` is not 1, so `MATCH("1",{1;2;3},1)` is 3 (the text
+/// is above every number) and `MATCH(1,{TRUE;2;3},1)` is `#N/A`. A blank cell reads as 0, as it
+/// does everywhere else in a lookup vector. Exact match keeps `cmp_for_lookup`.
+pub fn cmp_for_approx_lookup(a: &LiteralValue, b: &LiteralValue) -> std::cmp::Ordering {
+    fn blank_as_zero(v: &LiteralValue) -> std::borrow::Cow<'_, LiteralValue> {
+        match v {
+            LiteralValue::Empty => std::borrow::Cow::Owned(LiteralValue::Number(0.0)),
+            other => std::borrow::Cow::Borrowed(other),
+        }
+    }
+    cmp_for_sort(&blank_as_zero(a), &blank_as_zero(b))
 }
 
 /// Case-insensitive text equality (no wildcards).
@@ -170,18 +190,19 @@ pub fn equals_maybe_wildcard(
     PreparedLookupMatcher::new(pattern, wildcard).matches(candidate)
 }
 
-/// Detect ascending sort (strict or equal allowed) for slice according to cmp_for_lookup.
+/// Detect ascending sort (strict or equal allowed) in Excel's approximate-match order
+/// (`cmp_for_approx_lookup`): `{1;2;"a";"c"}` is sorted, `{TRUE;2;3}` is not.
 pub fn is_sorted_ascending(values: &[LiteralValue]) -> bool {
     values
         .windows(2)
-        .all(|w| cmp_for_lookup(&w[0], &w[1]).is_some_and(|c| c <= 0))
+        .all(|w| cmp_for_approx_lookup(&w[0], &w[1]) != std::cmp::Ordering::Greater)
 }
 
-/// Detect descending sort (strict or equal allowed).
+/// Detect descending sort (strict or equal allowed) in Excel's approximate-match order.
 pub fn is_sorted_descending(values: &[LiteralValue]) -> bool {
     values
         .windows(2)
-        .all(|w| cmp_for_lookup(&w[0], &w[1]).is_some_and(|c| c >= 0))
+        .all(|w| cmp_for_approx_lookup(&w[0], &w[1]) != std::cmp::Ordering::Less)
 }
 
 /// Approximate mode selection (ascending):

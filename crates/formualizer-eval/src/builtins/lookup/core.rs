@@ -9,7 +9,9 @@
 //! - Type coercion: current simple: numbers vs numeric text coerced; text comparison case-insensitive? Excel is case-insensitive for MATCH (without wildcards). We implement case-insensitive for now.
 //!   TODO(excel-nuance): refine boolean/text/number coercion differences.
 
-use super::lookup_utils::{cmp_for_lookup, find_exact_index, is_sorted_ascending};
+use super::lookup_utils::{
+    cmp_for_approx_lookup, find_exact_index, is_sorted_ascending, is_sorted_descending,
+};
 use crate::args::{ArgSchema, CoercionPolicy, ShapeKind};
 use crate::engine::lookup_index_cache::LookupAxis;
 use crate::function::Function;
@@ -17,29 +19,24 @@ use crate::traits::{ArgumentHandle, FunctionContext};
 use formualizer_common::ArgKind;
 use formualizer_common::{ExcelError, ExcelErrorKind, LiteralValue};
 use formualizer_macros::func_caps;
+use std::cmp::Ordering;
 
 fn binary_search_match(slice: &[LiteralValue], needle: &LiteralValue, mode: i32) -> Option<usize> {
     if mode == 0 || slice.is_empty() {
         return None;
     }
     // Only ascending binary search currently (mode 1); descending path kept linear for now.
+    // Both walk Excel's approximate-match order (numbers < text < logicals, no coercion).
     if mode == 1 {
         // largest <= needle
         let mut lo = 0usize;
         let mut hi = slice.len();
         while lo < hi {
             let mid = (lo + hi) / 2;
-            match cmp_for_lookup(&slice[mid], needle) {
-                Some(c) => {
-                    if c > 0 {
-                        hi = mid;
-                    } else {
-                        lo = mid + 1;
-                    }
-                }
-                None => {
-                    hi = mid;
-                }
+            if cmp_for_approx_lookup(&slice[mid], needle) == Ordering::Greater {
+                hi = mid;
+            } else {
+                lo = mid + 1;
             }
         }
         if lo == 0 { None } else { Some(lo - 1) }
@@ -48,14 +45,15 @@ fn binary_search_match(slice: &[LiteralValue], needle: &LiteralValue, mode: i32)
         // SMALLEST value that is >= needle (descending data), so compare candidates by value.
         let mut best: Option<usize> = None;
         for (i, v) in slice.iter().enumerate() {
-            if let Some(c) = cmp_for_lookup(v, needle) {
-                if c == 0 {
-                    return Some(i);
-                }
-                if c > 0 && best.is_none_or(|b| cmp_for_lookup(v, &slice[b]).is_some_and(|o| o < 0))
+            match cmp_for_approx_lookup(v, needle) {
+                Ordering::Equal => return Some(i),
+                Ordering::Greater
+                    if best
+                        .is_none_or(|b| cmp_for_approx_lookup(v, &slice[b]) == Ordering::Less) =>
                 {
                     best = Some(i);
                 }
+                _ => {}
             }
         }
         best
@@ -262,9 +260,7 @@ impl Function for MatchFn {
                     let is_sorted = if mt == 1 {
                         is_sorted_ascending(&values)
                     } else if mt == -1 {
-                        values
-                            .windows(2)
-                            .all(|w| cmp_for_lookup(&w[0], &w[1]).is_some_and(|c| c >= 0))
+                        is_sorted_descending(&values)
                     } else {
                         true
                     };
@@ -277,21 +273,18 @@ impl Function for MatchFn {
                         // linear small
                         let mut best: Option<(usize, &LiteralValue)> = None;
                         for (i, v) in values.iter().enumerate() {
-                            if let Some(c) = cmp_for_lookup(v, &lookup_value) {
-                                // compare candidate to needle
-                                if mt == 1 {
-                                    // v <= needle
-                                    if (c == 0 || c == -1)
-                                        && (best.is_none() || i > best.unwrap().0)
-                                    {
-                                        best = Some((i, v));
-                                    }
-                                } else {
-                                    // -1, v >= needle
-                                    if (c == 0 || c == 1) && (best.is_none() || i > best.unwrap().0)
-                                    {
-                                        best = Some((i, v));
-                                    }
+                            let c = cmp_for_approx_lookup(v, &lookup_value);
+                            // compare candidate to needle
+                            if mt == 1 {
+                                // v <= needle
+                                if c != Ordering::Greater && (best.is_none() || i > best.unwrap().0)
+                                {
+                                    best = Some((i, v));
+                                }
+                            } else {
+                                // -1, v >= needle
+                                if c != Ordering::Less && (best.is_none() || i > best.unwrap().0) {
+                                    best = Some((i, v));
                                 }
                             }
                         }
