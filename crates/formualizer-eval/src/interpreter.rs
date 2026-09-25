@@ -231,6 +231,30 @@ impl<'a> Interpreter<'a> {
         self.local_env.lookup(name)
     }
 
+    /// The closure a lambda-valued defined name (`Dbl := =LAMBDA(x,x*2)`) stands for, so `=Dbl(21)`
+    /// calls it and `=MAP(A1:A3,Dbl)` / `=LET(f,Dbl,f(3))` pass it on as a value the way Excel does
+    /// (rowsncolumns/spreadsheet#939 G-07). Builtins and LET/LAMBDA-local bindings win first —
+    /// callers consult them before this. The `LAMBDA(...)` expression is evaluated on a clean
+    /// interpreter (no local scope, no relative-reference offset) because a name has no enclosing
+    /// scope; the body resolves its references at call time, in the caller's context.
+    fn resolve_named_callable(&self, name: &str) -> Option<Arc<dyn crate::traits::CustomCallable>> {
+        let ast = self.context.named_lambda_ast(name, self.current_sheet)?;
+        let clean = Interpreter {
+            context: self.context,
+            current_sheet: self.current_sheet,
+            current_cell: self.current_cell,
+            local_env: LocalEnv::default(),
+            reference_row_delta: 0,
+            reference_col_delta: 0,
+            disable_ast_planner: self.disable_ast_planner,
+            parameter_bindings: None,
+        };
+        match clean.evaluate_ast(&ast) {
+            Ok(crate::traits::CalcValue::Callable(c)) => Some(c),
+            _ => None,
+        }
+    }
+
     /// Lower a structured table reference that needs row context or
     /// combination handling into a concrete cell/range reference. Returns
     /// `Ok(None)` when the reference is not such a form (or the context does
@@ -988,7 +1012,10 @@ impl<'a> Interpreter<'a> {
                     return self.function_error_as_value(fun.dispatch(&handles, &fctx));
                 }
 
-                if let Some(callable) = self.resolve_local_callable(name) {
+                if let Some(callable) = self
+                    .resolve_local_callable(name)
+                    .or_else(|| self.resolve_named_callable(name))
+                {
                     let mut eval_args = Vec::with_capacity(args.len());
                     for arg_id in args {
                         eval_args.push(
@@ -1247,6 +1274,13 @@ impl<'a> Interpreter<'a> {
         &self,
         reference: &ReferenceType,
     ) -> Result<crate::traits::CalcValue<'a>, ExcelError> {
+        // A lambda-valued defined name used as a VALUE (`MAP(A1:A3,Dbl)`, `LET(f,Dbl,f(3))`) is
+        // the closure itself; the graph's cached literal for it can only be `#CALC!`.
+        if let ReferenceType::NamedRange(name) = reference
+            && let Some(callable) = self.resolve_named_callable(name)
+        {
+            return Ok(crate::traits::CalcValue::Callable(callable));
+        }
         if let ReferenceType::Cell {
             sheet, row, col, ..
         } = reference
@@ -1762,7 +1796,10 @@ impl<'a> Interpreter<'a> {
             return self.function_error_as_value(fun.dispatch(&handles, &fctx));
         }
 
-        if let Some(callable) = self.resolve_local_callable(name) {
+        if let Some(callable) = self
+            .resolve_local_callable(name)
+            .or_else(|| self.resolve_named_callable(name))
+        {
             let mut eval_args = Vec::with_capacity(args.len());
             for arg in args {
                 eval_args.push(self.evaluate_ast(arg)?.into_literal());
