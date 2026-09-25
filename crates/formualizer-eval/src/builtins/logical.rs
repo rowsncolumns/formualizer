@@ -227,37 +227,40 @@ impl Function for AndFn {
             let from_range = h.range_view().is_ok();
             let it = h.lazy_values_owned()?;
             for v in it {
-                let v = match v {
-                    LiteralValue::Text(_) => match logical_text_arg(&v, from_range) {
-                        None => continue,
-                        Some(Ok(b)) => LiteralValue::Boolean(b),
-                        Some(Err(_)) => return Ok(not_logical("AND")),
-                    },
-                    // Blank cells inside a reference are ignored, like text.
-                    LiteralValue::Empty if from_range => continue,
-                    v => v,
-                };
-                match v {
-                    LiteralValue::Error(_) => return Ok(crate::traits::CalcValue::Scalar(v)),
-                    // An omitted direct argument counts as FALSE.
-                    LiteralValue::Empty => {
-                        saw_logical = true;
-                        all_true = false;
+                let (elems, from_range) = logical_operand_elements(v, from_range);
+                for v in elems {
+                    let v = match v {
+                        LiteralValue::Text(_) => match logical_text_arg(&v, from_range) {
+                            None => continue,
+                            Some(Ok(b)) => LiteralValue::Boolean(b),
+                            Some(Err(_)) => return Ok(not_logical("AND")),
+                        },
+                        // Blank cells inside a reference are ignored, like text.
+                        LiteralValue::Empty if from_range => continue,
+                        v => v,
+                    };
+                    match v {
+                        LiteralValue::Error(_) => return Ok(crate::traits::CalcValue::Scalar(v)),
+                        // An omitted direct argument counts as FALSE.
+                        LiteralValue::Empty => {
+                            saw_logical = true;
+                            all_true = false;
+                        }
+                        LiteralValue::Boolean(b) => {
+                            saw_logical = true;
+                            all_true &= b;
+                        }
+                        LiteralValue::Number(n) => {
+                            saw_logical = true;
+                            all_true &= n != 0.0;
+                        }
+                        LiteralValue::Int(i) => {
+                            saw_logical = true;
+                            all_true &= i != 0;
+                        }
+                        // Non-coercible → #VALUE!
+                        _ => return Ok(not_logical("AND")),
                     }
-                    LiteralValue::Boolean(b) => {
-                        saw_logical = true;
-                        all_true &= b;
-                    }
-                    LiteralValue::Number(n) => {
-                        saw_logical = true;
-                        all_true &= n != 0.0;
-                    }
-                    LiteralValue::Int(i) => {
-                        saw_logical = true;
-                        all_true &= i != 0;
-                    }
-                    // Non-coercible (e.g. a nested array) → #VALUE!
-                    _ => return Ok(not_logical("AND")),
                 }
             }
         }
@@ -359,37 +362,40 @@ impl Function for OrFn {
             let from_range = h.range_view().is_ok();
             let it = h.lazy_values_owned()?;
             for v in it {
-                let v = match v {
-                    LiteralValue::Text(_) => match logical_text_arg(&v, from_range) {
-                        None => continue,
-                        Some(Ok(b)) => LiteralValue::Boolean(b),
-                        Some(Err(_)) => return Ok(not_logical("OR")),
-                    },
-                    v => v,
-                };
-                match v {
-                    LiteralValue::Error(_) => return Ok(crate::traits::CalcValue::Scalar(v)),
-                    LiteralValue::Empty => {
-                        // Blank cells inside a reference are ignored; an omitted direct
-                        // argument counts as FALSE.
-                        if !from_range {
-                            saw_logical = true;
+                let (elems, from_range) = logical_operand_elements(v, from_range);
+                for v in elems {
+                    let v = match v {
+                        LiteralValue::Text(_) => match logical_text_arg(&v, from_range) {
+                            None => continue,
+                            Some(Ok(b)) => LiteralValue::Boolean(b),
+                            Some(Err(_)) => return Ok(not_logical("OR")),
+                        },
+                        v => v,
+                    };
+                    match v {
+                        LiteralValue::Error(_) => return Ok(crate::traits::CalcValue::Scalar(v)),
+                        LiteralValue::Empty => {
+                            // Blank cells inside a reference are ignored; an omitted direct
+                            // argument counts as FALSE.
+                            if !from_range {
+                                saw_logical = true;
+                            }
                         }
+                        LiteralValue::Boolean(b) => {
+                            saw_logical = true;
+                            any_true |= b;
+                        }
+                        LiteralValue::Number(n) => {
+                            saw_logical = true;
+                            any_true |= n != 0.0;
+                        }
+                        LiteralValue::Int(i) => {
+                            saw_logical = true;
+                            any_true |= i != 0;
+                        }
+                        // Non-coercible → #VALUE!
+                        _ => return Ok(not_logical("OR")),
                     }
-                    LiteralValue::Boolean(b) => {
-                        saw_logical = true;
-                        any_true |= b;
-                    }
-                    LiteralValue::Number(n) => {
-                        saw_logical = true;
-                        any_true |= n != 0.0;
-                    }
-                    LiteralValue::Int(i) => {
-                        saw_logical = true;
-                        any_true |= i != 0;
-                    }
-                    // Non-coercible (e.g. a nested array) → #VALUE!
-                    _ => return Ok(not_logical("OR")),
                 }
             }
         }
@@ -535,6 +541,19 @@ fn not_logical<'b>(function: &str) -> crate::traits::CalcValue<'b> {
     crate::traits::CalcValue::Scalar(LiteralValue::Error(ExcelError::new_value().with_message(
         format!("{function} expects logical/numeric inputs; text is not coercible"),
     )))
+}
+
+/// One evaluated AND/OR operand, flattened to the values it contributes. An array — the
+/// result of a comparison or operator over a range (`AND(C1:C5>0)`, `OR(E1:E5="x")`,
+/// `AND(--(A1:A5>5))`, `AND(RANDARRAY(2,2,5,5)=5)`), a lifted function (`AND(ISNUMBER(C1:C5))`)
+/// or an array constant — is tested element by element with reference semantics: Excel ignores
+/// the text and blank elements of an array exactly as it ignores them inside a range, and an
+/// error element propagates. Anything else is a single direct operand.
+fn logical_operand_elements(v: LiteralValue, from_range: bool) -> (Vec<LiteralValue>, bool) {
+    match v {
+        LiteralValue::Array(rows) => (rows.into_iter().flatten().collect(), true),
+        v => (vec![v], from_range),
+    }
 }
 
 /// Text handed to AND/OR/XOR: Excel ignores text inside references and arrays
