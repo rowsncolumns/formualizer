@@ -292,6 +292,20 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
         self.interp
     }
 
+    /// A fresh handle over the same argument expression (empty memo caches). Lets a function
+    /// re-invoke itself with some arguments substituted while the others stay lazy references
+    /// (`lift::lift_array_arguments`); the handle itself is deliberately not `Clone`.
+    pub(crate) fn rebound(&self) -> ArgumentHandle<'a, 'b> {
+        match &self.expr {
+            ArgumentExpr::Ast(node) => ArgumentHandle::new(node, self.interp),
+            ArgumentExpr::Arena {
+                id,
+                data_store,
+                sheet_registry,
+            } => ArgumentHandle::new_arena(*id, self.interp, data_store, sheet_registry),
+        }
+    }
+
     /// Excel's lenient text→number coercion for a value read from this argument, with the
     /// evaluating interpreter's locale and clock: numbers / booleans / blanks as `to_number_strict`,
     /// numeric text (`"1,000"`, `"$5"`, `"50%"`), date/time text (`"1/2/2024"`, `"6:00 PM"`) and
