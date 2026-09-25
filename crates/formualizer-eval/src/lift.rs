@@ -75,6 +75,73 @@ pub(crate) fn pick(rows: &[Vec<LiteralValue>], shape: Shape, i: usize, j: usize)
     }
 }
 
+/// Evaluate `eval` once per broadcast element when at least one of the arguments at
+/// `positions` is a multi-cell array or range, substituting that element as a literal while
+/// every other argument keeps its original (lazy, reference-capable) handle. Returns `None`
+/// when none of those arguments is array-shaped so the caller takes its normal path.
+///
+/// This is Excel's array lift for the *criteria* slot of the criteria aggregates:
+/// `COUNTIF(A1:A8,{1,2})` is `{2,1}`, `COUNTIF(C1:C5,C1:C5)` counts each element,
+/// `SUMIF(rng,{"x","y"},sum)` and `SUMIFS(sum,rng,{"x","y"})` spill one total per criterion,
+/// and `SUM(COUNTIF(rng,{…}))` / `SUMPRODUCT(SUMIF(…,{…}))` fold the spill. The range
+/// arguments are never materialized — only the criteria are.
+pub(crate) fn lift_array_arguments<'a, 'b>(
+    args: &[ArgumentHandle<'a, 'b>],
+    positions: &[usize],
+    eval: &dyn for<'x> Fn(&[ArgumentHandle<'x, 'b>]) -> Result<CalcValue<'b>, ExcelError>,
+) -> Result<Option<CalcValue<'b>>, ExcelError> {
+    let mut arrays: Vec<(usize, Vec<Vec<LiteralValue>>, Shape)> = Vec::new();
+    for &pos in positions {
+        let Some(arg) = args.get(pos) else { continue };
+        if let Lifted::Array(rows, shape) = materialize(arg)? {
+            arrays.push((pos, rows, shape));
+        }
+    }
+    if arrays.is_empty() {
+        return Ok(None);
+    }
+    let shapes: Vec<Shape> = arrays.iter().map(|(_, _, s)| *s).collect();
+    let (rows, cols) = target_shape(&shapes);
+    let interp = args[0].interp();
+
+    let mut out = Vec::with_capacity(rows);
+    for i in 0..rows {
+        let mut row = Vec::with_capacity(cols);
+        for j in 0..cols {
+            let nodes: Vec<ASTNode> = arrays
+                .iter()
+                .map(|(_, data, shape)| {
+                    ASTNode::new(ASTNodeType::Literal(pick(data, *shape, i, j)), None)
+                })
+                .collect();
+            let handles: Vec<ArgumentHandle<'_, 'b>> = args
+                .iter()
+                .enumerate()
+                .map(
+                    |(k, h)| match arrays.iter().position(|(pos, _, _)| *pos == k) {
+                        Some(idx) => ArgumentHandle::new(&nodes[idx], interp),
+                        None => h.rebound(),
+                    },
+                )
+                .collect();
+            let cell = match eval(&handles) {
+                Ok(cv) => match cv.into_literal() {
+                    LiteralValue::Array(inner) => inner
+                        .first()
+                        .and_then(|r| r.first())
+                        .cloned()
+                        .unwrap_or(LiteralValue::Empty),
+                    v => v,
+                },
+                Err(e) => LiteralValue::Error(e),
+            };
+            row.push(cell);
+        }
+        out.push(row);
+    }
+    Ok(Some(CalcValue::Scalar(LiteralValue::Array(out))))
+}
+
 /// Evaluate `fun` once per broadcast element when at least one argument is a multi-cell
 /// array or range. Returns `None` when every argument is scalar-shaped so the caller can
 /// take the normal path.

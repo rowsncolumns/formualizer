@@ -2290,6 +2290,15 @@ fn eval_maxminifs<'a, 'b>(
     ctx: &dyn FunctionContext<'b>,
     is_max: bool,
 ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+    // Array-valued criteria lift element-wise (`MAXIFS(vals,rng,{"x","y"})` spills one
+    // maximum per criterion), like the SUMIFS family.
+    let criteria_positions: Vec<usize> = (2..args.len()).step_by(2).collect();
+    if let Some(lifted) = crate::lift::lift_array_arguments(args, &criteria_positions, &|sub| {
+        eval_maxminifs(sub, ctx, is_max)
+    })? {
+        return Ok(lifted);
+    }
+
     // Validate argument count: must be target_range + N pairs
     if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
         return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(

@@ -92,12 +92,38 @@ fn non_reference_range_arg(arg: &ArgumentHandle<'_, '_>) -> Result<LiteralValue,
     }
 }
 
+/// Positions of the `criteria` arguments: `COUNTIF/SUMIF/AVERAGEIF(range, criteria, [sum])`
+/// → 1; `COUNTIFS(range1, crit1, range2, crit2, …)` → 1, 3, 5…; `SUMIFS/AVERAGEIFS(sum,
+/// range1, crit1, …)` → 2, 4, 6….
+fn criteria_positions(arg_count: usize, agg_type: AggregationType, multi: bool) -> Vec<usize> {
+    if !multi {
+        return vec![1];
+    }
+    let first = if agg_type == AggregationType::Count {
+        1
+    } else {
+        2
+    };
+    (first..arg_count).step_by(2).collect()
+}
+
 fn eval_if_family<'a, 'b>(
     args: &[ArgumentHandle<'a, 'b>],
     ctx: &dyn FunctionContext<'b>,
     agg_type: AggregationType,
     multi: bool,
 ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+    // Excel lifts an array-valued criterion element-wise: `COUNTIF(rng,{1,2})` spills one
+    // count per criterion, `COUNTIF(C1:C5,C1:C5)` one per cell. Each element is re-run as a
+    // scalar criterion; the range arguments stay lazy references.
+    if let Some(lifted) = crate::lift::lift_array_arguments(
+        args,
+        &criteria_positions(args.len(), agg_type, multi),
+        &|sub| eval_if_family(sub, ctx, agg_type, multi),
+    )? {
+        return Ok(lifted);
+    }
+
     let mut sum_view: Option<crate::engine::range_view::RangeView<'_>> = None;
     let mut sum_scalar: Option<LiteralValue> = None;
     let mut crit_specs = Vec::new();
