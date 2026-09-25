@@ -4117,9 +4117,10 @@ where
                 self.ast_calls_volatile_function(left) || self.ast_calls_volatile_function(right)
             }
             ASTNodeType::UnaryOp { expr, .. } => self.ast_calls_volatile_function(expr),
-            ASTNodeType::Array(rows) => rows
-                .iter()
-                .any(|row| row.iter().any(|cell| self.ast_calls_volatile_function(cell))),
+            ASTNodeType::Array(rows) => rows.iter().any(|row| {
+                row.iter()
+                    .any(|cell| self.ast_calls_volatile_function(cell))
+            }),
             ASTNodeType::Call { callee, args } => {
                 self.ast_calls_volatile_function(callee)
                     || args.iter().any(|arg| self.ast_calls_volatile_function(arg))
@@ -22799,10 +22800,7 @@ where
                 }
             }
             ReferenceType::Cell {
-                sheet,
-                row,
-                col,
-                ..
+                sheet, row, col, ..
             } => Some(ReferenceType::Cell {
                 sheet: Some(sheet.unwrap_or_else(|| sheet_name.to_string())),
                 row,
@@ -22907,6 +22905,26 @@ where
         self.graph
             .resolve_name_entry(name, self.graph.default_sheet_id())
             .is_some_and(|entry| matches!(entry.definition, NamedDefinition::Literal(_)))
+    }
+
+    fn named_lambda_ast(
+        &self,
+        name: &str,
+        current_sheet: &str,
+    ) -> Option<formualizer_parse::parser::ASTNode> {
+        use crate::engine::named_range::NamedDefinition;
+        let sheet_id = self
+            .graph
+            .sheet_id(current_sheet)
+            .unwrap_or_else(|| self.graph.default_sheet_id());
+        match &self.graph.resolve_name_entry(name, sheet_id)?.definition {
+            NamedDefinition::Formula { ast, .. }
+                if crate::traits::ast_is_lambda_definition(ast) =>
+            {
+                Some(ast.clone())
+            }
+            _ => None,
+        }
     }
 }
 

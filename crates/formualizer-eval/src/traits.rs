@@ -1199,6 +1199,29 @@ pub trait NamedRangeResolver: Send + Sync {
     fn named_range_is_constant(&self, _name: &str) -> bool {
         false
     }
+
+    /// The `LAMBDA(...)` expression a defined name is bound to (`Dbl := =LAMBDA(x,x*2)`), resolved
+    /// from `current_sheet` so a sheet-scoped name shadows a workbook one — `None` for every other
+    /// kind of name. Excel treats such a name as a function (`=Dbl(21)`) and as a lambda value
+    /// (`=MAP(A1:A3,Dbl)`, `=LET(f,Dbl,f(3))`); the interpreter builds the closure from this AST
+    /// (rowsncolumns/spreadsheet#939 G-07). Only a definition whose root is `LAMBDA` qualifies —
+    /// the graph caches a name's value as a `LiteralValue`, which cannot hold a callable, so a
+    /// lambda reached through `LET(...)` is not recognised.
+    fn named_lambda_ast(&self, _name: &str, _current_sheet: &str) -> Option<ASTNode> {
+        None
+    }
+}
+
+/// True when `ast` is a `LAMBDA(...)` call — the shape a lambda-valued defined name has
+/// (`_xlfn.LAMBDA` as written by Excel's file format included).
+pub fn ast_is_lambda_definition(ast: &ASTNode) -> bool {
+    match &ast.node_type {
+        ASTNodeType::Function { name, .. } => name
+            .rsplit('.')
+            .next()
+            .is_some_and(|n| n.eq_ignore_ascii_case("LAMBDA")),
+        _ => false,
+    }
 }
 pub trait TableResolver: Send + Sync {
     fn resolve_table_reference(
