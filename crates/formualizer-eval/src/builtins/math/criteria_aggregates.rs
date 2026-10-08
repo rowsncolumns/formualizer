@@ -1644,6 +1644,86 @@ mod tests {
         );
     }
 
+    /// rowsncolumns/spreadsheet#1096: the text of a criterion is compared whole, so `"R&D "`
+    /// (trailing space) matches the cells holding `R&D ` and not `R&D` — Excel never trims
+    /// either side. A customer model with a department label of `R&D ` summed to 0.
+    #[test]
+    fn text_criteria_keep_their_whitespace() {
+        let wb = TestWorkbook::new()
+            .with_function(std::sync::Arc::new(SumIfFn))
+            .with_function(std::sync::Arc::new(CountIfsFn));
+        let ctx = interp(&wb);
+        let range = lit(LiteralValue::Array(vec![vec![
+            LiteralValue::Text("R&D ".into()),
+            LiteralValue::Text("r&d ".into()),
+            LiteralValue::Text("G&A".into()),
+            LiteralValue::Text("R&D".into()),
+        ]]));
+        let amounts = lit(LiteralValue::Array(vec![vec![
+            LiteralValue::Int(10),
+            LiteralValue::Int(20),
+            LiteralValue::Int(5),
+            LiteralValue::Int(7),
+        ]]));
+        let sumif = |crit: &str| {
+            let crit = lit(LiteralValue::Text(crit.into()));
+            let args = vec![
+                ArgumentHandle::new(&range, &ctx),
+                ArgumentHandle::new(&crit, &ctx),
+                ArgumentHandle::new(&amounts, &ctx),
+            ];
+            ctx.context
+                .get_function("", "SUMIF")
+                .unwrap()
+                .dispatch(&args, &ctx.function_context(None))
+                .unwrap()
+                .into_literal()
+        };
+        assert_eq!(sumif("R&D "), LiteralValue::Number(30.0));
+        assert_eq!(sumif("R&D"), LiteralValue::Number(7.0));
+        assert_eq!(sumif("=R&D "), LiteralValue::Number(30.0));
+        assert_eq!(sumif("<>R&D "), LiteralValue::Number(12.0));
+        assert_eq!(sumif("\"R&D \""), LiteralValue::Number(30.0));
+        // Numbers and booleans are still read from a trimmed copy.
+        assert_eq!(
+            {
+                let nums = lit(LiteralValue::Array(vec![vec![
+                    LiteralValue::Int(1),
+                    LiteralValue::Int(2),
+                ]]));
+                let crit = lit(LiteralValue::Text(" 2 ".into()));
+                let args = vec![
+                    ArgumentHandle::new(&nums, &ctx),
+                    ArgumentHandle::new(&crit, &ctx),
+                ];
+                ctx.context
+                    .get_function("", "SUMIF")
+                    .unwrap()
+                    .dispatch(&args, &ctx.function_context(None))
+                    .unwrap()
+                    .into_literal()
+            },
+            LiteralValue::Number(2.0)
+        );
+        let crit = lit(LiteralValue::Text("R&D ".into()));
+        let positive = lit(LiteralValue::Text(">0".into()));
+        let args = vec![
+            ArgumentHandle::new(&range, &ctx),
+            ArgumentHandle::new(&crit, &ctx),
+            ArgumentHandle::new(&amounts, &ctx),
+            ArgumentHandle::new(&positive, &ctx),
+        ];
+        assert_eq!(
+            ctx.context
+                .get_function("", "COUNTIFS")
+                .unwrap()
+                .dispatch(&args, &ctx.function_context(None))
+                .unwrap()
+                .into_literal(),
+            LiteralValue::Number(2.0)
+        );
+    }
+
     #[test]
     fn sumif_with_sum_range() {
         let wb = TestWorkbook::new().with_function(std::sync::Arc::new(SumIfFn));

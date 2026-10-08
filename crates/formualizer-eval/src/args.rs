@@ -161,8 +161,11 @@ pub fn parse_criteria_with(
                 return Ok(CriteriaPredicate::IsBlankOrEmptyText);
             }
 
+            // The text of a criterion is compared whole: `"R&D "` matches the cells holding
+            // `R&D ` (trailing space included) and not `R&D`, exactly as in Excel, where
+            // COUNTIF never trims either side (rowsncolumns/spreadsheet#1096). Only the
+            // number / boolean / date readings below work on a trimmed copy.
             let unquote = |t: &str| -> String {
-                let t = t.trim();
                 if let Some(inner) = t.strip_prefix('"').and_then(|x| x.strip_suffix('"')) {
                     inner.replace("\"\"", "\"")
                 } else {
@@ -173,7 +176,9 @@ pub fn parse_criteria_with(
             // Operators: >=, <=, <>, >, <, =
             let ops = [">=", "<=", "<>", ">", "<", "="];
             for op in ops.iter() {
-                if let Some(rhs) = s_trim.strip_prefix(op) {
+                // Strip the operator from the start-trimmed text so the value keeps its own
+                // trailing whitespace (`"=R&D "`).
+                if let Some(rhs) = s.trim_start().strip_prefix(op) {
                     let rhs_trim = rhs.trim();
                     if rhs_trim.is_empty() {
                         return Ok(match *op {
@@ -207,7 +212,7 @@ pub fn parse_criteria_with(
                             CriteriaPredicate::Ne(b)
                         });
                     }
-                    let lit = unquote(rhs_trim);
+                    let lit = unquote(rhs);
                     if matches!(*op, "=" | "<>") && has_wildcard(&lit) {
                         // `"<>a*"` = every cell that does NOT match the pattern.
                         let like = CriteriaPredicate::TextLike {
@@ -233,7 +238,7 @@ pub fn parse_criteria_with(
                 }
             }
 
-            let plain = unquote(s_trim);
+            let plain = unquote(s);
 
             if has_wildcard(&plain) {
                 return Ok(CriteriaPredicate::TextLike {
@@ -241,13 +246,14 @@ pub fn parse_criteria_with(
                     case_insensitive: true,
                 });
             }
-            let lower = plain.to_ascii_lowercase();
+            let lower = plain.trim().to_ascii_lowercase();
             if lower == "true" {
                 return Ok(CriteriaPredicate::Eq(LiteralValue::Boolean(true)));
             } else if lower == "false" {
                 return Ok(CriteriaPredicate::Eq(LiteralValue::Boolean(false)));
             }
-            if let Some(n) = parse_criteria_number(&plain).or_else(|| date_text(&plain)) {
+            if let Some(n) = parse_criteria_number(plain.trim()).or_else(|| date_text(plain.trim()))
+            {
                 return Ok(CriteriaPredicate::Eq(LiteralValue::Number(n)));
             }
             Ok(CriteriaPredicate::Eq(LiteralValue::Text(

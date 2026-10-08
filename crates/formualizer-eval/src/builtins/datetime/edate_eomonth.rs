@@ -306,6 +306,34 @@ mod tests {
         assert!(matches!(result, LiteralValue::Number(_)));
     }
 
+    /// rowsncolumns/spreadsheet#1096: a blank start date is serial 0, Excel's "January 0, 1900",
+    /// so `EOMONTH(<blank>, 23)` is the end of December 1901 (731), not November (700).
+    #[test]
+    fn test_eomonth_blank_start_counts_from_january_1900() {
+        let wb = TestWorkbook::new().with_function(Arc::new(EomonthFn));
+        let ctx = wb.interpreter();
+        let f = ctx.context.get_function("", "EOMONTH").unwrap();
+        for start in [
+            LiteralValue::Empty,
+            LiteralValue::Int(0),
+            LiteralValue::Number(0.0),
+        ] {
+            let start = lit(start);
+            let months = lit(LiteralValue::Int(23));
+            let result = f
+                .dispatch(
+                    &[
+                        ArgumentHandle::new(&start, &ctx),
+                        ArgumentHandle::new(&months, &ctx),
+                    ],
+                    &ctx.function_context(None),
+                )
+                .unwrap()
+                .into_literal();
+            assert_eq!(result, LiteralValue::Number(731.0));
+        }
+    }
+
     #[test]
     fn test_eomonth_february() {
         let wb = TestWorkbook::new().with_function(Arc::new(EomonthFn));
