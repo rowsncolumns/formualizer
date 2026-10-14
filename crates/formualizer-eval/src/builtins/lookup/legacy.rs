@@ -231,11 +231,9 @@ impl Function for LookupFn {
                 .get(match_idx)
                 .cloned()
                 .unwrap_or(LiteralValue::Empty);
-            Ok(CalcValue::Scalar(materialise_empty(val)))
+            Ok(CalcValue::Scalar(val))
         } else if l_rows == 1 && l_cols == 1 {
-            Ok(CalcValue::Scalar(materialise_empty(
-                lookup_data[0][0].clone(),
-            )))
+            Ok(CalcValue::Scalar(lookup_data[0][0].clone()))
         } else if is_row_search {
             // Return from last row at matched column
             let last_row = l_rows - 1;
@@ -244,7 +242,7 @@ impl Function for LookupFn {
                 .and_then(|r| r.get(match_idx))
                 .cloned()
                 .unwrap_or(LiteralValue::Empty);
-            Ok(CalcValue::Scalar(materialise_empty(val)))
+            Ok(CalcValue::Scalar(val))
         } else {
             // Return from last column at matched row
             let last_col = l_cols - 1;
@@ -253,7 +251,7 @@ impl Function for LookupFn {
                 .and_then(|r| r.get(last_col))
                 .cloned()
                 .unwrap_or(LiteralValue::Empty);
-            Ok(CalcValue::Scalar(materialise_empty(val)))
+            Ok(CalcValue::Scalar(val))
         }
     }
 }
@@ -311,14 +309,6 @@ fn flatten_1d(data: &[Vec<LiteralValue>], rows: usize, cols: usize) -> (Vec<Lite
 /// Like `flatten_1d` but returns just the vec (for result vector).
 fn flatten_1d_vec(data: &[Vec<LiteralValue>], rows: usize, cols: usize) -> Vec<LiteralValue> {
     flatten_1d(data, rows, cols).0
-}
-
-/// Excel materialises empty lookup results as 0.
-fn materialise_empty(v: LiteralValue) -> LiteralValue {
-    match v {
-        LiteralValue::Empty => LiteralValue::Number(0.0),
-        other => other,
-    }
 }
 
 // ---------------------------------------------------------------------------
