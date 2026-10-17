@@ -221,7 +221,7 @@ pub struct RowsFn;
 /// Max args: 1
 /// Variadic: false
 /// Signature: ROWS(arg1: any@range)
-/// Arg schema: arg1{kinds=any,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}
+/// Arg schema: arg1{kinds=any,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}
 /// Caps: PURE
 /// [formualizer-docgen:schema:end]
 impl Function for RowsFn {
@@ -243,7 +243,7 @@ impl Function for RowsFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Any],
                     required: true,
-                    by_ref: false,
+                    by_ref: true,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
@@ -531,7 +531,7 @@ pub struct ColumnsFn;
 /// Max args: 1
 /// Variadic: false
 /// Signature: COLUMNS(arg1: any@range)
-/// Arg schema: arg1{kinds=any,required=true,shape=range,by_ref=false,coercion=None,max=None,repeating=None,default=false}
+/// Arg schema: arg1{kinds=any,required=true,shape=range,by_ref=true,coercion=None,max=None,repeating=None,default=false}
 /// Caps: PURE
 /// [formualizer-docgen:schema:end]
 impl Function for ColumnsFn {
@@ -553,7 +553,7 @@ impl Function for ColumnsFn {
                 ArgSchema {
                     kinds: smallvec::smallvec![ArgKind::Any],
                     required: true,
-                    by_ref: false,
+                    by_ref: true,
                     shape: ShapeKind::Range,
                     coercion: CoercionPolicy::None,
                     max: None,
