@@ -159,6 +159,7 @@ mod row_visibility_mask;
 mod row_visibility_state;
 mod row_visibility_transactions;
 mod subtotal_visibility;
+mod virtual_dep_rect_memo;
 mod visibility_mask_cache;
 
 mod csr_rebuild_amortization;

@@ -9,8 +9,20 @@ use crate::traits::{
 };
 use formualizer_common::{ExcelError, LiteralValue};
 use formualizer_parse::parser::{ReferenceType, TableReference};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Mutex;
+
+/// Per-build memo of the dirty / volatile formula vertices inside a rectangle, keyed by
+/// `(sheet, start_row, start_col, end_row, end_col)` (1-based, inclusive).
+///
+/// A schedule build asks this question once per range reference of every candidate formula.
+/// Workbooks built from a template reference the same few rectangles from tens of thousands
+/// of formulas (`SUMIFS($C$5:$C$4004, $A$5:$A$4004, …)` filled down a 4,000-row block), so
+/// without the memo the build enumerates the rectangle's thousands of vertices once per
+/// formula — O(formulas × rectangle) interval-tree visits, which dominated a 1M-formula full
+/// recalc (minutes before any formula was evaluated). Dirty / volatile flags do not change
+/// while a schedule is being built, so the memo is exact for the duration of one build.
+pub(crate) type RectDirtyFormulaCache = FxHashMap<(crate::SheetId, u32, u32, u32, u32), Vec<VertexId>>;
 
 use crate::interpreter::Interpreter;
 
@@ -319,6 +331,17 @@ impl RangeVirtualDepProvider {
         engine: &Engine<R>,
         v: VertexId,
     ) -> Vec<VertexId> {
+        let mut cache = RectDirtyFormulaCache::default();
+        Self::get_virtual_deps_with_cache(engine, v, &mut cache)
+    }
+
+    /// [`get_virtual_deps`](Self::get_virtual_deps) sharing one [`RectDirtyFormulaCache`]
+    /// across the formulas of a schedule build.
+    pub(crate) fn get_virtual_deps_with_cache<R: EvaluationContext>(
+        engine: &Engine<R>,
+        v: VertexId,
+        cache: &mut RectDirtyFormulaCache,
+    ) -> Vec<VertexId> {
         let mut deps = Vec::new();
         if let Some(ranges) = engine.graph.get_range_dependencies(v) {
             let current_sheet_id = engine.graph.get_vertex_sheet_id(v);
@@ -402,7 +425,9 @@ impl RangeVirtualDepProvider {
                     continue;
                 }
 
-                push_dirty_formula_vertices_in_rect(engine, v, sheet_id, sr, sc, er, ec, &mut deps);
+                push_dirty_formula_vertices_in_rect(
+                    engine, v, sheet_id, sr, sc, er, ec, &mut deps, cache,
+                );
             }
         }
         // Structured references: the formula's graph edge points at the TABLE vertex, whose
@@ -423,6 +448,7 @@ impl RangeVirtualDepProvider {
                     rect.end_row,
                     rect.end_col,
                     &mut deps,
+                    cache,
                 );
             }
         }
@@ -431,7 +457,8 @@ impl RangeVirtualDepProvider {
 }
 
 /// Push the dirty / volatile formula vertices inside a 1-based inclusive rectangle (excluding
-/// `v` itself) — the vertices `v` must be scheduled after.
+/// `v` itself) — the vertices `v` must be scheduled after. The rectangle's vertex list comes
+/// from `cache` (see [`RectDirtyFormulaCache`]); only the `v` exclusion is per caller.
 #[allow(clippy::too_many_arguments)]
 fn push_dirty_formula_vertices_in_rect<R: EvaluationContext>(
     engine: &Engine<R>,
@@ -442,14 +469,31 @@ fn push_dirty_formula_vertices_in_rect<R: EvaluationContext>(
     er: u32,
     ec: u32,
     deps: &mut Vec<VertexId>,
+    cache: &mut RectDirtyFormulaCache,
 ) {
+    let inside = cache
+        .entry((sheet_id, sr, sc, er, ec))
+        .or_insert_with(|| dirty_formula_vertices_in_rect(engine, sheet_id, sr, sc, er, ec));
+    deps.extend(inside.iter().copied().filter(|&u| u != v));
+}
+
+/// Every dirty / volatile formula vertex inside a 1-based inclusive rectangle, in vertex order.
+fn dirty_formula_vertices_in_rect<R: EvaluationContext>(
+    engine: &Engine<R>,
+    sheet_id: crate::SheetId,
+    sr: u32,
+    sc: u32,
+    er: u32,
+    ec: u32,
+) -> Vec<VertexId> {
     let Some(index) = engine.graph.sheet_index(sheet_id) else {
-        return;
+        return Vec::new();
     };
     let sr0 = sr.saturating_sub(1);
     let er0 = er.saturating_sub(1);
     let sc0 = sc.saturating_sub(1);
     let ec0 = ec.saturating_sub(1);
+    let mut inside = Vec::new();
     for u in index.vertices_in_col_range(sc0, ec0) {
         let pc = engine.graph.vertex_coord(u);
         let row0 = pc.row();
@@ -458,13 +502,15 @@ fn push_dirty_formula_vertices_in_rect<R: EvaluationContext>(
         }
         match engine.graph.get_vertex_kind(u) {
             VertexKind::FormulaScalar | VertexKind::FormulaArray => {
-                if (engine.graph.is_dirty(u) || engine.graph.is_volatile(u)) && u != v {
-                    deps.push(u);
+                if engine.graph.is_dirty(u) || engine.graph.is_volatile(u) {
+                    inside.push(u);
                 }
             }
             _ => {}
         }
     }
+    inside.sort_unstable();
+    inside
 }
 
 /// Does `v` carry a graph edge to a table vertex (i.e. its formula holds a structured reference
@@ -547,9 +593,11 @@ impl<'a, R: EvaluationContext> VirtualDepBuilder<'a, R> {
         let mut vdeps: rustc_hash::FxHashMap<VertexId, Vec<VertexId>> =
             rustc_hash::FxHashMap::default();
         let augmented_vertices: Vec<VertexId> = Vec::new(); // Will be populated in Phase 3
+        let mut rect_cache = RectDirtyFormulaCache::default();
 
         for &v in candidates {
-            let mut deps = RangeVirtualDepProvider::get_virtual_deps(self.engine, v);
+            let mut deps =
+                RangeVirtualDepProvider::get_virtual_deps_with_cache(self.engine, v, &mut rect_cache);
             let dynamic_deps = DynamicRefVirtualDepProvider::get_virtual_deps(self.engine, v);
 
             deps.extend(dynamic_deps);

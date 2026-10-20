@@ -21,8 +21,12 @@ use formualizer_parse::parser::{
 
 use crate::function::FnCaps;
 use crate::function_contract::{
-    FunctionArgumentDependencyContract, FunctionContextDependence, FunctionDependencySemantics,
-    FunctionEnvironmentSemantics, FunctionSemanticContract, FunctionSemanticIdentity,
+    FunctionArgumentDependencyContract,
+    FunctionContextDependence,
+    FunctionDependencySemantics,
+    FunctionEnvironmentSemantics,
+    FunctionSemanticContract,
+    encode_function_semantic_identity,
 };
 
 /// Canonical template output for a single formula placement.
@@ -1127,7 +1131,7 @@ fn write_parameterized_expr_key_inner(
             if parameterize_literals && !matches!(value, CanonicalLiteral::Array(_)) =>
         {
             out.push_str("lit_slot(");
-            out.push_str(&next_slot.to_string());
+            push_usize(usize::from(*next_slot), out);
             out.push(')');
             *next_slot = next_slot.saturating_add(1);
         }
@@ -1163,7 +1167,7 @@ fn write_parameterized_expr_key_inner(
             out.push_str("fn(");
             write_function_id_key(id, out);
             out.push(';');
-            out.push_str(&args.len().to_string());
+            push_usize(args.len(), out);
             out.push(':');
             for arg in args {
                 write_parameterized_expr_key_inner(arg, out, next_slot, parameterize_literals);
@@ -1175,7 +1179,7 @@ fn write_parameterized_expr_key_inner(
             out.push_str("call(");
             write_parameterized_expr_key_inner(callee, out, next_slot, parameterize_literals);
             out.push(';');
-            out.push_str(&args.len().to_string());
+            push_usize(args.len(), out);
             out.push(':');
             for arg in args {
                 write_parameterized_expr_key_inner(arg, out, next_slot, parameterize_literals);
@@ -1185,7 +1189,7 @@ fn write_parameterized_expr_key_inner(
         }
         CanonicalExpr::ArrayUnsupported { rows } => {
             out.push_str("array(");
-            out.push_str(&rows.len().to_string());
+            push_usize(rows.len(), out);
             out.push(':');
             for row in rows {
                 out.push_str(&row.len().to_string());
@@ -1247,7 +1251,7 @@ fn write_expr_key(expr: &CanonicalExpr, out: &mut String) {
         }
         CanonicalExpr::ArrayUnsupported { rows } => {
             out.push_str("array(");
-            out.push_str(&rows.len().to_string());
+            push_usize(rows.len(), out);
             out.push(':');
             for row in rows {
                 write_vec_key(row, out, write_expr_key);
@@ -1281,7 +1285,7 @@ fn write_literal_key(value: &CanonicalLiteral, out: &mut String) {
         }
         CanonicalLiteral::Array(rows) => {
             out.push_str("lit_array(");
-            out.push_str(&rows.len().to_string());
+            push_usize(rows.len(), out);
             out.push(':');
             for row in rows {
                 write_vec_key(row, out, write_literal_key);
@@ -1529,7 +1533,7 @@ fn write_template_flag_key(flag: &CanonicalTemplateFlag, out: &mut String) {
 }
 
 fn write_vec_key<T>(values: &[T], out: &mut String, write_value: fn(&T, &mut String)) {
-    out.push_str(&values.len().to_string());
+    push_usize(values.len(), out);
     out.push(':');
     for value in values {
         write_value(value, out);
@@ -1543,26 +1547,50 @@ fn write_function_id_key(id: &CanonicalFunctionId, out: &mut String) {
         write_string_key(&id.canonical_name, out);
         return;
     };
-    let encoded = FunctionSemanticIdentity {
-        namespace: id.namespace.clone(),
-        canonical_name: id.canonical_name.clone(),
-        generation: id.semantic_generation,
-        caps: FnCaps::from_bits_retain(id.semantic_flags),
+    // Same bytes `FunctionSemanticIdentity::encode` produces, written from the borrowed fields
+    // (no String / Vec clones) and hex-encoded through a table: this runs once per function
+    // node of every ingested formula, and `write!("{byte:02x}")` per byte was the single
+    // hottest frame of a 1M-formula ingest.
+    let mut encoded = Vec::with_capacity(128);
+    encode_function_semantic_identity(
+        &mut encoded,
+        &id.namespace,
+        &id.canonical_name,
+        id.semantic_generation,
+        FnCaps::from_bits_retain(id.semantic_flags),
         contract,
-        argument_by_ref: id.argument_by_ref.clone(),
-    }
-    .encode();
+        &id.argument_by_ref,
+    );
     out.push_str("semantic:");
+    out.reserve(encoded.len() * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     for byte in encoded {
-        use std::fmt::Write as _;
-        write!(out, "{byte:02x}").expect("writing to String is infallible");
+        out.push(HEX[usize::from(byte >> 4)] as char);
+        out.push(HEX[usize::from(byte & 0x0f)] as char);
     }
 }
 
 fn write_string_key(value: &str, out: &mut String) {
-    out.push_str(&value.len().to_string());
+    push_usize(value.len(), out);
     out.push(':');
     out.push_str(value);
+}
+
+/// `out.push_str(&n.to_string())` without the intermediate allocation.
+fn push_usize(n: usize, out: &mut String) {
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    let mut n = n;
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    // Digits only, so the slice is valid UTF-8.
+    out.push_str(std::str::from_utf8(&buf[i..]).expect("ascii digits"));
 }
 
 fn stable_fnv1a64(bytes: &[u8]) -> u64 {
