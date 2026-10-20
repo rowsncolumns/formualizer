@@ -2482,7 +2482,11 @@ fn plain_reference_named_formula_behaves_like_a_range_name() {
         .set_cell_value("Sheet1", 1, 1, LiteralValue::Number(10.0))
         .unwrap();
     engine.evaluate_all().unwrap();
-    assert_eq!(number_at(&engine, 1, 3), 15.0, "recalculates through the name");
+    assert_eq!(
+        number_at(&engine, 1, 3),
+        15.0,
+        "recalculates through the name"
+    );
 }
 
 #[test]
@@ -2518,7 +2522,11 @@ fn name_defined_as_another_name_resolves_to_that_range() {
     assert_eq!(number_at(&engine, 1, 3), 6.0, "SUM(Alias)");
     assert_eq!(number_at(&engine, 2, 3), 2.0, "INDEX(Alias,2)");
     assert_eq!(number_at(&engine, 3, 3), 3.0, "ROWS(Alias)");
-    assert_eq!(number_at(&engine, 4, 3), 12.0, "SUM(Twice) keeps the array shape");
+    assert_eq!(
+        number_at(&engine, 4, 3),
+        12.0,
+        "SUM(Twice) keeps the array shape"
+    );
 
     engine
         .set_cell_value("Sheet1", 1, 1, LiteralValue::Number(10.0))

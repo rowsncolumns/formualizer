@@ -26,7 +26,7 @@ use crate::engine::spill::{RegionLockManager, SpillMeta, SpillShape};
 use crate::engine::target_preparation::{
     StagedFormulaIndex, StagedFormulaLease, StagedPackageLease,
 };
-use crate::engine::virtual_deps::{DynamicRefVirtualDepProvider, VirtualDepBuilder};
+use crate::engine::virtual_deps::{DynamicRefVirtualDepProvider, VirtualDepBuilder, VirtualDeps};
 use crate::engine::{
     CycleDetection, CyclePolicy, DependencyGraph, EvalConfig, EvaluationRequestKind,
     EvaluationRequestOutcome, EvaluationResourceBaselineStats, EvaluationResourceReason,
@@ -2040,7 +2040,7 @@ fn estimated_span_bindings_bytes(
 
 type ScheduleBuildOutput = (
     crate::engine::scheduler::Schedule,
-    FxHashMap<VertexId, Vec<VertexId>>,
+    VirtualDeps,
     ScheduleBuildMeta,
 );
 
@@ -18042,6 +18042,7 @@ where
         self.graph.begin_respill_capture();
         loop {
             let (precedents_to_eval, old_vdeps) = self.build_demand_subgraph(&root_vertices);
+            let old_vdeps = VirtualDeps::from_per_vertex(old_vdeps);
             if precedents_to_eval.is_empty() {
                 break;
             }
@@ -19137,12 +19138,7 @@ where
                 }
             }
             let (virtual_dependencies, _) = VirtualDepBuilder::new(self).build(&[*vertex]);
-            for dependency in virtual_dependencies
-                .get(vertex)
-                .into_iter()
-                .flatten()
-                .copied()
-            {
+            for dependency in virtual_dependencies.flat_sorted_deps(*vertex) {
                 let Some(cell) = self.graph.get_cell_ref_for_vertex(dependency) else {
                     continue;
                 };
@@ -20806,6 +20802,7 @@ where
 
         // Build demand subgraph with virtual edges (same as evaluate_until)
         let (precedents_to_eval, vdeps) = self.build_demand_subgraph(&target_vertex_ids);
+        let vdeps = VirtualDeps::from_per_vertex(vdeps);
 
         if precedents_to_eval.is_empty() {
             return Ok(EvalPlan {
@@ -20907,7 +20904,7 @@ where
                     schedule_cache_hit: true,
                     schedule_cache_eligible: true,
                 };
-                return Ok((cached.schedule.clone(), FxHashMap::default(), meta));
+                return Ok((cached.schedule.clone(), VirtualDeps::default(), meta));
             }
 
             let (schedule, vdeps, mut meta) =
@@ -20940,7 +20937,7 @@ where
                 let build_started = crate::instant::FzInstant::now();
                 let (vdeps, augmented) = builder.build(to_evaluate);
                 let builder_elapsed_ms = build_started.elapsed().as_millis();
-                let vdeps_edges = vdeps.values().map(|deps| deps.len()).sum::<usize>();
+                let vdeps_edges = vdeps.edge_count();
                 (vdeps, augmented, builder_elapsed_ms, vdeps_edges)
             } else {
                 let (vdeps, augmented) = builder.build(to_evaluate);
@@ -20965,7 +20962,7 @@ where
 
         let meta = ScheduleBuildMeta {
             candidate_vertices: to_evaluate.len(),
-            vdeps_vertices: vdeps.len(),
+            vdeps_vertices: vdeps.vertex_count(),
             vdeps_edges,
             builder_elapsed_ms,
             used_virtual_schedule: use_virtual,
@@ -21070,7 +21067,7 @@ where
     fn changed_virtual_dep_vertices(
         &mut self,
         to_evaluate: &[VertexId],
-        old_vdeps: &FxHashMap<VertexId, Vec<VertexId>>,
+        old_vdeps: &VirtualDeps,
     ) -> Vec<VertexId> {
         #[cfg(test)]
         if self.force_virtual_dep_changes_remaining_for_test > 0
@@ -21091,12 +21088,12 @@ where
         let (new_vdeps, _) = builder.build(to_evaluate);
 
         let mut candidates = FxHashSet::default();
-        candidates.extend(old_vdeps.keys().copied());
-        candidates.extend(new_vdeps.keys().copied());
+        candidates.extend(old_vdeps.vertices());
+        candidates.extend(new_vdeps.vertices());
 
         let mut changed = Vec::new();
         for v in candidates {
-            if old_vdeps.get(&v) != new_vdeps.get(&v) {
+            if old_vdeps.flat_sorted_deps(v) != new_vdeps.flat_sorted_deps(v) {
                 changed.push(v);
             }
         }
@@ -21180,8 +21177,9 @@ where
             } // Virtual dependencies (compressed ranges + dynamic like INDIRECT)
             let builder = VirtualDepBuilder::new(self);
             let (vdeps_map, _) = builder.build(&[v]);
-            if let Some(deps) = vdeps_map.get(&v) {
-                for &u in deps {
+            let deps = vdeps_map.flat_sorted_deps(v);
+            if !deps.is_empty() {
+                for &u in &deps {
                     vdeps.entry(v).or_default().push(u);
                     if !visited.contains(&u) {
                         stack.push(u);

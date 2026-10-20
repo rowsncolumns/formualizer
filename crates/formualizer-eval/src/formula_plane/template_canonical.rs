@@ -21,12 +21,8 @@ use formualizer_parse::parser::{
 
 use crate::function::FnCaps;
 use crate::function_contract::{
-    FunctionArgumentDependencyContract,
-    FunctionContextDependence,
-    FunctionDependencySemantics,
-    FunctionEnvironmentSemantics,
-    FunctionSemanticContract,
-    encode_function_semantic_identity,
+    FunctionArgumentDependencyContract, FunctionContextDependence, FunctionDependencySemantics,
+    FunctionEnvironmentSemantics, FunctionSemanticContract, encode_function_semantic_identity,
 };
 
 /// Canonical template output for a single formula placement.
