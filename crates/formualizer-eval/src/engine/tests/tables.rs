@@ -627,12 +627,21 @@ fn unqualified_column_and_item_specifiers_resolve_against_the_containing_table()
     engine.add_sheet("Sheet1").unwrap();
     for (col, header) in ["Item", "Qty", "Price"].iter().enumerate() {
         engine
-            .set_cell_value("Sheet1", 1, col as u32 + 1, LiteralValue::Text((*header).into()))
+            .set_cell_value(
+                "Sheet1",
+                1,
+                col as u32 + 1,
+                LiteralValue::Text((*header).into()),
+            )
             .unwrap();
     }
     for (row, qty, price) in [(2u32, 1.0, 10.0), (3, 2.0, 20.0), (4, 3.0, 30.0)] {
-        engine.set_cell_value("Sheet1", row, 2, LiteralValue::Number(qty)).unwrap();
-        engine.set_cell_value("Sheet1", row, 3, LiteralValue::Number(price)).unwrap();
+        engine
+            .set_cell_value("Sheet1", row, 2, LiteralValue::Number(qty))
+            .unwrap();
+        engine
+            .set_cell_value("Sheet1", row, 3, LiteralValue::Number(price))
+            .unwrap();
     }
     let sheet_id = engine.sheet_id("Sheet1").unwrap();
     // Table1 over A1:C5: header row 1, body rows 2..4, totals row 5.
@@ -664,7 +673,9 @@ fn unqualified_column_and_item_specifiers_resolve_against_the_containing_table()
     }
 
     // Graph ingest path (single-cell installs) — Excel's generated totals-row formulas.
-    engine.set_cell_formula("Sheet1", 5, 2, parse("=SUBTOTAL(109,[Qty])")).unwrap();
+    engine
+        .set_cell_formula("Sheet1", 5, 2, parse("=SUBTOTAL(109,[Qty])"))
+        .unwrap();
     // Ingest-pipeline path (bulk installs).
     engine
         .bulk_set_formulas(
@@ -679,24 +690,58 @@ fn unqualified_column_and_item_specifiers_resolve_against_the_containing_table()
     engine.evaluate_all().unwrap();
 
     let value = |engine: &Engine<_>, row: u32, col: u32| engine.get_cell_value("Sheet1", row, col);
-    assert_eq!(value(&engine, 5, 2), Some(LiteralValue::Number(6.0)), "=SUBTOTAL(109,[Qty]) in the totals row");
-    assert_eq!(value(&engine, 5, 3), Some(LiteralValue::Number(60.0)), "=SUBTOTAL(109,[Price]) in the totals row");
-    assert_eq!(value(&engine, 1, 10), Some(LiteralValue::Number(6.0)), "=Table1[[#Totals],[Qty]] reads the totals cell");
-    assert_eq!(value(&engine, 1, 11), Some(LiteralValue::Number(66.0)), "=SUM(Table1[#Totals]) = 6 + 60");
+    assert_eq!(
+        value(&engine, 5, 2),
+        Some(LiteralValue::Number(6.0)),
+        "=SUBTOTAL(109,[Qty]) in the totals row"
+    );
+    assert_eq!(
+        value(&engine, 5, 3),
+        Some(LiteralValue::Number(60.0)),
+        "=SUBTOTAL(109,[Price]) in the totals row"
+    );
+    assert_eq!(
+        value(&engine, 1, 10),
+        Some(LiteralValue::Number(6.0)),
+        "=Table1[[#Totals],[Qty]] reads the totals cell"
+    );
+    assert_eq!(
+        value(&engine, 1, 11),
+        Some(LiteralValue::Number(66.0)),
+        "=SUM(Table1[#Totals]) = 6 + 60"
+    );
 
     // Unqualified item forms INSIDE the table body (column A, rows 2..4) through both paths.
-    engine.set_cell_formula("Sheet1", 2, 1, parse("=[[#Totals],[Qty]]")).unwrap();
-    engine.set_cell_formula("Sheet1", 3, 1, parse("=SUM([Price])")).unwrap();
+    engine
+        .set_cell_formula("Sheet1", 2, 1, parse("=[[#Totals],[Qty]]"))
+        .unwrap();
+    engine
+        .set_cell_formula("Sheet1", 3, 1, parse("=SUM([Price])"))
+        .unwrap();
     engine
         .bulk_set_formulas("Sheet1", vec![(4, 1, parse("=SUM([#Totals])"))])
         .unwrap();
     engine.evaluate_all().unwrap();
-    assert_eq!(value(&engine, 2, 1), Some(LiteralValue::Number(6.0)), "in-table =[[#Totals],[Qty]]");
-    assert_eq!(value(&engine, 3, 1), Some(LiteralValue::Number(60.0)), "in-table =SUM([Price])");
-    assert_eq!(value(&engine, 4, 1), Some(LiteralValue::Number(66.0)), "in-table =SUM([#Totals])");
+    assert_eq!(
+        value(&engine, 2, 1),
+        Some(LiteralValue::Number(6.0)),
+        "in-table =[[#Totals],[Qty]]"
+    );
+    assert_eq!(
+        value(&engine, 3, 1),
+        Some(LiteralValue::Number(60.0)),
+        "in-table =SUM([Price])"
+    );
+    assert_eq!(
+        value(&engine, 4, 1),
+        Some(LiteralValue::Number(66.0)),
+        "in-table =SUM([#Totals])"
+    );
 
     // A body edit flows through the unqualified totals formula.
-    engine.set_cell_value("Sheet1", 2, 2, LiteralValue::Number(11.0)).unwrap();
+    engine
+        .set_cell_value("Sheet1", 2, 2, LiteralValue::Number(11.0))
+        .unwrap();
     engine.evaluate_all().unwrap();
     assert_eq!(value(&engine, 5, 2), Some(LiteralValue::Number(16.0)));
     assert_eq!(value(&engine, 1, 10), Some(LiteralValue::Number(16.0)));

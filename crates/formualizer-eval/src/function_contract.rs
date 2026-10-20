@@ -101,26 +101,49 @@ pub struct FunctionSemanticIdentity {
 impl FunctionSemanticIdentity {
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        push_bytes(&mut out, self.namespace.as_bytes());
-        push_bytes(&mut out, self.canonical_name.as_bytes());
-        out.extend_from_slice(&self.generation.to_le_bytes());
-        out.extend_from_slice(&self.caps.bits().to_le_bytes());
-        out.push(self.contract.dependency as u8);
-        out.push(self.contract.evaluation as u8);
-        out.push(self.contract.result as u8);
-        out.push(self.contract.environment as u8);
-        out.push(self.contract.context as u8);
-        match self.contract.precision {
-            Some(precision) => {
-                out.push(1);
-                encode_precision(&mut out, precision);
-            }
-            None => out.push(0),
-        }
-        out.extend_from_slice(&(self.argument_by_ref.len() as u64).to_le_bytes());
-        out.extend(self.argument_by_ref.iter().map(|value| u8::from(*value)));
+        encode_function_semantic_identity(
+            &mut out,
+            &self.namespace,
+            &self.canonical_name,
+            self.generation,
+            self.caps,
+            self.contract,
+            &self.argument_by_ref,
+        );
         out
     }
+}
+
+/// The byte encoding behind [`FunctionSemanticIdentity::encode`], written from borrowed fields
+/// so a caller that already holds them (the template-key writer, once per function node of
+/// every ingested formula) need not clone them into an identity first.
+pub(crate) fn encode_function_semantic_identity(
+    out: &mut Vec<u8>,
+    namespace: &str,
+    canonical_name: &str,
+    generation: u64,
+    caps: FnCaps,
+    contract: FunctionSemanticContract,
+    argument_by_ref: &[bool],
+) {
+    push_bytes(out, namespace.as_bytes());
+    push_bytes(out, canonical_name.as_bytes());
+    out.extend_from_slice(&generation.to_le_bytes());
+    out.extend_from_slice(&caps.bits().to_le_bytes());
+    out.push(contract.dependency as u8);
+    out.push(contract.evaluation as u8);
+    out.push(contract.result as u8);
+    out.push(contract.environment as u8);
+    out.push(contract.context as u8);
+    match contract.precision {
+        Some(precision) => {
+            out.push(1);
+            encode_precision(out, precision);
+        }
+        None => out.push(0),
+    }
+    out.extend_from_slice(&(argument_by_ref.len() as u64).to_le_bytes());
+    out.extend(argument_by_ref.iter().map(|value| u8::from(*value)));
 }
 
 fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {

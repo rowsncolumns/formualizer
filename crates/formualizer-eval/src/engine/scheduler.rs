@@ -1,7 +1,9 @@
 use super::DependencyGraph;
 use super::vertex::VertexId;
+use crate::engine::virtual_deps::VirtualDeps;
 use formualizer_common::ExcelError;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
 
 pub struct Scheduler<'a> {
     graph: &'a DependencyGraph,
@@ -128,13 +130,13 @@ impl<'a> Scheduler<'a> {
     pub fn create_schedule_with_virtual(
         &self,
         vertices: &[VertexId],
-        vdeps: &FxHashMap<VertexId, Vec<VertexId>>,
+        vdeps: &VirtualDeps,
     ) -> Result<Schedule, ExcelError> {
         #[cfg(feature = "tracing")]
         let _span = tracing::info_span!(
             "scheduler_with_virtual",
             vertices = vertices.len(),
-            vdeps = vdeps.len()
+            vdeps = vdeps.vertex_count()
         )
         .entered();
         // 1. SCC detection with virtual deps
@@ -172,7 +174,7 @@ impl<'a> Scheduler<'a> {
     fn tarjan_scc_with_virtual(
         &self,
         vertices: &[VertexId],
-        vdeps: &FxHashMap<VertexId, Vec<VertexId>>,
+        vdeps: &VirtualDeps,
     ) -> Result<Vec<Vec<VertexId>>, ExcelError> {
         self.tarjan_scc_impl(vertices, Some(vdeps))
     }
@@ -200,42 +202,56 @@ impl<'a> Scheduler<'a> {
     fn tarjan_scc_impl(
         &self,
         vertices: &[VertexId],
-        vdeps: Option<&FxHashMap<VertexId, Vec<VertexId>>>,
+        vdeps: Option<&VirtualDeps>,
     ) -> Result<Vec<Vec<VertexId>>, ExcelError> {
-        /// One vertex's dependency list, materialized once per DFS frame.
+        /// One edge target: a vertex (resolved through `local_of` below) or an already-local
+        /// group node.
+        enum Target {
+            Vertex(VertexId),
+            Local(u32),
+        }
+        /// One node's dependency list, materialized once per DFS frame.
         enum DepList<'g> {
             Slice(&'g [VertexId]),
             Owned(Vec<VertexId>),
+            /// A vertex with virtual deps: its base adjacency, then its owned extras, then the
+            /// group nodes it depends on — the order the expanded lists walked.
+            Virtual {
+                base: Cow<'g, [VertexId]>,
+                owned: &'g [VertexId],
+                groups: &'g [u32],
+                group_local: &'g FxHashMap<u32, u32>,
+            },
+            /// A group node: its members.
+            Members(&'g [VertexId]),
         }
         impl DepList<'_> {
             #[inline]
-            fn get(&self, i: usize) -> Option<VertexId> {
+            fn get(&self, i: usize) -> Option<Target> {
                 match self {
-                    DepList::Slice(s) => s.get(i).copied(),
-                    DepList::Owned(v) => v.get(i).copied(),
+                    DepList::Slice(s) => s.get(i).map(|&v| Target::Vertex(v)),
+                    DepList::Owned(v) => v.get(i).map(|&v| Target::Vertex(v)),
+                    DepList::Members(m) => m.get(i).map(|&v| Target::Vertex(v)),
+                    DepList::Virtual {
+                        base,
+                        owned,
+                        groups,
+                        group_local,
+                    } => {
+                        if i < base.len() {
+                            return Some(Target::Vertex(base[i]));
+                        }
+                        let i = i - base.len();
+                        if i < owned.len() {
+                            return Some(Target::Vertex(owned[i]));
+                        }
+                        groups
+                            .get(i - owned.len())
+                            .map(|g| Target::Local(group_local[g]))
+                    }
                 }
             }
         }
-
-        let deps_of = |vertex: VertexId| -> DepList<'_> {
-            // Edge order must match the recursive implementation: the base
-            // adjacency (zero-copy slice when available), with the vertex's
-            // virtual deps appended when present.
-            if let Some(extra) = vdeps.and_then(|m| m.get(&vertex)) {
-                let mut combined: Vec<VertexId> =
-                    if let Some(base) = self.graph.dependencies_slice(vertex) {
-                        base.to_vec()
-                    } else {
-                        self.graph.get_dependencies(vertex)
-                    };
-                combined.extend(extra.iter().copied());
-                DepList::Owned(combined)
-            } else if let Some(base) = self.graph.dependencies_slice(vertex) {
-                DepList::Slice(base)
-            } else {
-                DepList::Owned(self.graph.get_dependencies(vertex))
-            }
-        };
 
         // Compact the candidate set into dense local ids once, up front. All
         // per-edge / per-frame bookkeeping (index, lowlink, on-stack) then
@@ -255,17 +271,61 @@ impl<'a> Scheduler<'a> {
         }
         let n = vertex_of_local.len();
 
+        // Group nodes: one local id (after the vertices) per rectangle group a scheduled vertex
+        // depends on. A group is a pass-through — reached from every dependent, reaching every
+        // member — so the vertices reachable through it are exactly those the expanded edges
+        // reached, and the SCC partition of the real vertices is unchanged.
+        let mut group_local: FxHashMap<u32, u32> = FxHashMap::default();
+        let mut members_of_group_local: Vec<&[VertexId]> = Vec::new();
+        if let Some(vd) = vdeps {
+            for &v in &vertex_of_local {
+                for &g in vd.groups_of(v) {
+                    group_local.entry(g).or_insert_with(|| {
+                        members_of_group_local.push(vd.group_members(g));
+                        (n + members_of_group_local.len() - 1) as u32
+                    });
+                }
+            }
+        }
+        let total = n + members_of_group_local.len();
+
+        let deps_of = |local: u32| -> DepList<'_> {
+            if let Some(members) = (local as usize)
+                .checked_sub(n)
+                .and_then(|i| members_of_group_local.get(i))
+            {
+                return DepList::Members(members);
+            }
+            let vertex = vertex_of_local[local as usize];
+            if let Some(vd) = vdeps.filter(|vd| vd.has_vertex(vertex)) {
+                let base: Cow<'_, [VertexId]> = match self.graph.dependencies_slice(vertex) {
+                    Some(base) => Cow::Borrowed(base),
+                    None => Cow::Owned(self.graph.get_dependencies(vertex)),
+                };
+                DepList::Virtual {
+                    base,
+                    owned: vd.owned_of(vertex),
+                    groups: vd.groups_of(vertex),
+                    group_local: &group_local,
+                }
+            } else if let Some(base) = self.graph.dependencies_slice(vertex) {
+                DepList::Slice(base)
+            } else {
+                DepList::Owned(self.graph.get_dependencies(vertex))
+            }
+        };
+
         let mut index_counter: u32 = 0;
-        let mut indices: Vec<u32> = vec![UNVISITED; n];
-        let mut lowlinks: Vec<u32> = vec![0; n];
-        let mut on_stack: Vec<bool> = vec![false; n];
-        let mut stack: Vec<u32> = Vec::with_capacity(n);
+        let mut indices: Vec<u32> = vec![UNVISITED; total];
+        let mut lowlinks: Vec<u32> = vec![0; total];
+        let mut on_stack: Vec<bool> = vec![false; total];
+        let mut stack: Vec<u32> = Vec::with_capacity(total);
         let mut sccs: Vec<Vec<VertexId>> = Vec::new();
 
         // Explicit DFS frames: (local id, its dependency list, next edge
-        // offset). Pre-sized to the worst case (one frame per vertex, e.g. a
+        // offset). Pre-sized to the worst case (one frame per node, e.g. a
         // single deep chain) so deep schedules never re-grow the stack.
-        let mut frames: Vec<(u32, DepList<'_>, u32)> = Vec::with_capacity(n);
+        let mut frames: Vec<(u32, DepList<'_>, u32)> = Vec::with_capacity(total);
 
         for &root_vertex in vertices {
             let root = local_of[&root_vertex];
@@ -277,16 +337,20 @@ impl<'a> Scheduler<'a> {
             index_counter += 1;
             stack.push(root);
             on_stack[root as usize] = true;
-            frames.push((root, deps_of(root_vertex), 0));
+            frames.push((root, deps_of(root), 0));
 
             while let Some(frame) = frames.last_mut() {
                 let vertex = frame.0 as usize;
-                if let Some(dep_vertex) = frame.1.get(frame.2 as usize) {
+                if let Some(target) = frame.1.get(frame.2 as usize) {
                     frame.2 += 1;
                     // Only consider dependencies that are part of the current
                     // scheduling task.
-                    let Some(&dep) = local_of.get(&dep_vertex) else {
-                        continue;
+                    let dep = match target {
+                        Target::Vertex(dep_vertex) => match local_of.get(&dep_vertex) {
+                            Some(&dep) => dep,
+                            None => continue,
+                        },
+                        Target::Local(dep) => dep,
                     };
                     let d = dep as usize;
                     if indices[d] == UNVISITED {
@@ -296,7 +360,7 @@ impl<'a> Scheduler<'a> {
                         index_counter += 1;
                         stack.push(dep);
                         on_stack[d] = true;
-                        frames.push((dep, deps_of(dep_vertex), 0));
+                        frames.push((dep, deps_of(dep), 0));
                     } else if on_stack[d] {
                         // On the Tarjan stack: in the current SCC.
                         let dep_index = indices[d];
@@ -305,7 +369,7 @@ impl<'a> Scheduler<'a> {
                         }
                     }
                 } else {
-                    // Vertex exhausted: emit its SCC if it is a root, then
+                    // Node exhausted: emit its SCC if it is a root, then
                     // return to the parent frame, folding the child lowlink in
                     // (the post-recursion `min(lowlink[v], lowlink[dep])`).
                     let vertex_lowlink = lowlinks[vertex];
@@ -314,12 +378,18 @@ impl<'a> Scheduler<'a> {
                         loop {
                             let w = stack.pop().unwrap();
                             on_stack[w as usize] = false;
-                            scc.push(vertex_of_local[w as usize]);
+                            // Group nodes are scheduling scaffolding, not formulas: a cycle
+                            // through one is the cycle among its real vertices.
+                            if (w as usize) < n {
+                                scc.push(vertex_of_local[w as usize]);
+                            }
                             if w as usize == vertex {
                                 break;
                             }
                         }
-                        sccs.push(scc);
+                        if !scc.is_empty() {
+                            sccs.push(scc);
+                        }
                     }
                     frames.pop();
                     if let Some(parent) = frames.last() {
@@ -343,7 +413,8 @@ impl<'a> Scheduler<'a> {
         vertices: &[VertexId],
         vdeps: &FxHashMap<VertexId, Vec<VertexId>>,
     ) -> Result<Vec<Vec<VertexId>>, ExcelError> {
-        self.tarjan_scc_with_virtual(vertices, vdeps)
+        let vdeps = VirtualDeps::from_per_vertex(vdeps.clone());
+        self.tarjan_scc_with_virtual(vertices, &vdeps)
     }
 
     /// Recursive reference implementation, retained ONLY for the differential
@@ -775,7 +846,7 @@ impl<'a> Scheduler<'a> {
         &self,
         cycles: &[Vec<VertexId>],
         acyclic_sccs: Vec<Vec<VertexId>>,
-        vdeps: Option<&FxHashMap<VertexId, Vec<VertexId>>>,
+        vdeps: Option<&VirtualDeps>,
     ) -> Result<(Vec<ScheduleUnit>, Vec<Layer>), ExcelError> {
         let singletons: Vec<VertexId> = acyclic_sccs.into_iter().flatten().collect();
         let cycle_node_count = cycles.len();
@@ -809,6 +880,17 @@ impl<'a> Scheduler<'a> {
                 node_dependents[dep_node].push(from_node);
             }
         };
+        // Rectangle groups are pass-through nodes beside the condensation nodes: a group
+        // resolves once every member's node has, and then releases every node depending on
+        // it. The one case that cannot pass through is a dependent sharing a CYCLE node with
+        // a member (the expanded edge would be intra-node and ignored, but waiting on the
+        // group would wait on the dependent's own node): that dependent expands the group
+        // into direct edges instead.
+        let mut group_local: FxHashMap<u32, u32> = FxHashMap::default();
+        let mut group_in: Vec<usize> = Vec::new();
+        let mut group_dependents: Vec<Vec<usize>> = Vec::new();
+        let mut group_cycle_nodes: Vec<FxHashSet<usize>> = Vec::new();
+        let mut node_member_groups: Vec<Vec<u32>> = vec![Vec::new(); node_count];
         for (&v, &n_v) in node_of.iter() {
             if let Some(deps) = self.graph.dependencies_slice(v) {
                 for &dep in deps {
@@ -819,9 +901,51 @@ impl<'a> Scheduler<'a> {
                     scan_dep(n_v, dep, &mut in_degrees, &mut node_dependents);
                 }
             }
-            if let Some(extra) = vdeps.and_then(|m| m.get(&v)) {
-                for &dep in extra {
-                    scan_dep(n_v, dep, &mut in_degrees, &mut node_dependents);
+            let Some(vd) = vdeps else {
+                continue;
+            };
+            for &dep in vd.owned_of(v) {
+                scan_dep(n_v, dep, &mut in_degrees, &mut node_dependents);
+            }
+            for &g in vd.groups_of(v) {
+                let gl = match group_local.get(&g) {
+                    Some(&gl) => gl,
+                    None => {
+                        let mut members = 0usize;
+                        let mut cycle_nodes = FxHashSet::default();
+                        let gl = group_in.len() as u32;
+                        for m in vd.group_members(g) {
+                            let Some(&mn) = node_of.get(m) else {
+                                continue;
+                            };
+                            members += 1;
+                            node_member_groups[mn].push(gl);
+                            if mn < cycle_node_count {
+                                cycle_nodes.insert(mn);
+                            }
+                        }
+                        if members == 0 {
+                            // No scheduled member: nothing to wait for.
+                            group_local.insert(g, u32::MAX);
+                            continue;
+                        }
+                        group_in.push(members);
+                        group_dependents.push(Vec::new());
+                        group_cycle_nodes.push(cycle_nodes);
+                        group_local.insert(g, gl);
+                        gl
+                    }
+                };
+                if gl == u32::MAX {
+                    continue;
+                }
+                if n_v < cycle_node_count && group_cycle_nodes[gl as usize].contains(&n_v) {
+                    for &dep in vd.group_members(g) {
+                        scan_dep(n_v, dep, &mut in_degrees, &mut node_dependents);
+                    }
+                } else {
+                    in_degrees[n_v] += 1;
+                    group_dependents[gl as usize].push(n_v);
                 }
             }
         }
@@ -866,6 +990,17 @@ impl<'a> Scheduler<'a> {
                         next.push(dependent);
                     }
                 }
+                for &gl in &node_member_groups[n] {
+                    group_in[gl as usize] -= 1;
+                    if group_in[gl as usize] == 0 {
+                        for &dependent in &group_dependents[gl as usize] {
+                            in_degrees[dependent] -= 1;
+                            if in_degrees[dependent] == 0 {
+                                next.push(dependent);
+                            }
+                        }
+                    }
+                }
             }
             current = next;
         }
@@ -885,67 +1020,113 @@ impl<'a> Scheduler<'a> {
     pub(crate) fn build_layers_with_virtual(
         &self,
         acyclic_sccs: Vec<Vec<VertexId>>,
-        vdeps: &FxHashMap<VertexId, Vec<VertexId>>,
+        vdeps: &VirtualDeps,
     ) -> Result<Vec<Layer>, ExcelError> {
         use std::collections::VecDeque;
         let vertices: Vec<VertexId> = acyclic_sccs.into_iter().flatten().collect();
         if vertices.is_empty() {
             return Ok(Vec::new());
         }
-        let vertex_set: FxHashSet<VertexId> = vertices.iter().copied().collect();
+        let n = vertices.len();
+        let mut local_of: FxHashMap<VertexId, u32> =
+            FxHashMap::with_capacity_and_hasher(n, Default::default());
+        for (i, &v) in vertices.iter().enumerate() {
+            local_of.insert(v, i as u32);
+        }
 
-        // Build combined adjacency (dependencies and dependents) within the subset
-        let mut combined_deps: FxHashMap<VertexId, Vec<VertexId>> = FxHashMap::default();
-        let mut combined_out: FxHashMap<VertexId, Vec<VertexId>> = FxHashMap::default();
-        for &v in &vertices {
-            let mut deps: Vec<VertexId> = Vec::new();
+        // Kahn over the vertices plus one pass-through node per rectangle group with a
+        // scheduled member: a vertex waits on each distinct direct dependency (graph edge or
+        // owned extra) and on each of its groups; a group waits on its scheduled members and
+        // then releases its dependents within the same wave — so a dependent becomes ready in
+        // the wave after its last dependency resolves, exactly as with the expanded edges.
+        let mut in_degrees: Vec<u32> = vec![0; n];
+        let mut out: Vec<Vec<u32>> = vec![Vec::new(); n];
+        let mut member_groups: Vec<Vec<u32>> = vec![Vec::new(); n];
+        let mut group_local: FxHashMap<u32, u32> = FxHashMap::default();
+        let mut group_in: Vec<u32> = Vec::new();
+        let mut group_dependents: Vec<Vec<u32>> = Vec::new();
+        let mut direct: Vec<u32> = Vec::new();
+        for (i, &v) in vertices.iter().enumerate() {
+            direct.clear();
             if let Some(base) = self.graph.dependencies_slice(v) {
-                deps.extend(base.iter().copied().filter(|d| vertex_set.contains(d)));
+                direct.extend(base.iter().filter_map(|d| local_of.get(d).copied()));
             } else {
-                deps.extend(
+                direct.extend(
                     self.graph
                         .get_dependencies(v)
-                        .into_iter()
-                        .filter(|d| vertex_set.contains(d)),
+                        .iter()
+                        .filter_map(|d| local_of.get(d).copied()),
                 );
             }
-            if let Some(extra) = vdeps.get(&v) {
-                deps.extend(extra.iter().copied().filter(|d| vertex_set.contains(d)));
+            direct.extend(
+                vdeps
+                    .owned_of(v)
+                    .iter()
+                    .filter_map(|d| local_of.get(d).copied()),
+            );
+            direct.sort_unstable();
+            direct.dedup();
+            for &d in &direct {
+                out[d as usize].push(i as u32);
             }
-            deps.sort_unstable();
-            deps.dedup();
-            combined_deps.insert(v, deps);
-        }
-        // invert
-        for (&v, deps) in combined_deps.iter() {
-            for &d in deps {
-                combined_out.entry(d).or_default().push(v);
+            let mut degree = direct.len() as u32;
+            for &g in vdeps.groups_of(v) {
+                let gl = match group_local.get(&g) {
+                    Some(&gl) => gl,
+                    None => {
+                        let members: Vec<u32> = vdeps
+                            .group_members(g)
+                            .iter()
+                            .filter_map(|m| local_of.get(m).copied())
+                            .collect();
+                        let gl = if members.is_empty() {
+                            u32::MAX
+                        } else {
+                            let gl = group_in.len() as u32;
+                            for &m in &members {
+                                member_groups[m as usize].push(gl);
+                            }
+                            group_in.push(members.len() as u32);
+                            group_dependents.push(Vec::new());
+                            gl
+                        };
+                        group_local.insert(g, gl);
+                        gl
+                    }
+                };
+                if gl == u32::MAX {
+                    continue;
+                }
+                group_dependents[gl as usize].push(i as u32);
+                degree += 1;
             }
+            in_degrees[i] = degree;
         }
-        // in-degrees
-        let mut in_degrees: FxHashMap<VertexId, usize> = FxHashMap::default();
-        for &v in &vertices {
-            let indeg = combined_deps.get(&v).map(|v| v.len()).unwrap_or(0);
-            in_degrees.insert(v, indeg);
-        }
-        // queue of 0 in-degree
-        let mut queue: VecDeque<VertexId> = in_degrees
-            .iter()
-            .filter(|&(_, &deg)| deg == 0)
-            .map(|(&v, _)| v)
-            .collect();
 
+        let mut queue: VecDeque<u32> = (0..n as u32)
+            .filter(|&i| in_degrees[i as usize] == 0)
+            .collect();
         let mut layers = Vec::new();
         let mut processed_count = 0;
         while !queue.is_empty() {
             let mut cur = Vec::new();
             for _ in 0..queue.len() {
                 let u = queue.pop_front().unwrap();
-                cur.push(u);
+                cur.push(vertices[u as usize]);
                 processed_count += 1;
-                if let Some(dependents) = combined_out.get(&u) {
-                    for &w in dependents {
-                        if let Some(ind) = in_degrees.get_mut(&w) {
+                for &w in &out[u as usize] {
+                    let ind = &mut in_degrees[w as usize];
+                    *ind = ind.saturating_sub(1);
+                    if *ind == 0 {
+                        queue.push_back(w);
+                    }
+                }
+                for &gl in &member_groups[u as usize] {
+                    let pending = &mut group_in[gl as usize];
+                    *pending = pending.saturating_sub(1);
+                    if *pending == 0 {
+                        for &w in &group_dependents[gl as usize] {
+                            let ind = &mut in_degrees[w as usize];
                             *ind = ind.saturating_sub(1);
                             if *ind == 0 {
                                 queue.push_back(w);

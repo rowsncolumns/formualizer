@@ -9,8 +9,193 @@ use crate::traits::{
 };
 use formualizer_common::{ExcelError, LiteralValue};
 use formualizer_parse::parser::{ReferenceType, TableReference};
-use rustc_hash::FxHashSet;
-use std::sync::Mutex;
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::sync::{Arc, Mutex};
+
+/// Virtual (range-derived) scheduling dependencies of one schedule build: the dirty / volatile
+/// formula vertices each candidate must be ordered after that its graph edges do not already
+/// carry.
+///
+/// Member lists are shared per rectangle. A template-shaped workbook has tens of thousands of
+/// formulas reading the same few blocks (`SUMIFS` over a 4,000-row key column, filled down);
+/// listing those thousands of vertices once per formula is hundreds of millions of edges, which
+/// the scheduler then sorted and inverted (23 GB and minutes for a 1M-formula model, before a
+/// single formula was evaluated). Here a vertex names the groups it depends on and the scheduler
+/// treats each group as one pass-through node — every member first, then every dependent —
+/// which orders exactly as the expanded edges did.
+#[derive(Clone, Debug, Default)]
+pub struct VirtualDeps {
+    /// Per-vertex owned extras: dynamic (INDIRECT / OFFSET) dependencies and, for a formula that
+    /// sits inside a rectangle it reads, that rectangle's members minus itself.
+    per_vertex: FxHashMap<VertexId, Vec<VertexId>>,
+    /// Distinct non-empty rectangle member lists, each sorted by vertex id.
+    groups: Vec<Arc<[VertexId]>>,
+    /// Vertex -> the groups it depends on (sorted, deduplicated group ids).
+    vertex_groups: FxHashMap<VertexId, Vec<u32>>,
+}
+
+impl VirtualDeps {
+    /// The legacy shape: every vertex's full dependency list, owned. Lists are kept verbatim
+    /// (order included) so a schedule built from them walks its edges exactly as before.
+    pub fn from_per_vertex(per_vertex: FxHashMap<VertexId, Vec<VertexId>>) -> Self {
+        Self {
+            per_vertex,
+            ..Self::default()
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.per_vertex.is_empty() && self.vertex_groups.is_empty()
+    }
+
+    /// Vertices with at least one virtual dependency.
+    pub fn vertex_count(&self) -> usize {
+        self.vertices().count()
+    }
+
+    /// The number of shared rectangle member lists.
+    pub fn group_count(&self) -> usize {
+        self.groups.len()
+    }
+
+    /// The expanded edge count — what the per-vertex lists would hold.
+    pub fn edge_count(&self) -> usize {
+        self.per_vertex.values().map(Vec::len).sum::<usize>()
+            + self
+                .vertex_groups
+                .values()
+                .flatten()
+                .map(|&g| self.groups[g as usize].len())
+                .sum::<usize>()
+    }
+
+    pub fn has_vertex(&self, v: VertexId) -> bool {
+        self.per_vertex.contains_key(&v) || self.vertex_groups.contains_key(&v)
+    }
+
+    /// Every vertex with at least one virtual dependency, each once.
+    pub fn vertices(&self) -> impl Iterator<Item = VertexId> + '_ {
+        self.per_vertex.keys().copied().chain(
+            self.vertex_groups
+                .keys()
+                .filter(|v| !self.per_vertex.contains_key(v))
+                .copied(),
+        )
+    }
+
+    pub fn owned_of(&self, v: VertexId) -> &[VertexId] {
+        self.per_vertex.get(&v).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn groups_of(&self, v: VertexId) -> &[u32] {
+        self.vertex_groups.get(&v).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn group_members(&self, group: u32) -> &[VertexId] {
+        &self.groups[group as usize]
+    }
+
+    /// `v`'s dependencies as one sorted, deduplicated list — the legacy per-vertex shape.
+    pub fn flat_sorted_deps(&self, v: VertexId) -> Vec<VertexId> {
+        let mut out: Vec<VertexId> = self.owned_of(v).to_vec();
+        for &g in self.groups_of(v) {
+            out.extend_from_slice(self.group_members(g));
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Every vertex's expanded list: the legacy map this type exists to avoid materializing.
+    #[cfg(test)]
+    pub fn expand(&self) -> FxHashMap<VertexId, Vec<VertexId>> {
+        self.vertices()
+            .map(|v| (v, self.flat_sorted_deps(v)))
+            .collect()
+    }
+}
+
+/// The per-build memo behind [`VirtualDeps`]: rectangle -> group (`None` for a rectangle holding
+/// no dirty / volatile formula). A schedule build asks for the same few rectangles from tens of
+/// thousands of formulas, so each rectangle is walked once per build; dirty / volatile flags do
+/// not change while a schedule is being built, so the memo is exact.
+#[derive(Default)]
+pub(crate) struct RectMemo {
+    by_rect: FxHashMap<(crate::SheetId, u32, u32, u32, u32), Option<u32>>,
+    groups: Vec<Arc<[VertexId]>>,
+}
+
+impl RectMemo {
+    fn group_for<R: EvaluationContext>(
+        &mut self,
+        engine: &Engine<R>,
+        sheet_id: crate::SheetId,
+        sr: u32,
+        sc: u32,
+        er: u32,
+        ec: u32,
+    ) -> Option<u32> {
+        let key = (sheet_id, sr, sc, er, ec);
+        if let Some(&group) = self.by_rect.get(&key) {
+            return group;
+        }
+        let members = dirty_formula_vertices_in_rect(engine, sheet_id, sr, sc, er, ec);
+        let group = if members.is_empty() {
+            None
+        } else {
+            self.groups.push(Arc::from(members));
+            Some((self.groups.len() - 1) as u32)
+        };
+        self.by_rect.insert(key, group);
+        group
+    }
+
+    /// Record that `v` must follow the dirty / volatile formulas inside a 1-based inclusive
+    /// rectangle: as the shared group, or — when `v` itself sits inside it — as owned extras
+    /// minus `v` (a group never contains a vertex that depends on it).
+    #[allow(clippy::too_many_arguments)]
+    fn attach<R: EvaluationContext>(
+        &mut self,
+        engine: &Engine<R>,
+        v: VertexId,
+        sheet_id: crate::SheetId,
+        sr: u32,
+        sc: u32,
+        er: u32,
+        ec: u32,
+        out: &mut CollectedVirtualDeps,
+    ) {
+        let Some(group) = self.group_for(engine, sheet_id, sr, sc, er, ec) else {
+            return;
+        };
+        let members = &self.groups[group as usize];
+        if members.binary_search(&v).is_ok() {
+            out.owned
+                .extend(members.iter().copied().filter(|&u| u != v));
+        } else {
+            out.groups.push(group);
+        }
+    }
+}
+
+/// One vertex's virtual dependencies as collected: the groups it depends on plus owned extras.
+#[derive(Default)]
+pub(crate) struct CollectedVirtualDeps {
+    pub(crate) groups: Vec<u32>,
+    pub(crate) owned: Vec<VertexId>,
+}
+
+impl CollectedVirtualDeps {
+    fn flatten(self, groups: &[Arc<[VertexId]>]) -> Vec<VertexId> {
+        let mut out = self.owned;
+        for g in self.groups {
+            out.extend_from_slice(&groups[g as usize]);
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
 
 use crate::interpreter::Interpreter;
 
@@ -315,11 +500,24 @@ impl<'a, R: EvaluationContext> EvaluationContext for DynamicRefCollector<'a, R> 
 pub struct RangeVirtualDepProvider;
 
 impl RangeVirtualDepProvider {
+    /// `v`'s range-derived dependencies as one flat, sorted list.
     pub fn get_virtual_deps<R: EvaluationContext>(
         engine: &Engine<R>,
         v: VertexId,
     ) -> Vec<VertexId> {
-        let mut deps = Vec::new();
+        let mut memo = RectMemo::default();
+        let collected = Self::collect(engine, v, &mut memo);
+        collected.flatten(&memo.groups)
+    }
+
+    /// The rectangle groups and owned extras `v` must be scheduled after, sharing `memo` across
+    /// the formulas of one schedule build.
+    pub(crate) fn collect<R: EvaluationContext>(
+        engine: &Engine<R>,
+        v: VertexId,
+        memo: &mut RectMemo,
+    ) -> CollectedVirtualDeps {
+        let mut collected = CollectedVirtualDeps::default();
         if let Some(ranges) = engine.graph.get_range_dependencies(v) {
             let current_sheet_id = engine.graph.get_vertex_sheet_id(v);
             for r in ranges {
@@ -402,7 +600,7 @@ impl RangeVirtualDepProvider {
                     continue;
                 }
 
-                push_dirty_formula_vertices_in_rect(engine, v, sheet_id, sr, sc, er, ec, &mut deps);
+                memo.attach(engine, v, sheet_id, sr, sc, er, ec, &mut collected);
             }
         }
         // Structured references: the formula's graph edge points at the TABLE vertex, whose
@@ -414,7 +612,7 @@ impl RangeVirtualDepProvider {
         if depends_on_table(engine, v) {
             let current_row = engine.graph.get_cell_ref(v).map(|c| c.coord.row() + 1);
             for (sheet_id, rect) in table_reference_rects(engine, v, current_row) {
-                push_dirty_formula_vertices_in_rect(
+                memo.attach(
                     engine,
                     v,
                     sheet_id,
@@ -422,34 +620,31 @@ impl RangeVirtualDepProvider {
                     rect.start_col,
                     rect.end_row,
                     rect.end_col,
-                    &mut deps,
+                    &mut collected,
                 );
             }
         }
-        deps
+        collected
     }
 }
 
-/// Push the dirty / volatile formula vertices inside a 1-based inclusive rectangle (excluding
-/// `v` itself) — the vertices `v` must be scheduled after.
-#[allow(clippy::too_many_arguments)]
-fn push_dirty_formula_vertices_in_rect<R: EvaluationContext>(
+/// Every dirty / volatile formula vertex inside a 1-based inclusive rectangle, in vertex order.
+fn dirty_formula_vertices_in_rect<R: EvaluationContext>(
     engine: &Engine<R>,
-    v: VertexId,
     sheet_id: crate::SheetId,
     sr: u32,
     sc: u32,
     er: u32,
     ec: u32,
-    deps: &mut Vec<VertexId>,
-) {
+) -> Vec<VertexId> {
     let Some(index) = engine.graph.sheet_index(sheet_id) else {
-        return;
+        return Vec::new();
     };
     let sr0 = sr.saturating_sub(1);
     let er0 = er.saturating_sub(1);
     let sc0 = sc.saturating_sub(1);
     let ec0 = ec.saturating_sub(1);
+    let mut inside = Vec::new();
     for u in index.vertices_in_col_range(sc0, ec0) {
         let pc = engine.graph.vertex_coord(u);
         let row0 = pc.row();
@@ -458,13 +653,15 @@ fn push_dirty_formula_vertices_in_rect<R: EvaluationContext>(
         }
         match engine.graph.get_vertex_kind(u) {
             VertexKind::FormulaScalar | VertexKind::FormulaArray => {
-                if (engine.graph.is_dirty(u) || engine.graph.is_volatile(u)) && u != v {
-                    deps.push(u);
+                if engine.graph.is_dirty(u) || engine.graph.is_volatile(u) {
+                    inside.push(u);
                 }
             }
             _ => {}
         }
     }
+    inside.sort_unstable();
+    inside
 }
 
 /// Does `v` carry a graph edge to a table vertex (i.e. its formula holds a structured reference
@@ -537,31 +734,40 @@ impl<'a, R: EvaluationContext> VirtualDepBuilder<'a, R> {
     pub fn new(engine: &'a Engine<R>) -> Self {
         Self { engine }
     }
-    pub fn build(
-        &self,
-        candidates: &[VertexId],
-    ) -> (
-        rustc_hash::FxHashMap<VertexId, Vec<VertexId>>,
-        Vec<VertexId>,
-    ) {
-        let mut vdeps: rustc_hash::FxHashMap<VertexId, Vec<VertexId>> =
-            rustc_hash::FxHashMap::default();
+    pub fn build(&self, candidates: &[VertexId]) -> (VirtualDeps, Vec<VertexId>) {
         let augmented_vertices: Vec<VertexId> = Vec::new(); // Will be populated in Phase 3
+        let mut memo = RectMemo::default();
+        let mut per_vertex: FxHashMap<VertexId, Vec<VertexId>> = FxHashMap::default();
+        let mut vertex_groups: FxHashMap<VertexId, Vec<u32>> = FxHashMap::default();
 
         for &v in candidates {
-            let mut deps = RangeVirtualDepProvider::get_virtual_deps(self.engine, v);
-            let dynamic_deps = DynamicRefVirtualDepProvider::get_virtual_deps(self.engine, v);
-
-            deps.extend(dynamic_deps);
-            deps.sort_unstable();
-            deps.dedup();
-
-            if !deps.is_empty() {
-                vdeps.insert(v, deps);
+            let mut collected = RangeVirtualDepProvider::collect(self.engine, v, &mut memo);
+            collected
+                .owned
+                .extend(DynamicRefVirtualDepProvider::get_virtual_deps(
+                    self.engine,
+                    v,
+                ));
+            collected.owned.sort_unstable();
+            collected.owned.dedup();
+            collected.groups.sort_unstable();
+            collected.groups.dedup();
+            if !collected.owned.is_empty() {
+                per_vertex.insert(v, collected.owned);
+            }
+            if !collected.groups.is_empty() {
+                vertex_groups.insert(v, collected.groups);
             }
         }
 
-        (vdeps, augmented_vertices)
+        (
+            VirtualDeps {
+                per_vertex,
+                groups: memo.groups,
+                vertex_groups,
+            },
+            augmented_vertices,
+        )
     }
 }
 

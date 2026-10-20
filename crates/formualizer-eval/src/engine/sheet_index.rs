@@ -1,6 +1,7 @@
 use super::interval_tree::IntervalTree;
 use super::vertex::VertexId;
 use formualizer_common::Coord as AbsCoord;
+use rustc_hash::FxHashSet;
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 #[cfg(test)]
@@ -212,8 +213,8 @@ impl SheetIndex {
         tree: &IntervalTree<VertexId>,
         start: u32,
         end: u32,
-    ) -> HashSet<VertexId> {
-        let mut result = HashSet::new();
+    ) -> FxHashSet<VertexId> {
+        let mut result = FxHashSet::default();
         self.visit_axis_range(tree, start, end, |vertex| {
             result.insert(vertex);
         });
