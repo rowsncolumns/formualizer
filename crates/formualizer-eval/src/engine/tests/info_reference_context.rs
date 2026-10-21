@@ -139,7 +139,7 @@ fn inspect_reference_covers_cells_ranges_names_tables_and_3d_without_materializi
 }
 
 #[test]
-fn formula_text_context_uses_staged_text_then_canonical_ast_and_tracks_edits() {
+fn formula_text_context_uses_staged_text_then_excel_spelled_ast_and_tracks_edits() {
     let mut engine = Engine::new(TestWorkbook::new(), EvalConfig::default());
     let data = engine.add_sheet("Data").unwrap();
     let a1 = abs_cell_ref(data, 1, 1);
@@ -151,7 +151,7 @@ fn formula_text_context_uses_staged_text_then_canonical_ast_and_tracks_edits() {
         .unwrap();
     assert_eq!(
         engine.formula_text_at_cell(a1).unwrap(),
-        Some("=1 + 2".into())
+        Some("=1+2".into())
     );
 
     engine
@@ -159,7 +159,19 @@ fn formula_text_context_uses_staged_text_then_canonical_ast_and_tracks_edits() {
         .unwrap();
     assert_eq!(
         engine.formula_text_at_cell(a1).unwrap(),
-        Some("=SUM(1, 2, 3)".into())
+        Some("=SUM(1,2,3)".into())
+    );
+
+    // Excel stores (and FORMULATEXT returns) formulas without padding; a workbook that compares
+    // FORMULATEXT against the expected formula must get the same answer here as in Excel.
+    let stored = r#"=SUMIFS('MP Facts'!$O$8:$O$3050,'MP Facts'!$N$8:$N$3050,$A8,'MP Facts'!$H$8:$H$3050,"Working")"#;
+    engine.add_sheet("MP Facts").unwrap();
+    engine
+        .set_cell_formula("Data", 1, 1, parse(stored).unwrap())
+        .unwrap();
+    assert_eq!(
+        engine.formula_text_at_cell(a1).unwrap(),
+        Some(stored.into())
     );
 
     engine
@@ -249,7 +261,7 @@ fn formula_text_sheet_sheets_and_isref_functions_evaluate_directly() {
 
     assert_eq!(
         engine.get_cell_value("Sheet1", 1, 1),
-        Some(LiteralValue::Text("=1 + 2".into()))
+        Some(LiteralValue::Text("=1+2".into()))
     );
     assert_eq!(
         err_kind(engine.get_cell_value("Sheet1", 1, 2)),
@@ -287,6 +299,6 @@ fn formula_text_sheet_sheets_and_isref_functions_evaluate_directly() {
     engine.evaluate_all().unwrap();
     assert_eq!(
         engine.get_cell_value("Sheet1", 1, 1),
-        Some(LiteralValue::Text("=3 + 4".into()))
+        Some(LiteralValue::Text("=3+4".into()))
     );
 }
