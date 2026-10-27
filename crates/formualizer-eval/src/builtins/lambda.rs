@@ -224,8 +224,14 @@ impl Function for LetFn {
                 Err(e) => return Ok(CalcValue::Scalar(LiteralValue::Error(e))),
             };
 
-            let bound = args[pair_idx + 1].value_with_env(env.clone())?;
-            env = env.with_binding(&name, binding_from_calc_value(bound));
+            // A reference expression binds the reference itself, so the name keeps
+            // Excel's reference semantics in the body (`MATCH(5,p,0)`, `ROWS(p)`,
+            // `OFFSET(p,1,0)`); anything else binds its value.
+            let binding = match args[pair_idx + 1].reference_with_env(env.clone()) {
+                Ok(reference) => LocalBinding::Reference(reference),
+                Err(_) => binding_from_calc_value(args[pair_idx + 1].value_with_env(env.clone())?),
+            };
+            env = env.with_binding(&name, binding);
         }
 
         args[args.len() - 1].value_with_env(env)

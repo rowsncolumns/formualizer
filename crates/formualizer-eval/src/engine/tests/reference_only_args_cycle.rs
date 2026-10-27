@@ -107,3 +107,108 @@ fn isref_over_its_own_cell_is_not_circular() {
     );
     assert!(cycle_cells_1based(&engine).is_empty());
 }
+
+// ── Athena-Intel/demo-app-monorepo#44763 coverage beyond the own-cell case ──
+
+fn set_num(engine: &mut Engine<TestWorkbook>, sheet: &str, row: u32, col: u32, v: f64) {
+    engine
+        .set_cell_value(sheet, row, col, LiteralValue::Number(v))
+        .expect("set value");
+}
+
+#[test]
+fn rows_columns_measure_other_sheet_and_named_ranges() {
+    use crate::engine::named_range::{NameScope, NamedDefinition};
+    use crate::reference::{Coord, RangeRef};
+
+    let mut engine = excel_iteration_off();
+    engine.add_sheet("Sheet2").unwrap();
+    let sheet2 = engine.sheet_id("Sheet2").unwrap();
+    let start = CellRef::new(sheet2, Coord::from_excel(2, 2, true, true));
+    let end = CellRef::new(sheet2, Coord::from_excel(5, 4, true, true));
+    engine
+        .define_name(
+            "BLOCK",
+            NamedDefinition::Range(RangeRef::new(start, end)),
+            NameScope::Workbook,
+        )
+        .unwrap();
+
+    set_formula(&mut engine, 1, 1, "=ROWS(Sheet2!A1:A5)"); // A1
+    set_formula(&mut engine, 1, 2, "=COLUMNS(Sheet2!A1:C1)"); // B1
+    set_formula(&mut engine, 1, 3, "=ROWS(BLOCK)"); // C1
+    set_formula(&mut engine, 1, 4, "=COLUMNS(BLOCK)"); // D1
+    set_formula(&mut engine, 1, 5, "=ROWS(A1:A3 A2:A5)"); // E1 — intersection
+    engine.evaluate_all().expect("evaluate");
+
+    assert_eq!(num(&engine, 1, 1), 5.0, "ROWS(Sheet2!A1:A5)");
+    assert_eq!(num(&engine, 1, 2), 3.0, "COLUMNS(Sheet2!A1:C1)");
+    assert_eq!(num(&engine, 1, 3), 4.0, "ROWS(BLOCK)");
+    assert_eq!(num(&engine, 1, 4), 3.0, "COLUMNS(BLOCK)");
+    assert_eq!(num(&engine, 1, 5), 2.0, "ROWS(A1:A3 A2:A5)");
+    assert!(cycle_cells_1based(&engine).is_empty());
+}
+
+#[test]
+fn rows_of_a_reference_returning_function_follows_its_inputs() {
+    let mut engine = excel_iteration_off();
+    set_num(&mut engine, "Sheet1", 1, 2, 7.0); // B1 = 7
+    set_formula(&mut engine, 1, 1, "=ROWS(OFFSET(C1,0,0,B1,1))"); // A1
+    set_formula(
+        &mut engine,
+        2,
+        1,
+        "=COLUMNS(INDEX(C1:H3,0,2):INDEX(C1:H3,0,5))",
+    ); // A2
+    engine.evaluate_all().expect("evaluate");
+    assert_eq!(num(&engine, 1, 1), 7.0, "ROWS(OFFSET(.., B1, 1)) with B1=7");
+    assert_eq!(num(&engine, 2, 1), 4.0, "COLUMNS over an INDEX:INDEX span");
+
+    // The height is the by-ref argument, but the cells OFFSET reads to build it are still
+    // dependencies: editing B1 recalculates A1.
+    set_num(&mut engine, "Sheet1", 1, 2, 3.0);
+    engine.evaluate_all().expect("re-evaluate");
+    assert_eq!(
+        num(&engine, 1, 1),
+        3.0,
+        "ROWS(OFFSET(.., B1, 1)) after B1=3"
+    );
+}
+
+#[test]
+fn rows_over_own_cell_nested_in_expressions_and_sumproduct() {
+    let mut engine = excel_iteration_off();
+    for r in 1..=5 {
+        set_num(&mut engine, "Sheet1", r, 3, r as f64 * 10.0); // C1:C5 = 10..50
+    }
+    set_formula(&mut engine, 8, 1, "=ROWS($A$8:A8)*2"); // A8
+    set_formula(&mut engine, 9, 1, "=IF(ROWS($A$8:A9)>1,ROWS($A$8:A9),-1)"); // A9
+    set_formula(
+        &mut engine,
+        10,
+        1,
+        "=EDATE(DATE(2024,1,1),ROWS($A$8:A10)-1)",
+    ); // A10
+    set_formula(&mut engine, 7, 3, "=SUMPRODUCT(C1:C5)/ROWS(C1:C5)"); // C7
+    set_formula(&mut engine, 3, 3, "=SUMPRODUCT(ROW(C1:C5))"); // C3 — row numbers, own cell inside
+    set_formula(&mut engine, 5, 4, "=MAX(COLUMN(A5:F5))"); // D5 — own cell inside the range
+    engine.evaluate_all().expect("evaluate");
+
+    assert_eq!(num(&engine, 8, 1), 2.0, "ROWS($A$8:A8)*2 in A8");
+    assert_eq!(num(&engine, 9, 1), 2.0, "IF(ROWS($A$8:A9)>1, …) in A9");
+    // EDATE(2024-01-01, 2) = 2024-03-01 = serial 45352
+    assert_eq!(
+        num(&engine, 10, 1),
+        45352.0,
+        "EDATE(.., ROWS($A$8:A10)-1) in A10"
+    );
+    // C3 is a formula whose own value is not read: average over the five numbers excluding it.
+    assert_eq!(num(&engine, 3, 3), 15.0, "SUMPRODUCT(ROW(C1:C5)) in C3");
+    assert_eq!(num(&engine, 5, 4), 6.0, "MAX(COLUMN(A5:F5)) in D5");
+    assert_eq!(
+        num(&engine, 7, 3),
+        (10.0 + 20.0 + 15.0 + 40.0 + 50.0) / 5.0,
+        "SUMPRODUCT(C1:C5)/ROWS(C1:C5) in C7"
+    );
+    assert!(cycle_cells_1based(&engine).is_empty());
+}

@@ -17,6 +17,13 @@ use crate::formula_plane::template_canonical::LiteralSlotId;
 #[derive(Clone)]
 pub enum LocalBinding {
     Value(LiteralValue),
+    /// A `LET` name bound to a reference expression (`LET(p,B1:B3,…)`,
+    /// `LET(c,OFFSET(A1,1,0),…)`). The name stays a reference inside the body,
+    /// as in Excel: `MATCH(5,p,0)`, `INDEX(p,1):INDEX(p,2)`, `ROWS(p)`, `ROW(c)`
+    /// and `OFFSET(p,…)` all see the bound range, and reading `p` as a value
+    /// reads the cells at that time. The reference is already relocated for the
+    /// evaluation offset in force when it was bound.
+    Reference(ReferenceType),
     Callable(Arc<dyn crate::traits::CustomCallable>),
     /// An optional `LAMBDA` parameter (`[name]`) the caller did not supply.
     /// `ISOMITTED(name)` reports it; reading it as a value is `#VALUE!`.
@@ -209,6 +216,10 @@ impl<'a> Interpreter<'a> {
         };
         match self.local_env.lookup(name)? {
             LocalBinding::Value(v) => Some(crate::traits::CalcValue::Scalar(v)),
+            LocalBinding::Reference(r) => Some(match self.eval_reference_to_calc(&r) {
+                Ok(cv) => cv,
+                Err(e) => crate::traits::CalcValue::Scalar(LiteralValue::Error(e)),
+            }),
             LocalBinding::Callable(c) => Some(crate::traits::CalcValue::Callable(c)),
             LocalBinding::Omitted => Some(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new(ExcelErrorKind::Value)
@@ -223,7 +234,7 @@ impl<'a> Interpreter<'a> {
         }
         match self.local_env.lookup(name)? {
             LocalBinding::Callable(c) => Some(c),
-            LocalBinding::Value(_) | LocalBinding::Omitted => None,
+            LocalBinding::Value(_) | LocalBinding::Reference(_) | LocalBinding::Omitted => None,
         }
     }
 
@@ -747,12 +758,42 @@ impl<'a> Interpreter<'a> {
         offset.evaluate_ast_uncached(node)
     }
 
+    /// The reference an AST reference node stands for in this scope: a `LET` /
+    /// `LAMBDA` local bound to a reference is that reference (already relocated
+    /// when it was bound); a local bound to a value or a lambda is not a
+    /// reference at all, so by-reference consumers fall back to the value;
+    /// anything else is relocated for the current evaluation offset.
     pub(crate) fn reference_for_current_offset(
         &self,
         reference: &ReferenceType,
     ) -> Result<ReferenceType, ExcelError> {
+        if let Some(local) = self.local_reference_binding(reference) {
+            return local;
+        }
         self.effective_reference(reference)
             .map(|reference| reference.into_owned())
+    }
+
+    /// `Some` when `reference` names a `LET` / `LAMBDA` local: the bound reference,
+    /// or `#REF!` for a local that holds a value rather than a reference.
+    pub(crate) fn local_reference_binding(
+        &self,
+        reference: &ReferenceType,
+    ) -> Option<Result<ReferenceType, ExcelError>> {
+        if self.local_env.is_empty() {
+            return None;
+        }
+        let ReferenceType::NamedRange(name) = reference else {
+            return None;
+        };
+        Some(match self.local_env.lookup(name)? {
+            LocalBinding::Reference(r) => Ok(r),
+            LocalBinding::Value(_) | LocalBinding::Callable(_) | LocalBinding::Omitted => {
+                Err(ExcelError::new(ExcelErrorKind::Ref).with_message(format!(
+                    "{name} is a local bound to a value, not a reference"
+                )))
+            }
+        })
     }
 
     pub(crate) fn evaluate_arena_ast_with_offset(

@@ -2534,13 +2534,66 @@ impl Function for TrimmeanFn {
 /* ─────────────────────────── CORREL ──────────────────────────── */
 
 /// Helper to collect two paired arrays for regression/correlation functions
-fn collect_paired_arrays(args: &[ArgumentHandle]) -> Result<(Vec<f64>, Vec<f64>), ExcelError> {
-    let y_nums = collect_numeric_stats(&args[0..1])?;
-    let x_nums = collect_numeric_stats(&args[1..2])?;
+/// Every cell of a paired-statistics input in row-major order, blanks included, so the two
+/// inputs can be paired by position. An error cell is the result.
+fn paired_input_cells(arg: &ArgumentHandle) -> Result<Vec<LiteralValue>, ExcelError> {
+    let mut out = Vec::new();
+    if let Some(arr) = arg.inline_array_literal()? {
+        for row in arr {
+            for cell in row {
+                if let LiteralValue::Error(e) = cell {
+                    return Err(e);
+                }
+                out.push(cell);
+            }
+        }
+        return Ok(out);
+    }
+    if let Ok(view) = arg.range_view() {
+        view.for_each_cell(&mut |v| {
+            if let LiteralValue::Error(e) = v {
+                return Err(e.clone());
+            }
+            out.push(v.clone());
+            Ok(())
+        })?;
+        return Ok(out);
+    }
+    match scalar_like_value(arg)? {
+        LiteralValue::Error(e) => Err(e),
+        v => {
+            out.push(v);
+            Ok(out)
+        }
+    }
+}
 
-    // Arrays must have same length
-    if y_nums.len() != x_nums.len() {
+/// The (y, x) pairs of two same-sized inputs (`args[0]` = known_y's, `args[1]` = known_x's),
+/// paired by position, following Excel's rule for the paired statistics (`SLOPE`,
+/// `INTERCEPT`, `FORECAST`, `RSQ`, `PEARSON`, `CORREL`, `STEYX`, `COVARIANCE.*`): a pair is
+/// kept only when BOTH sides are numbers — a blank, text or logical on either side drops
+/// the whole pair, it does not shift the other series. Inputs of different sizes are
+/// `#N/A`; an error cell propagates; no surviving pair is `#DIV/0!`.
+fn collect_paired_arrays(args: &[ArgumentHandle]) -> Result<(Vec<f64>, Vec<f64>), ExcelError> {
+    let y_cells = paired_input_cells(&args[0])?;
+    let x_cells = paired_input_cells(&args[1])?;
+
+    if y_cells.len() != x_cells.len() {
         return Err(ExcelError::new_na());
+    }
+
+    let as_number = |v: &LiteralValue| match v {
+        LiteralValue::Number(n) => Some(*n),
+        LiteralValue::Int(i) => Some(*i as f64),
+        _ => None,
+    };
+    let mut y_nums = Vec::with_capacity(y_cells.len());
+    let mut x_nums = Vec::with_capacity(x_cells.len());
+    for (y, x) in y_cells.iter().zip(x_cells.iter()) {
+        if let (Some(y), Some(x)) = (as_number(y), as_number(x)) {
+            y_nums.push(y);
+            x_nums.push(x);
+        }
     }
 
     if y_nums.is_empty() {
@@ -6313,21 +6366,10 @@ impl Function for ForecastLinearFn {
             }
         };
 
-        let y_vals = collect_numeric_stats(&args[1..2])?;
-        let x_vals = collect_numeric_stats(&args[2..3])?;
-
-        // Arrays must have same length
-        if y_vals.len() != x_vals.len() {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_na(),
-            )));
-        }
-
-        if y_vals.is_empty() {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_na(),
-            )));
-        }
+        let (y_vals, x_vals) = match collect_paired_arrays(&args[1..3]) {
+            Ok(v) => v,
+            Err(e) => return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e))),
+        };
 
         let n = x_vals.len() as f64;
         let mean_x = x_vals.iter().sum::<f64>() / n;
