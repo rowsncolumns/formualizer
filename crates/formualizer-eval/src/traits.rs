@@ -364,6 +364,69 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
         self.interp.local_env().clone()
     }
 
+    /// The reference this argument denotes under `env`, for `LET` to bind a name to a
+    /// reference rather than to the cells' current values: a reference node (relocated for
+    /// the evaluation offset, or an earlier local already bound to a reference), a
+    /// reference-returning call (`OFFSET`, `INDEX`, `INDIRECT`), a range / intersection
+    /// operator or a spill reference. A workbook name is bound to the range it defines; a
+    /// name that is a constant, a formula or a lambda, and any value-shaped expression, is
+    /// `Err` so the caller binds the value instead. Materializes no cells.
+    pub fn reference_with_env(
+        &self,
+        env: crate::interpreter::LocalEnv,
+    ) -> Result<ReferenceType, ExcelError> {
+        let scoped = self.interp.with_local_env(env);
+        let reference = match &self.expr {
+            ArgumentExpr::Ast(node) => match &node.node_type {
+                ASTNodeType::Reference { reference, .. } => {
+                    scoped.reference_for_current_offset(reference)?
+                }
+                ASTNodeType::Function { .. }
+                | ASTNodeType::BinaryOp { .. }
+                | ASTNodeType::UnaryOp { .. } => scoped.evaluate_ast_as_reference(node)?,
+                _ => {
+                    return Err(ExcelError::new(ExcelErrorKind::Ref)
+                        .with_message("Argument is not a reference"));
+                }
+            },
+            ArgumentExpr::Arena {
+                id,
+                data_store,
+                sheet_registry,
+            } => {
+                let node = data_store.get_node(*id).ok_or_else(|| {
+                    ExcelError::new(ExcelErrorKind::Value).with_message("Missing AST node")
+                })?;
+                match node {
+                    crate::engine::arena::AstNodeData::Reference { ref_type, .. } => {
+                        let reference = data_store
+                            .reconstruct_reference_type_for_eval(ref_type, sheet_registry);
+                        scoped.reference_for_current_offset(&reference)?
+                    }
+                    crate::engine::arena::AstNodeData::Function { .. }
+                    | crate::engine::arena::AstNodeData::BinaryOp { .. }
+                    | crate::engine::arena::AstNodeData::UnaryOp { .. } => {
+                        scoped.evaluate_arena_ast_as_reference(*id, data_store, sheet_registry)?
+                    }
+                    _ => {
+                        return Err(ExcelError::new(ExcelErrorKind::Ref)
+                            .with_message("Argument is not a reference"));
+                    }
+                }
+            }
+        };
+        match reference {
+            ReferenceType::NamedRange(name) => scoped
+                .context
+                .named_range_reference_definition(&name)
+                .ok_or_else(|| {
+                    ExcelError::new(ExcelErrorKind::Ref)
+                        .with_message(format!("{name} is not a range-valued name"))
+                }),
+            other => Ok(other),
+        }
+    }
+
     pub fn inline_array_literal(&self) -> Result<Option<Vec<Vec<LiteralValue>>>, ExcelError> {
         match &self.expr {
             ArgumentExpr::Ast(node) => match &node.node_type {
@@ -561,7 +624,9 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
         // A `LET`/`LAMBDA` local bound to an array or range (`LET(a,F1:F3,SUM(a))`) is a
         // NamedRange node with no workbook reference behind it: expose the bound value as an
         // owned view instead of failing reference resolution.
-        if self.local_binding_value().is_some() {
+        if let Some(binding) = self.local_binding_value()
+            && !matches!(binding, crate::interpreter::LocalBinding::Reference(_))
+        {
             return self.value_as_range_view();
         }
         match &self.expr {
@@ -961,7 +1026,13 @@ impl<'a, 'b> ArgumentHandle<'a, 'b> {
     pub fn as_reference(&self) -> Result<&ReferenceType, ExcelError> {
         match &self.expr {
             ArgumentExpr::Ast(node) => match &node.node_type {
-                ASTNodeType::Reference { reference, .. } => Ok(reference),
+                ASTNodeType::Reference { reference, .. } => {
+                    match self.interp.local_reference_binding(reference) {
+                        Some(Ok(local)) => Ok(self.cached_ref.get_or_init(|| local)),
+                        Some(Err(e)) => Err(e),
+                        None => Ok(reference),
+                    }
+                }
                 _ => Err(ExcelError::new(ExcelErrorKind::Ref)
                     .with_message("Expected a reference (by-ref argument)")),
             },
