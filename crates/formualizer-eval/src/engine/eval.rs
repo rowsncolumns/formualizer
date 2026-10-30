@@ -23284,7 +23284,9 @@ where
         let Some((Some(ast), _)) = self.get_cell(sheet_name, row, col) else {
             return Ok(None);
         };
-        Ok(Some(formualizer_parse::pretty::canonical_formula(&ast)))
+        // Excel's FORMULATEXT returns the formula as stored, not the padded display form, so a
+        // workbook that checks its own formulas gets the same answer here and in Excel.
+        Ok(Some(formualizer_parse::pretty::excel_formula(&ast)))
     }
 
     fn used_rows_for_columns(
