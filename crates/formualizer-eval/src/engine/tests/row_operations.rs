@@ -343,3 +343,39 @@ fn structural_shift_only_rewrites_refs_targeting_the_shifted_sheet() {
     assert_eq!(canon(&graph, s1_xref), expect("=Sheet2!A3"));
     assert_eq!(canon(&graph, s1_local), expect("=A3+1"));
 }
+
+/// rowsncolumns/spreadsheet#1286: a deleted row's vertices stay in the store as tombstones and
+/// must not take part in a later shift. B3 = 16 is written after the formula in B4, so its
+/// tombstone has the higher id; shifted by the insert, it used to re-register B4 over the
+/// formula that the delete had moved to B3 and the insert moved back.
+#[test]
+fn row_delete_then_insert_keeps_the_moved_formula_mapped_over_a_deleted_cell() {
+    let mut graph = super::common::graph_truth_graph();
+    graph.set_cell_value("Sheet1", 1, 1, lit_num(1.0)).unwrap();
+    let formula_id = graph
+        .set_cell_formula("Sheet1", 4, 2, parse("=A1*2").unwrap())
+        .unwrap()
+        .affected_vertices[0];
+    graph.set_cell_value("Sheet1", 3, 2, lit_num(16.0)).unwrap();
+    let literal_id = *graph
+        .get_vertex_id_for_address(&sheet1_cell(&graph, 3, 2))
+        .unwrap();
+    let s1 = graph.sheet_id("Sheet1").unwrap();
+
+    let mut editor = VertexEditor::new(&mut graph);
+    // Delete public row 3, then insert one row before it (editor rows are 0-based).
+    editor.delete_rows(s1, 2, 1).unwrap();
+    editor.insert_rows(s1, 2, 1).unwrap();
+    drop(editor);
+
+    assert_eq!(
+        graph.get_vertex_id_for_address(&sheet1_cell(&graph, 4, 2)),
+        Some(&formula_id)
+    );
+    assert_eq!(
+        graph.get_vertex_id_for_address(&sheet1_cell(&graph, 3, 2)),
+        None
+    );
+    assert!(graph.is_deleted(literal_id));
+    assert!(!graph.vertices_in_sheet(s1).any(|id| id == literal_id));
+}

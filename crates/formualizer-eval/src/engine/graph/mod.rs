@@ -4559,11 +4559,17 @@ impl DependencyGraph {
         self.store.sheet_id(id)
     }
 
-    /// Get all vertices in a sheet
+    /// Get all live vertices in a sheet. Tombstones are skipped: `VertexEditor::remove_vertex`
+    /// keeps a deleted vertex's slot (ids are stable) but unmaps its cell, and every caller treats
+    /// what this yields as a cell of the sheet. The structural edits shift each one and
+    /// `move_vertex` registers its new address in `cell_to_vertex`, so a shifted tombstone would
+    /// take the address from a live vertex shifted onto the same cell: a formula moved back across
+    /// a deleted literal by a row delete + insert reads back with no formula while its unmapped
+    /// vertex keeps evaluating into the cell (rowsncolumns/spreadsheet#1286).
     pub fn vertices_in_sheet(&self, sheet_id: SheetId) -> impl Iterator<Item = VertexId> + '_ {
-        self.store
-            .all_vertices()
-            .filter(move |&id| self.vertex_exists(id) && self.store.sheet_id(id) == sheet_id)
+        self.store.all_vertices().filter(move |&id| {
+            self.store.vertex_exists_active(id) && self.store.sheet_id(id) == sheet_id
+        })
     }
 
     /// Does a vertex have a formula associated
