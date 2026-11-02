@@ -13,7 +13,7 @@ mod extended; // CLEAN, UNICHAR, UNICODE, TEXTBEFORE, TEXTAFTER, DOLLAR, FIXED
 mod find_search_exact; // FIND, SEARCH, EXACT
 mod len_left_right; // LEN, LEFT, RIGHT
 mod mid_sub_replace; // MID, SUBSTITUTE, REPLACE
-mod regex_fns; // REGEXTEST, REGEXEXTRACT, REGEXREPLACE
+pub(crate) mod regex_fns; // REGEXTEST, REGEXEXTRACT, REGEXREPLACE
 mod trim_case_concat; // TRIM, UPPER, LOWER, PROPER, CONCAT, CONCATENATE, TEXTJOIN
 mod value_text; // VALUE, TEXT
 

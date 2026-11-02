@@ -2,7 +2,7 @@
 //!
 //! Notes / Simplifications (documented for future refinement):
 //! - XLOOKUP supports: lookup_value, lookup_array, return_array, [if_not_found], [match_mode], [search_mode]
-//!   * match_mode: 0 exact (default), -1 exact-or-next-smaller, 1 exact-or-next-larger, 2 wildcard (basic * ?)
+//!   * match_mode: 0 exact (default), -1 exact-or-next-smaller, 1 exact-or-next-larger, 2 wildcard (basic * ?), 3 regex
 //!   * search_mode: 1 forward (default), -1 reverse; (2 / -2 binary not yet implemented -> treated as 1 / -1)
 //!   * Wildcard mode (2) is case-insensitive and supports Excel-style escapes (~).
 //! - FILTER supports: array, include, [if_empty]; Shapes must be broadcast-compatible by rows (include is 1-D).
@@ -93,6 +93,52 @@ fn is_open_ended_reference(arg: &ArgumentHandle<'_, '_>) -> bool {
     }
 }
 
+/// `match_mode` 3 (regex match) of XLOOKUP / XMATCH: the first cell — the last when searching
+/// last-to-first — whose text the regular expression `pattern` matches, in REGEXTEST's flavour
+/// (case-sensitive, a match anywhere in the cell). An invalid pattern is `#VALUE!`.
+/// <https://support.microsoft.com/en-us/office/xlookup-function-b7fd680e-6d10-43e6-84f9-88eae8bf5929>
+fn regex_lookup_index(
+    view: &crate::engine::range_view::RangeView<'_>,
+    vertical: bool,
+    len: usize,
+    pattern: &LiteralValue,
+    reverse: bool,
+) -> Result<Option<usize>, ExcelError> {
+    let text_of = |v: &LiteralValue| -> Option<String> {
+        Some(match v {
+            LiteralValue::Text(s) => s.clone(),
+            LiteralValue::Empty => String::new(),
+            LiteralValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+            LiteralValue::Int(i) => i.to_string(),
+            LiteralValue::Number(n) => formualizer_common::number_to_excel_text(*n),
+            LiteralValue::Error(_) | LiteralValue::Array(_) | LiteralValue::Pending => {
+                return None;
+            }
+            other => other
+                .as_serial_number()
+                .map(formualizer_common::number_to_excel_text)?,
+        })
+    };
+    if let LiteralValue::Error(e) = pattern {
+        return Err(e.clone());
+    }
+    let pattern = text_of(pattern).ok_or_else(ExcelError::new_value)?;
+    let re = crate::builtins::text::regex_fns::compile(&pattern, 0)?;
+    let mut indices: Box<dyn Iterator<Item = usize>> = if reverse {
+        Box::new((0..len).rev())
+    } else {
+        Box::new(0..len)
+    };
+    Ok(indices.find(|&i| {
+        let cand = if vertical {
+            view.get_cell(i, 0)
+        } else {
+            view.get_cell(0, i)
+        };
+        text_of(&cand).is_some_and(|t| re.is_match(&t))
+    }))
+}
+
 /* ───────────────────────── XLOOKUP() ───────────────────────── */
 
 #[derive(Debug)]
@@ -105,7 +151,7 @@ pub struct XLookupFn;
 /// # Remarks
 /// - Defaults: `match_mode=0` (exact), `search_mode=1` (first-to-last).
 /// - `if_not_found` is optional; if omitted and no match exists, returns `#N/A`.
-/// - `match_mode`: `0` exact, `-1` exact-or-next-smaller, `1` exact-or-next-larger, `2` wildcard.
+/// - `match_mode`: `0` exact, `-1` exact-or-next-smaller, `1` exact-or-next-larger, `2` wildcard, `3` regex (REGEXTEST's flavour).
 /// - `search_mode`: `1` forward, `-1` reverse. Other modes are accepted with current fallback behavior.
 /// - `lookup_array` must be 1D. Invalid shape returns `#VALUE!`.
 /// - If `return_array` is multi-column or multi-row, the matched row/column is returned as a spill.
@@ -353,7 +399,20 @@ impl Function for XLookupFn {
         let mut found: Option<usize> = None;
         let needle = lookup_value;
         let prepared_matcher = PreparedLookupMatcher::new(&needle, wildcard);
-        if match_mode == 0 || wildcard {
+        if match_mode == 3 {
+            found = match regex_lookup_index(
+                &lookup_view,
+                vertical,
+                lookup_len,
+                &needle,
+                search_mode < 0,
+            ) {
+                Ok(found) => found,
+                Err(e) => {
+                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+                }
+            };
+        } else if match_mode == 0 || wildcard {
             if match_mode == 0 && search_mode == 1 && lookup_rows > 0 && lookup_cols > 0 {
                 let axis = if vertical {
                     LookupAxis::ColumnInView(0)
@@ -499,7 +558,7 @@ pub struct XMatchFn;
 ///
 /// # Remarks
 /// - Defaults: `match_mode=0` (exact), `search_mode=1` (first-to-last).
-/// - `match_mode`: `0` exact, `-1` exact-or-next-smaller, `1` exact-or-next-larger, `2` wildcard.
+/// - `match_mode`: `0` exact, `-1` exact-or-next-smaller, `1` exact-or-next-larger, `2` wildcard, `3` regex (REGEXTEST's flavour).
 /// - `search_mode`: `1` forward, `-1` reverse, `2` ascending binary intent, `-2` descending binary intent.
 /// - `lookup_array` must be a single row or single column, otherwise returns `#VALUE!`.
 /// - Not found returns `#N/A`.
@@ -682,7 +741,20 @@ impl Function for XMatchFn {
 
         let mut found: Option<usize> = None;
 
-        if match_mode == 0 || wildcard {
+        if match_mode == 3 {
+            found = match regex_lookup_index(
+                &lookup_view,
+                vertical,
+                lookup_len,
+                &needle,
+                search_mode < 0,
+            ) {
+                Ok(found) => found,
+                Err(e) => {
+                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+                }
+            };
+        } else if match_mode == 0 || wildcard {
             // Exact match or wildcard match
             if search_mode == 1 || search_mode == 2 {
                 // Forward search (first to last) or binary ascending (treated as forward for exact)

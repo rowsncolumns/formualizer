@@ -51,7 +51,7 @@ fn arg_int(args: &[ArgumentHandle<'_, '_>], idx: usize, default: i64) -> Result<
 }
 
 /// Compile `pattern` with Excel's `case_sensitivity` flag (0 = sensitive, 1 = insensitive).
-fn compile(pattern: &str, case_sensitivity: i64) -> Result<Regex, ExcelError> {
+pub(crate) fn compile(pattern: &str, case_sensitivity: i64) -> Result<Regex, ExcelError> {
     let source = match case_sensitivity {
         0 => pattern.to_string(),
         1 => format!("(?i){pattern}"),
