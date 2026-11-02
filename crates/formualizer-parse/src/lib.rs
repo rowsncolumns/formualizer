@@ -4,6 +4,7 @@
 // deliberate here; silence clippy's collapse suggestion crate-wide.
 #![allow(clippy::collapsible_if)]
 
+mod chain;
 mod hasher;
 pub mod parser;
 pub mod pretty;

@@ -841,31 +841,32 @@ fn validate_anchor_once_relocation(
                 allow_safe_functions,
                 function_provider,
             ),
-            ASTNodeType::BinaryOp { op, left, right }
-                if matches!(op.as_str(), "+" | "-" | "*" | "/") =>
-            {
-                walk(
-                    left,
-                    anchor_row0,
-                    anchor_col0,
-                    row_start,
-                    row_end,
-                    col_start,
-                    col_end,
-                    allow_safe_functions,
-                    function_provider,
-                )?;
-                walk(
-                    right,
-                    anchor_row0,
-                    anchor_col0,
-                    row_start,
-                    row_end,
-                    col_start,
-                    col_end,
-                    allow_safe_functions,
-                    function_provider,
-                )
+            ASTNodeType::BinaryOp { op, .. } if matches!(op.as_str(), "+" | "-" | "*" | "/") => {
+                // A chain is as deep as it is long: walk its left spine with a loop (FX-02). The
+                // spine stops at the first operand that is not an arithmetic operation; `walk`
+                // then judges it as it would have when recursing.
+                let mut spine = Vec::new();
+                let mut cur = node;
+                while let ASTNodeType::BinaryOp { op, left, right } = &cur.node_type
+                    && matches!(op.as_str(), "+" | "-" | "*" | "/")
+                {
+                    spine.push(right.as_ref());
+                    cur = left;
+                }
+                for operand in std::iter::once(cur).chain(spine.into_iter().rev()) {
+                    walk(
+                        operand,
+                        anchor_row0,
+                        anchor_col0,
+                        row_start,
+                        row_end,
+                        col_start,
+                        col_end,
+                        allow_safe_functions,
+                        function_provider,
+                    )?;
+                }
+                Ok(())
             }
             ASTNodeType::Function { name, args } if allow_safe_functions => {
                 let function = super::template_canonical::resolve_canonical_function_with_provider(
@@ -1188,9 +1189,11 @@ pub(crate) fn value_ref_slot_descriptors(expr: &CanonicalExpr) -> Vec<ValueRefSl
                 *preorder = preorder.saturating_add(1);
             }
             CanonicalExpr::Unary { expr, .. } => walk(expr, out, preorder),
-            CanonicalExpr::Binary { left, right, .. } => {
-                walk(left, out, preorder);
-                walk(right, out, preorder);
+            CanonicalExpr::Binary { first, rest } => {
+                walk(first, out, preorder);
+                for (_, right) in rest {
+                    walk(right, out, preorder);
+                }
             }
             CanonicalExpr::Function { args, .. } | CanonicalExpr::CallUnsupported { args, .. } => {
                 if let CanonicalExpr::CallUnsupported { callee, .. } = expr {
@@ -1679,11 +1682,13 @@ pub(crate) fn build_template_slot_map(
             }
             AstNodeData::Reference { .. } => {}
             AstNodeData::UnaryOp { expr_id, .. } => walk(*expr_id, data_store, next, out),
-            AstNodeData::BinaryOp {
-                left_id, right_id, ..
-            } => {
-                walk(*left_id, data_store, next, out);
-                walk(*right_id, data_store, next, out);
+            AstNodeData::BinaryOp { .. } => {
+                // A chain is as deep as it is long: walk its left spine with a loop (FX-02).
+                let (bottom, spine) = data_store.binary_chain(node_id);
+                walk(bottom, data_store, next, out);
+                for (_, _, right_id) in spine {
+                    walk(right_id, data_store, next, out);
+                }
             }
             AstNodeData::Function { .. } => {
                 if let Some(args) = data_store.get_args(node_id) {
@@ -1762,9 +1767,11 @@ fn residual_relative_axes(expr: &CanonicalExpr) -> (bool, bool) {
                 }
             }
             CanonicalExpr::Unary { expr, .. } => walk(expr, row, col),
-            CanonicalExpr::Binary { left, right, .. } => {
-                walk(left, row, col);
-                walk(right, row, col);
+            CanonicalExpr::Binary { first, rest } => {
+                walk(first, row, col);
+                for (_, right) in rest {
+                    walk(right, row, col);
+                }
             }
             CanonicalExpr::Function { args, .. } => {
                 for arg in args {

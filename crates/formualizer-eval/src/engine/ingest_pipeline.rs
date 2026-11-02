@@ -323,8 +323,8 @@ impl<'a> IngestPipeline<'a> {
                     .is_some_and(|caps| caps.contains(FnCaps::VOLATILE))
                     || args.iter().any(|arg| self.ast_is_volatile(arg))
             }
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                self.ast_is_volatile(left) || self.ast_is_volatile(right)
+            ASTNodeType::BinaryOp { .. } => {
+                ast.any_chain_operand(|operand| self.ast_is_volatile(operand))
             }
             ASTNodeType::UnaryOp { expr, .. } => self.ast_is_volatile(expr),
             ASTNodeType::Array(rows) => rows
@@ -348,10 +348,9 @@ impl<'a> IngestPipeline<'a> {
             ASTNodeType::Reference { reference, .. } => {
                 self.collect_reference(reference, current_sheet_id, plan, local_scopes)
             }
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                self.collect_dependencies_tree(left, current_sheet_id, plan, local_scopes)?;
-                self.collect_dependencies_tree(right, current_sheet_id, plan, local_scopes)
-            }
+            ASTNodeType::BinaryOp { .. } => ast.try_for_each_chain_operand(|operand| {
+                self.collect_dependencies_tree(operand, current_sheet_id, plan, local_scopes)
+            }),
             ASTNodeType::UnaryOp { expr, .. } => {
                 self.collect_dependencies_tree(expr, current_sheet_id, plan, local_scopes)
             }
@@ -727,10 +726,13 @@ impl<'a> IngestPipeline<'a> {
             ASTNodeType::UnaryOp { expr, .. } => {
                 self.rewrite_structured_references_node(expr, cell)
             }
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                let left_rewritten = self.rewrite_structured_references_node(left, cell)?;
-                let right_rewritten = self.rewrite_structured_references_node(right, cell)?;
-                Ok(left_rewritten || right_rewritten)
+            ASTNodeType::BinaryOp { .. } => {
+                let mut rewritten = false;
+                node.try_for_each_chain_operand_mut(|operand| -> Result<(), ExcelError> {
+                    rewritten |= self.rewrite_structured_references_node(operand, cell)?;
+                    Ok(())
+                })?;
+                Ok(rewritten)
             }
             ASTNodeType::Function { args, .. } => {
                 let mut rewritten = false;
@@ -1203,33 +1205,30 @@ fn compute_read_projections(
                 ),
                 _ => Err(ProjectionFallbackReason::UnsupportedDependencySummary),
             },
-            ASTNodeType::BinaryOp { op, left, right } => {
-                if !matches!(
-                    op.as_str(),
-                    "+" | "-" | "*" | "/" | "^" | "&" | "=" | "<>" | "<" | "<=" | ">" | ">="
-                ) {
-                    return Err(ProjectionFallbackReason::UnsupportedDependencySummary);
+            ASTNodeType::BinaryOp { .. } => {
+                let (bottom, spine) = ast.binary_chain();
+                for node in &spine {
+                    if !matches!(
+                        node.binary_parts().0,
+                        "+" | "-" | "*" | "/" | "^" | "&" | "=" | "<>" | "<" | "<=" | ">" | ">="
+                    ) {
+                        return Err(ProjectionFallbackReason::UnsupportedDependencySummary);
+                    }
                 }
-                visit(
-                    left,
-                    placement,
-                    sheet_registry,
-                    names,
-                    function_provider,
-                    projections,
-                    context,
-                    in_function_arg,
-                )?;
-                visit(
-                    right,
-                    placement,
-                    sheet_registry,
-                    names,
-                    function_provider,
-                    projections,
-                    context,
-                    in_function_arg,
-                )
+                let mut operands =
+                    std::iter::once(bottom).chain(spine.iter().map(|node| node.binary_parts().1));
+                operands.try_for_each(|operand| {
+                    visit(
+                        operand,
+                        placement,
+                        sheet_registry,
+                        names,
+                        function_provider,
+                        projections,
+                        context,
+                        in_function_arg,
+                    )
+                })
             }
             ASTNodeType::Function { name, args } => {
                 let function = crate::formula_plane::template_canonical::resolve_canonical_function_with_provider(
@@ -1343,7 +1342,43 @@ fn compute_tree_metadata(
         placement: CellRef,
         allow_function_semantics: bool,
     ) -> AstNodeMetadata {
-        let (mut data, child_metadata) = match &ast.node_type {
+        if matches!(ast.node_type, ASTNodeType::BinaryOp { .. }) {
+            // A chain is as deep as it is long: walk its left spine with a loop (FX-02).
+            let (bottom, spine) = ast.binary_chain();
+            let mut acc = visit(
+                bottom,
+                data_store,
+                function_provider,
+                placement,
+                allow_function_semantics,
+            );
+            for node in spine {
+                let (op, right) = node.binary_parts();
+                let data = AstNodeData::BinaryOp {
+                    op_id: ast_string_id(data_store, op),
+                    left_id: AstNodeId::from_u32(0),
+                    right_id: AstNodeId::from_u32(0),
+                };
+                let right_metadata = visit(
+                    right,
+                    data_store,
+                    function_provider,
+                    placement,
+                    allow_function_semantics,
+                );
+                acc = finish(
+                    node,
+                    data,
+                    vec![acc, right_metadata],
+                    data_store,
+                    function_provider,
+                    placement,
+                    allow_function_semantics,
+                );
+            }
+            return acc;
+        }
+        let (data, child_metadata) = match &ast.node_type {
             ASTNodeType::Literal(value) => (
                 AstNodeData::Literal(canonical_literal_value_ref(value.clone())),
                 Vec::new(),
@@ -1371,29 +1406,7 @@ fn compute_tree_metadata(
                     allow_function_semantics,
                 )],
             ),
-            ASTNodeType::BinaryOp { op, left, right } => (
-                AstNodeData::BinaryOp {
-                    op_id: ast_string_id(data_store, op),
-                    left_id: AstNodeId::from_u32(0),
-                    right_id: AstNodeId::from_u32(0),
-                },
-                vec![
-                    visit(
-                        left,
-                        data_store,
-                        function_provider,
-                        placement,
-                        allow_function_semantics,
-                    ),
-                    visit(
-                        right,
-                        data_store,
-                        function_provider,
-                        placement,
-                        allow_function_semantics,
-                    ),
-                ],
-            ),
+            ASTNodeType::BinaryOp { .. } => unreachable!("binary chains are walked above"),
             ASTNodeType::Function { name, args } => (
                 AstNodeData::Function {
                     name_id: ast_string_id(data_store, name),
@@ -1463,7 +1476,26 @@ fn compute_tree_metadata(
                 )
             }
         };
+        finish(
+            ast,
+            data,
+            child_metadata,
+            data_store,
+            function_provider,
+            placement,
+            allow_function_semantics,
+        )
+    }
 
+    fn finish(
+        ast: &ASTNode,
+        mut data: AstNodeData,
+        child_metadata: Vec<AstNodeMetadata>,
+        data_store: &DataStore,
+        function_provider: &dyn FunctionProvider,
+        placement: CellRef,
+        allow_function_semantics: bool,
+    ) -> AstNodeMetadata {
         normalize_node_for_canonical_metadata(&mut data, data_store, placement);
         let child_refs: Vec<&AstNodeMetadata> = child_metadata.iter().collect();
         let mut metadata = crate::engine::arena::canonical::compute_node_metadata(

@@ -204,20 +204,36 @@ fn pretty_print_node(ast: &ASTNode, spacing: Spacing) -> String {
                 format!("{op}{inner}")
             }
         }
-        ASTNodeType::BinaryOp { op, left, right } => {
-            let (prec, assoc) = infix_info(op);
-            let left_s = pretty_child(left, op, prec, assoc, Side::Left, spacing);
-            let right_s = pretty_child(right, op, prec, assoc, Side::Right, spacing);
-
-            match (op.as_str(), spacing) {
-                // Reference range operator prints tight; intersection is a
-                // single space rather than the generic three-space infix form.
-                (":", _) => format!("{left_s}:{right_s}"),
-                (" ", _) => format!("{left_s} {right_s}"),
-                (",", _) => format!("{left_s}{}{right_s}", spacing.list_sep()),
-                (_, Spacing::Padded) => format!("{left_s} {op} {right_s}"),
-                (_, Spacing::Compact) => format!("{left_s}{op}{right_s}"),
+        ASTNodeType::BinaryOp { .. } => {
+            // Walk the left spine with a loop (a chain is as deep as it is long — FX-02), appending
+            // each node's operator and right operand to the text of everything to its left.
+            let (bottom, spine) = ast.binary_chain();
+            let mut out = pretty_print_node(bottom, spacing);
+            let mut left: &ASTNode = bottom;
+            for node in spine {
+                let (op, right) = node.binary_parts();
+                let (prec, assoc) = infix_info(op);
+                if child_needs_parens(left, op, prec, assoc, Side::Left) {
+                    out = format!("({out})");
+                }
+                let right_s = pretty_child(right, op, prec, assoc, Side::Right, spacing);
+                match (op, spacing) {
+                    // Reference range operator prints tight; intersection is a
+                    // single space rather than the generic three-space infix form.
+                    (":", _) => out.push(':'),
+                    (" ", _) => out.push(' '),
+                    (",", _) => out.push_str(spacing.list_sep()),
+                    (_, Spacing::Padded) => {
+                        out.push(' ');
+                        out.push_str(op);
+                        out.push(' ');
+                    }
+                    (_, Spacing::Compact) => out.push_str(op),
+                }
+                out.push_str(&right_s);
+                left = node;
             }
+            out
         }
         ASTNodeType::Function { name, args } => {
             let args_str = args

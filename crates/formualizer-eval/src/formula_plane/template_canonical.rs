@@ -97,10 +97,13 @@ pub(crate) enum CanonicalExpr {
         op: String,
         expr: Box<CanonicalExpr>,
     },
+    /// A left-associative binary chain `((first op₁ r₁) op₂ r₂) …`, stored flat. A run of value
+    /// operators (`+ - * / ^ & =` …) is one chain however long it is, so the derived traits and the
+    /// walks below never recurse once per term (Athena-Intel/demo-app-monorepo#49969 FX-02); any
+    /// other binary operator is a one-link chain.
     Binary {
-        op: String,
-        left: Box<CanonicalExpr>,
-        right: Box<CanonicalExpr>,
+        first: Box<CanonicalExpr>,
+        rest: Vec<(String, CanonicalExpr)>,
     },
     Function {
         id: CanonicalFunctionId,
@@ -113,6 +116,15 @@ pub(crate) enum CanonicalExpr {
     ArrayUnsupported {
         rows: Vec<Vec<CanonicalExpr>>,
     },
+}
+
+/// The operators a [`CanonicalExpr::Binary`] chain runs through: the value operators, whose
+/// operands are all read as values.
+fn is_value_binary_operator(op: &str) -> bool {
+    matches!(
+        op,
+        "+" | "-" | "*" | "/" | "^" | "&" | "=" | "<>" | "<" | "<=" | ">" | ">="
+    )
 }
 
 /// Literal values are preserved by value, not only by kind.
@@ -539,16 +551,42 @@ impl Canonicalizer<'_> {
                     expr: Box::new(self.canonicalize_expr(expr, CanonicalReferenceContext::Value)),
                 }
             }
-            ASTNodeType::BinaryOp { op, left, right } => {
+            ASTNodeType::BinaryOp { op, left, right } if !is_value_binary_operator(op) => {
                 let child_context = if op == ":" {
                     CanonicalReferenceContext::Reference
                 } else {
                     CanonicalReferenceContext::Value
                 };
                 CanonicalExpr::Binary {
-                    op: op.clone(),
-                    left: Box::new(self.canonicalize_expr(left, child_context.clone())),
-                    right: Box::new(self.canonicalize_expr(right, child_context)),
+                    first: Box::new(self.canonicalize_expr(left, child_context.clone())),
+                    rest: vec![(op.clone(), self.canonicalize_expr(right, child_context))],
+                }
+            }
+            ASTNodeType::BinaryOp { .. } => {
+                // A value-operator chain is as deep as it is long: walk its left spine with a loop
+                // (FX-02). Every operand of a value operator is canonicalized in value context.
+                let mut spine = Vec::new();
+                let mut cur = ast;
+                while let ASTNodeType::BinaryOp { op, left, right } = &cur.node_type
+                    && is_value_binary_operator(op)
+                {
+                    spine.push((op, right.as_ref()));
+                    cur = left;
+                }
+                let first = self.canonicalize_expr(cur, CanonicalReferenceContext::Value);
+                let rest = spine
+                    .into_iter()
+                    .rev()
+                    .map(|(op, right)| {
+                        (
+                            op.clone(),
+                            self.canonicalize_expr(right, CanonicalReferenceContext::Value),
+                        )
+                    })
+                    .collect();
+                CanonicalExpr::Binary {
+                    first: Box::new(first),
+                    rest,
                 }
             }
             ASTNodeType::Function { name, args } => {
@@ -1150,14 +1188,19 @@ fn write_parameterized_expr_key_inner(
             write_parameterized_expr_key_inner(expr, out, next_slot, parameterize_literals);
             out.push(')');
         }
-        CanonicalExpr::Binary { op, left, right } => {
-            out.push_str("binary(");
-            write_string_key(op, out);
-            out.push(';');
-            write_parameterized_expr_key_inner(left, out, next_slot, parameterize_literals);
-            out.push(';');
-            write_parameterized_expr_key_inner(right, out, next_slot, parameterize_literals);
-            out.push(')');
+        CanonicalExpr::Binary { first, rest } => {
+            // The key of the nested form: `binary(opₙ;…binary(op₁;first;r₁)…;rₙ)`.
+            for (op, _) in rest.iter().rev() {
+                out.push_str("binary(");
+                write_string_key(op, out);
+                out.push(';');
+            }
+            write_parameterized_expr_key_inner(first, out, next_slot, parameterize_literals);
+            for (_, right) in rest {
+                out.push(';');
+                write_parameterized_expr_key_inner(right, out, next_slot, parameterize_literals);
+                out.push(')');
+            }
         }
         CanonicalExpr::Function { id, args } => {
             out.push_str("fn(");
@@ -1222,14 +1265,19 @@ fn write_expr_key(expr: &CanonicalExpr, out: &mut String) {
             write_expr_key(expr, out);
             out.push(')');
         }
-        CanonicalExpr::Binary { op, left, right } => {
-            out.push_str("binary(");
-            write_string_key(op, out);
-            out.push(';');
-            write_expr_key(left, out);
-            out.push(';');
-            write_expr_key(right, out);
-            out.push(')');
+        CanonicalExpr::Binary { first, rest } => {
+            // The key of the nested form: `binary(opₙ;…binary(op₁;first;r₁)…;rₙ)`.
+            for (op, _) in rest.iter().rev() {
+                out.push_str("binary(");
+                write_string_key(op, out);
+                out.push(';');
+            }
+            write_expr_key(first, out);
+            for (_, right) in rest {
+                out.push(';');
+                write_expr_key(right, out);
+                out.push(')');
+            }
         }
         CanonicalExpr::Function { id, args } => {
             out.push_str("fn(");

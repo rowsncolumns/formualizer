@@ -67,15 +67,11 @@ pub(super) fn update_sheet_references_in_ast(
                 contains_volatile: ast.contains_volatile,
             }
         }
-        ASTNodeType::BinaryOp { op, left, right } => ASTNode {
-            node_type: ASTNodeType::BinaryOp {
-                op: op.clone(),
-                left: Box::new(update_sheet_references_in_ast(left, old_name, new_name)),
-                right: Box::new(update_sheet_references_in_ast(right, old_name, new_name)),
-            },
-            source_token: None,
-            contains_volatile: ast.contains_volatile,
-        },
+        // A chain is as deep as it is long: walk its left spine with a loop (FX-02).
+        ASTNodeType::BinaryOp { .. } => ast.fold_binary_chain(
+            |operand| update_sheet_references_in_ast(operand, old_name, new_name),
+            rebuilt_binary,
+        ),
         ASTNodeType::UnaryOp { op, expr } => ASTNode {
             node_type: ASTNodeType::UnaryOp {
                 op: op.clone(),
@@ -183,27 +179,12 @@ pub(super) fn update_internal_sheet_references(
                 contains_volatile: ast.contains_volatile,
             }
         }
-        ASTNodeType::BinaryOp { op, left, right } => ASTNode {
-            node_type: ASTNodeType::BinaryOp {
-                op: op.clone(),
-                left: Box::new(update_internal_sheet_references(
-                    left,
-                    source_name,
-                    new_name,
-                    source_id,
-                    new_id,
-                )),
-                right: Box::new(update_internal_sheet_references(
-                    right,
-                    source_name,
-                    new_name,
-                    source_id,
-                    new_id,
-                )),
+        ASTNodeType::BinaryOp { .. } => ast.fold_binary_chain(
+            |operand| {
+                update_internal_sheet_references(operand, source_name, new_name, source_id, new_id)
             },
-            source_token: None,
-            contains_volatile: ast.contains_volatile,
-        },
+            rebuilt_binary,
+        ),
         ASTNodeType::UnaryOp { op, expr } => ASTNode {
             node_type: ASTNodeType::UnaryOp {
                 op: op.clone(),
@@ -259,5 +240,22 @@ pub(super) fn update_internal_sheet_references(
             contains_volatile: ast.contains_volatile,
         },
         _ => ast.clone(),
+    }
+}
+
+/// A binary node rebuilt over new operands, as the sheet-reference rewrites above build it (no
+/// source token).
+fn rebuilt_binary(node: &ASTNode, left: ASTNode, right: ASTNode) -> ASTNode {
+    let ASTNodeType::BinaryOp { op, .. } = &node.node_type else {
+        unreachable!("fold_binary_chain combines binary nodes only");
+    };
+    ASTNode {
+        node_type: ASTNodeType::BinaryOp {
+            op: op.clone(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+        source_token: None,
+        contains_volatile: node.contains_volatile,
     }
 }
