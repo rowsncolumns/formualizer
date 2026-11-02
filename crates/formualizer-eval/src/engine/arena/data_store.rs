@@ -324,6 +324,14 @@ impl DataStore {
         self.asts.get(id)
     }
 
+    /// See [`super::ast::AstArena::binary_chain`].
+    pub fn binary_chain(
+        &self,
+        id: AstNodeId,
+    ) -> (AstNodeId, Vec<(AstNodeId, StringId, AstNodeId)>) {
+        self.asts.binary_chain(id)
+    }
+
     pub fn get_args(&self, id: AstNodeId) -> Option<&[AstNodeId]> {
         self.asts.get_function_args(id)
     }
@@ -390,10 +398,16 @@ impl DataStore {
                 self.asts.insert_unary_op(op, expr_id)
             }
 
-            ASTNodeType::BinaryOp { op, left, right } => {
-                let left_id = self.convert_ast_node(left, sheet_registry);
-                let right_id = self.convert_ast_node(right, sheet_registry);
-                self.asts.insert_binary_op(op, left_id, right_id)
+            ASTNodeType::BinaryOp { .. } => {
+                // A chain is as deep as it is long: walk its left spine with a loop (FX-02).
+                let (bottom, spine) = node.binary_chain();
+                let mut acc = self.convert_ast_node(bottom, sheet_registry);
+                for link in spine {
+                    let (op, right) = link.binary_parts();
+                    let right_id = self.convert_ast_node(right, sheet_registry);
+                    acc = self.asts.insert_binary_op(op, acc, right_id);
+                }
+                acc
             }
 
             ASTNodeType::Function { name, args } => {
@@ -611,15 +625,24 @@ impl DataStore {
                 ASTNodeType::UnaryOp { op, expr }
             }
 
-            AstNodeData::BinaryOp {
-                op_id,
-                left_id,
-                right_id,
-            } => {
-                let op = self.asts.resolve_string(*op_id).to_string();
-                let left = Box::new(self.reconstruct_ast_node(*left_id, sheet_registry)?);
-                let right = Box::new(self.reconstruct_ast_node(*right_id, sheet_registry)?);
-                ASTNodeType::BinaryOp { op, left, right }
+            AstNodeData::BinaryOp { .. } => {
+                // A chain is as deep as it is long: walk its left spine with a loop (FX-02).
+                let (bottom, spine) = self.asts.binary_chain(id);
+                let mut acc = self.reconstruct_ast_node(bottom, sheet_registry)?;
+                for (_, op_id, right_id) in spine {
+                    let op = self.asts.resolve_string(op_id).to_string();
+                    let right = Box::new(self.reconstruct_ast_node(right_id, sheet_registry)?);
+                    acc = ASTNode {
+                        node_type: ASTNodeType::BinaryOp {
+                            op,
+                            left: Box::new(acc),
+                            right,
+                        },
+                        source_token: None,
+                        contains_volatile: false,
+                    };
+                }
+                return Some(acc);
             }
 
             AstNodeData::Function { name_id, .. } => {
@@ -1004,8 +1027,8 @@ mod tests {
         let ast_id = store.store_ast(&ast, &sheet_registry);
         let retrieved = store.retrieve_ast(ast_id, &sheet_registry).unwrap();
 
-        match retrieved.node_type {
-            ASTNodeType::Literal(lit) => assert_eq!(lit, LiteralValue::Number(42.0)),
+        match &retrieved.node_type {
+            ASTNodeType::Literal(lit) => assert_eq!(*lit, LiteralValue::Number(42.0)),
             _ => panic!("Expected literal"),
         }
     }
@@ -1037,15 +1060,15 @@ mod tests {
         let ast_id = store.store_ast(&ast, &sheet_registry);
         let retrieved = store.retrieve_ast(ast_id, &sheet_registry).unwrap();
 
-        match retrieved.node_type {
+        match &retrieved.node_type {
             ASTNodeType::BinaryOp { op, left, right } => {
                 assert_eq!(op, "+");
-                match left.node_type {
-                    ASTNodeType::Literal(lit) => assert_eq!(lit, LiteralValue::Number(1.0)),
+                match &left.node_type {
+                    ASTNodeType::Literal(lit) => assert_eq!(*lit, LiteralValue::Number(1.0)),
                     _ => panic!("Expected literal"),
                 }
-                match right.node_type {
-                    ASTNodeType::Literal(lit) => assert_eq!(lit, LiteralValue::Number(2.0)),
+                match &right.node_type {
+                    ASTNodeType::Literal(lit) => assert_eq!(*lit, LiteralValue::Number(2.0)),
                     _ => panic!("Expected literal"),
                 }
             }
@@ -1082,7 +1105,7 @@ mod tests {
         let ast_id = store.store_ast(&ast, &sheet_registry);
         let retrieved = store.retrieve_ast(ast_id, &sheet_registry).unwrap();
 
-        match retrieved.node_type {
+        match &retrieved.node_type {
             ASTNodeType::Function { name, args } => {
                 assert_eq!(name, "SUM");
                 assert_eq!(args.len(), 2);

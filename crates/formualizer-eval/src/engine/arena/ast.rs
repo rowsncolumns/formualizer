@@ -380,6 +380,30 @@ impl AstArena {
         self.nodes.get(id.0 as usize).map(|entry| &entry.data)
     }
 
+    /// The leftmost operand of the binary chain rooted at `id`, and the chain's binary nodes as
+    /// `(node id, operator, right operand)`, deepest first. Every infix operator is
+    /// left-associative, so `A1+A2+…+An` is n levels deep on its left edge; passes walk that spine
+    /// with this loop instead of recursing once per level (Athena-Intel/demo-app-monorepo#49969
+    /// FX-02). A node that is not a binary operation is its own bottom with an empty spine.
+    pub fn binary_chain(
+        &self,
+        id: AstNodeId,
+    ) -> (AstNodeId, Vec<(AstNodeId, StringId, AstNodeId)>) {
+        let mut spine = Vec::new();
+        let mut cur = id;
+        while let Some(AstNodeData::BinaryOp {
+            op_id,
+            left_id,
+            right_id,
+        }) = self.get(cur)
+        {
+            spine.push((cur, *op_id, *right_id));
+            cur = *left_id;
+        }
+        spine.reverse();
+        (cur, spine)
+    }
+
     /// Get an arena entry by ID.
     #[allow(dead_code)]
     pub(crate) fn entry(&self, id: AstNodeId) -> Option<&AstNodeEntry> {

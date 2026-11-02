@@ -963,41 +963,35 @@ impl<'a> Interpreter<'a> {
                     )));
                 }
 
-                let left = self
-                    .evaluate_arena_ast(*left_id, data_store, sheet_registry)?
-                    .into_literal();
-                let right = self
-                    .evaluate_arena_ast(*right_id, data_store, sheet_registry)?
-                    .into_literal();
-
-                if matches!(op, "=" | "<>" | ">" | "<" | ">=" | "<=") {
-                    return self
-                        .compare(op, left, right)
-                        .map(crate::traits::CalcValue::Scalar);
+                // A value-operator chain is as deep as it is long (`A1+A2+…`, left-associative):
+                // walk its left spine with a loop, folding left to right (FX-02). The spine stops
+                // at the first operand that is not itself a value operation — the reference
+                // operators above evaluate their operands as references.
+                let mut spine: Vec<(&str, AstNodeId)> = Vec::new();
+                let mut cur = node_id;
+                while let Some(AstNodeData::BinaryOp {
+                    op_id,
+                    left_id,
+                    right_id,
+                }) = data_store.get_node(cur)
+                {
+                    let op = data_store.resolve_ast_string(*op_id);
+                    if matches!(op, ":" | " " | ",") {
+                        break;
+                    }
+                    spine.push((op, *right_id));
+                    cur = *left_id;
                 }
-
-                match op {
-                    "+" => self
-                        .add_sub_date_aware('+', left, right)
-                        .map(crate::traits::CalcValue::Scalar),
-                    "-" => self
-                        .add_sub_date_aware('-', left, right)
-                        .map(crate::traits::CalcValue::Scalar),
-                    "*" => self
-                        .numeric_binary(left, right, |a, b| a * b)
-                        .map(crate::traits::CalcValue::Scalar),
-                    "/" => self
-                        .divide(left, right)
-                        .map(crate::traits::CalcValue::Scalar),
-                    "^" => self
-                        .power(left, right)
-                        .map(crate::traits::CalcValue::Scalar),
-                    "&" => self
-                        .concat(left, right)
-                        .map(crate::traits::CalcValue::Scalar),
-                    _ => Err(ExcelError::new(ExcelErrorKind::NImpl)
-                        .with_message(format!("Binary op '{op}'"))),
+                let mut acc = self
+                    .evaluate_arena_ast(cur, data_store, sheet_registry)?
+                    .into_literal();
+                for (op, right_id) in spine.into_iter().rev() {
+                    let right = self
+                        .evaluate_arena_ast(right_id, data_store, sheet_registry)?
+                        .into_literal();
+                    acc = self.apply_value_binary_op(op, acc, right)?;
                 }
+                Ok(crate::traits::CalcValue::Scalar(acc))
             }
             AstNodeData::Array { .. } => {
                 let (rows, cols, elements) =
@@ -1081,7 +1075,9 @@ impl<'a> Interpreter<'a> {
         &self,
         node: &ASTNode,
     ) -> Result<crate::traits::CalcValue<'a>, ExcelError> {
-        if self.disable_ast_planner {
+        // Only a function call consults its plan (`eval_with_plan`); every other node evaluates
+        // exactly as the unplanned tree walk, so skip planning its whole subtree.
+        if self.disable_ast_planner || !matches!(node.node_type, ASTNodeType::Function { .. }) {
             return self.eval_tree_uncached(node);
         }
 
@@ -1577,12 +1573,6 @@ impl<'a> Interpreter<'a> {
         left: &ASTNode,
         right: &ASTNode,
     ) -> Result<LiteralValue, ExcelError> {
-        // Comparisons use dedicated path.
-        if matches!(op, "=" | "<>" | ">" | "<" | ">=" | "<=") {
-            let l = self.evaluate_ast(left)?.into_literal();
-            let r = self.evaluate_ast(right)?.into_literal();
-            return self.compare(op, l, r);
-        }
         // Reference set operators: intersection yields a reference (read like any range),
         // union stacks its areas for the consuming aggregate.
         if op == " " {
@@ -1600,16 +1590,31 @@ impl<'a> Interpreter<'a> {
             return Ok(LiteralValue::Error(multi_area_value_error()));
         }
 
+        if op != ":" {
+            // A value-operator chain is as deep as it is long (`A1+A2+…`, left-associative): walk
+            // its left spine with a loop, folding left to right (FX-02). The spine stops at the
+            // first operand that is not itself a value operation.
+            let mut spine: Vec<(&str, &ASTNode)> = vec![(op, right)];
+            let mut cur = left;
+            while let ASTNodeType::BinaryOp { op, left, right } = &cur.node_type {
+                if matches!(op.as_str(), ":" | " " | ",") {
+                    break;
+                }
+                spine.push((op, right));
+                cur = left;
+            }
+            let mut acc = self.evaluate_ast(cur)?.into_literal();
+            for (op, right) in spine.into_iter().rev() {
+                let r_val = self.evaluate_ast(right)?.into_literal();
+                acc = self.apply_value_binary_op(op, acc, r_val)?;
+            }
+            return Ok(acc);
+        }
+
         let l_val = self.evaluate_ast(left)?.into_literal();
         let r_val = self.evaluate_ast(right)?.into_literal();
 
         match op {
-            "+" => self.add_sub_date_aware('+', l_val, r_val),
-            "-" => self.add_sub_date_aware('-', l_val, r_val),
-            "*" => self.numeric_binary(l_val, r_val, |a, b| a * b),
-            "/" => self.divide(l_val, r_val),
-            "^" => self.power(l_val, r_val),
-            "&" => self.concat(l_val, r_val),
             ":" => {
                 // Compute a combined reference; in value context return #REF! for now.
                 let lref = self.evaluate_ast_as_reference(left)?;
@@ -1621,6 +1626,28 @@ impl<'a> Interpreter<'a> {
                     Err(e) => Ok(LiteralValue::Error(e)),
                 }
             }
+            _ => {
+                Err(ExcelError::new(ExcelErrorKind::NImpl)
+                    .with_message(format!("Binary op '{op}'")))
+            }
+        }
+    }
+
+    /// One value operator applied to its evaluated operands (`+ - * / ^ &` and the comparisons).
+    fn apply_value_binary_op(
+        &self,
+        op: &str,
+        left: LiteralValue,
+        right: LiteralValue,
+    ) -> Result<LiteralValue, ExcelError> {
+        match op {
+            "=" | "<>" | ">" | "<" | ">=" | "<=" => self.compare(op, left, right),
+            "+" => self.add_sub_date_aware('+', left, right),
+            "-" => self.add_sub_date_aware('-', left, right),
+            "*" => self.numeric_binary(left, right, |a, b| a * b),
+            "/" => self.divide(left, right),
+            "^" => self.power(left, right),
+            "&" => self.concat(left, right),
             _ => {
                 Err(ExcelError::new(ExcelErrorKind::NImpl)
                     .with_message(format!("Binary op '{op}'")))

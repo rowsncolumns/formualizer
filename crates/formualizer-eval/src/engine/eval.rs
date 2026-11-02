@@ -4113,8 +4113,8 @@ where
                     .is_some_and(|caps| caps.contains(FnCaps::VOLATILE))
                     || args.iter().any(|arg| self.ast_calls_volatile_function(arg))
             }
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                self.ast_calls_volatile_function(left) || self.ast_calls_volatile_function(right)
+            ASTNodeType::BinaryOp { .. } => {
+                ast.any_chain_operand(|operand| self.ast_calls_volatile_function(operand))
             }
             ASTNodeType::UnaryOp { expr, .. } => self.ast_calls_volatile_function(expr),
             ASTNodeType::Array(rows) => rows.iter().any(|row| {
@@ -6790,9 +6790,10 @@ where
                     Self::collect_planning_function_requests(arg, requests);
                 }
             }
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                Self::collect_planning_function_requests(left, requests);
-                Self::collect_planning_function_requests(right, requests);
+            ASTNodeType::BinaryOp { .. } => {
+                ast.for_each_chain_operand(|operand| {
+                    Self::collect_planning_function_requests(operand, requests)
+                });
             }
             ASTNodeType::UnaryOp { expr, .. } => {
                 Self::collect_planning_function_requests(expr, requests);
@@ -9312,9 +9313,12 @@ where
             }
             ASTNodeType::Call { .. } => Some(crate::engine::OpaqueReason::UnknownCustomFunction),
             ASTNodeType::UnaryOp { expr, .. } => self.opaque_reason_in_ast(expr, provider),
-            ASTNodeType::BinaryOp { left, right, .. } => self
-                .opaque_reason_in_ast(left, provider)
-                .or_else(|| self.opaque_reason_in_ast(right, provider)),
+            ASTNodeType::BinaryOp { .. } => {
+                let (bottom, spine) = ast.binary_chain();
+                std::iter::once(bottom)
+                    .chain(spine.into_iter().map(|node| node.binary_parts().1))
+                    .find_map(|operand| self.opaque_reason_in_ast(operand, provider))
+            }
             ASTNodeType::Array(rows) => rows
                 .iter()
                 .flat_map(|row| row.iter())
@@ -9475,10 +9479,14 @@ where
                     (true, has_dynamic)
                 }
                 ASTNodeType::UnaryOp { expr, .. } => classify(expr, provider),
-                ASTNodeType::BinaryOp { left, right, .. } => {
-                    let (left_safe, left_dynamic) = classify(left, provider);
-                    let (right_safe, right_dynamic) = classify(right, provider);
-                    (left_safe && right_safe, left_dynamic || right_dynamic)
+                ASTNodeType::BinaryOp { .. } => {
+                    let (mut safe, mut dynamic) = (true, false);
+                    ast.for_each_chain_operand(|operand| {
+                        let (operand_safe, operand_dynamic) = classify(operand, provider);
+                        safe &= operand_safe;
+                        dynamic |= operand_dynamic;
+                    });
+                    (safe, dynamic)
                 }
                 ASTNodeType::Array(rows) => {
                     let mut has_dynamic = false;
@@ -12217,9 +12225,8 @@ where
                         .any(|arg| Self::ast_uses_changed_function(arg, changed))
             }
             ASTNodeType::UnaryOp { expr, .. } => Self::ast_uses_changed_function(expr, changed),
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                Self::ast_uses_changed_function(left, changed)
-                    || Self::ast_uses_changed_function(right, changed)
+            ASTNodeType::BinaryOp { .. } => {
+                ast.any_chain_operand(|operand| Self::ast_uses_changed_function(operand, changed))
             }
             ASTNodeType::Array(rows) => rows
                 .iter()
@@ -12236,9 +12243,7 @@ where
                 Self::ast_contains_function(callee) || args.iter().any(Self::ast_contains_function)
             }
             ASTNodeType::UnaryOp { expr, .. } => Self::ast_contains_function(expr),
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                Self::ast_contains_function(left) || Self::ast_contains_function(right)
-            }
+            ASTNodeType::BinaryOp { .. } => ast.any_chain_operand(Self::ast_contains_function),
             ASTNodeType::Array(rows) => rows.iter().flatten().any(Self::ast_contains_function),
             ASTNodeType::Literal(_) | ASTNodeType::Reference { .. } => false,
         }
@@ -12659,11 +12664,25 @@ where
                         op: op.clone(),
                         expr: Box::new(clone_with_slots(expr, binding, next, in_array)),
                     },
-                    ASTNodeType::BinaryOp { op, left, right } => ASTNodeType::BinaryOp {
-                        op: op.clone(),
-                        left: Box::new(clone_with_slots(left, binding, next, in_array)),
-                        right: Box::new(clone_with_slots(right, binding, next, in_array)),
-                    },
+                    ASTNodeType::BinaryOp { .. } => {
+                        // A chain is as deep as it is long: walk its left spine with a loop
+                        // (FX-02), consuming slots in the same left-to-right order.
+                        let (bottom, spine) = ast.binary_chain();
+                        let mut acc = clone_with_slots(bottom, binding, next, in_array);
+                        for node in spine {
+                            let (op, right) = node.binary_parts();
+                            let right = clone_with_slots(right, binding, next, in_array);
+                            acc = ASTNode::new(
+                                ASTNodeType::BinaryOp {
+                                    op: op.to_string(),
+                                    left: Box::new(acc),
+                                    right: Box::new(right),
+                                },
+                                node.source_token.clone(),
+                            );
+                        }
+                        return acc;
+                    }
                     ASTNodeType::Function { name, args } => ASTNodeType::Function {
                         name: name.clone(),
                         args: args
@@ -14039,11 +14058,25 @@ where
                         op: op.clone(),
                         expr: Box::new(visit(expr, binding, next, in_array)),
                     },
-                    ASTNodeType::BinaryOp { op, left, right } => ASTNodeType::BinaryOp {
-                        op: op.clone(),
-                        left: Box::new(visit(left, binding, next, in_array)),
-                        right: Box::new(visit(right, binding, next, in_array)),
-                    },
+                    ASTNodeType::BinaryOp { .. } => {
+                        // A chain is as deep as it is long: walk its left spine with a loop
+                        // (FX-02), consuming slots in the same left-to-right order.
+                        let (bottom, spine) = ast.binary_chain();
+                        let mut acc = visit(bottom, binding, next, in_array);
+                        for node in spine {
+                            let (op, right) = node.binary_parts();
+                            let right = visit(right, binding, next, in_array);
+                            acc = ASTNode::new(
+                                ASTNodeType::BinaryOp {
+                                    op: op.to_string(),
+                                    left: Box::new(acc),
+                                    right: Box::new(right),
+                                },
+                                node.source_token.clone(),
+                            );
+                        }
+                        return acc;
+                    }
                     ASTNodeType::Function { name, args } => ASTNodeType::Function {
                         name: name.clone(),
                         args: args
@@ -21479,9 +21512,8 @@ where
                 args.iter()
                     .any(|arg| self.is_ast_volatile_with_provider(arg))
             }
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                self.is_ast_volatile_with_provider(left)
-                    || self.is_ast_volatile_with_provider(right)
+            ASTNodeType::BinaryOp { .. } => {
+                ast.any_chain_operand(|operand| self.is_ast_volatile_with_provider(operand))
             }
             ASTNodeType::UnaryOp { expr, .. } => self.is_ast_volatile_with_provider(expr),
             ASTNodeType::Array(rows) => rows.iter().any(|row| {
