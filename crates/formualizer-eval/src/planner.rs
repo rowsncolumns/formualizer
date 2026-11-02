@@ -176,13 +176,24 @@ impl<'a> Planner<'a> {
                 let a = self.annotate(expr);
                 (a.cost, a.hints.has_range, a.hints.dims, 1)
             }
-            BinaryOp { left, right, op: _ } => {
-                let a = self.annotate(left);
-                let b = self.annotate(right);
-                let est = a.cost.est_nanos + b.cost.est_nanos + 1_000;
-                let cells = a.cost.cells + b.cost.cells;
-                let has_range = a.hints.has_range || b.hints.has_range;
-                let dims = a.hints.dims.or(b.hints.dims);
+            BinaryOp { .. } => {
+                // Folded over the chain's operands with a loop (a chain is as deep as it is
+                // long — FX-02); the sums equal the nested per-node ones.
+                let (bottom, spine) = ast.binary_chain();
+                let a = self.annotate(bottom);
+                let (mut est, mut cells, mut has_range, mut dims) = (
+                    a.cost.est_nanos,
+                    a.cost.cells,
+                    a.hints.has_range,
+                    a.hints.dims,
+                );
+                for node in spine {
+                    let b = self.annotate(node.binary_parts().1);
+                    est += b.cost.est_nanos + 1_000;
+                    cells += b.cost.cells;
+                    has_range |= b.hints.has_range;
+                    dims = dims.or(b.hints.dims);
+                }
                 (
                     NodeCost {
                         est_nanos: est,
@@ -329,10 +340,17 @@ impl<'a> Planner<'a> {
                 let a = self.annotate(expr);
                 vec![self.select(expr, &a)]
             }
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                let la = self.annotate(left);
-                let ra = self.annotate(right);
-                vec![self.select(left, &la), self.select(right, &ra)]
+            ASTNodeType::BinaryOp { .. } => {
+                // A chain's plan lists its operands flat (the evaluator folds the chain itself and
+                // never reads these), so plan depth does not grow with chain length (FX-02).
+                let (bottom, spine) = ast.binary_chain();
+                std::iter::once(bottom)
+                    .chain(spine.into_iter().map(|node| node.binary_parts().1))
+                    .map(|operand| {
+                        let an = self.annotate(operand);
+                        self.select(operand, &an)
+                    })
+                    .collect()
             }
             ASTNodeType::Function { args, .. } => {
                 let mut v = Vec::with_capacity(args.len());

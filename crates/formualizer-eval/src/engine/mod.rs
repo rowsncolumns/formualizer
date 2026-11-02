@@ -173,9 +173,8 @@ pub mod fp8_parity_test_support {
                 }
             }
             ASTNodeType::UnaryOp { expr, .. } => local_binding_declarations(expr, out),
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                local_binding_declarations(left, out);
-                local_binding_declarations(right, out);
+            ASTNodeType::BinaryOp { .. } => {
+                ast.for_each_chain_operand(|operand| local_binding_declarations(operand, out));
             }
             ASTNodeType::Call { callee, args } => {
                 local_binding_declarations(callee, out);

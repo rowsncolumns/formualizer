@@ -32,7 +32,7 @@ mod tests {
     #[test]
     fn parser_accepts_lowercase_error_literals() {
         let ast = parse_formula("=#ref!").expect("parse lowercase error literal");
-        match ast.node_type {
+        match &ast.node_type {
             ASTNodeType::Literal(LiteralValue::Error(e)) => {
                 assert_eq!(e.kind, ExcelError::new_ref().kind)
             }
@@ -45,7 +45,7 @@ mod tests {
         // Sheet-qualified error literals collapse to the bare error literal,
         // preserving the error kind (here `#ref!` -> ExcelError::Ref).
         let ast = parse_formula("=source!#ref!").expect("parse sheet-prefixed lowercase");
-        match ast.node_type {
+        match &ast.node_type {
             ASTNodeType::Literal(LiteralValue::Error(e)) => {
                 assert_eq!(e.kind, ExcelError::new_ref().kind);
             }
@@ -67,7 +67,7 @@ mod tests {
                 ("classic", parse_formula(formula).expect("classic parse")),
                 ("span", parse_span(formula).expect("span parse")),
             ] {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::Literal(LiteralValue::Error(e)) => {
                         assert_eq!(e.kind, expected, "{label} parser kind for {formula:?}");
                     }
@@ -154,12 +154,12 @@ mod tests {
         fn regression_ordinary_sheet_reference_unchanged() {
             // Plain sheet-qualified cell references must not be affected.
             let ast = parse_formula("=Sheet1!A1").expect("classic parse");
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::Reference { .. } => {}
                 other => panic!("expected reference node, got {other:?}"),
             }
             let ast = parse_span("=Sheet1!A1").expect("span parse");
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::Reference { .. } => {}
                 other => panic!("expected reference node, got {other:?}"),
             }
@@ -388,17 +388,17 @@ mod tests {
     fn test_parse_simple_formula() {
         let ast = parse_formula("=A1+B2").unwrap();
 
-        if let ASTNodeType::BinaryOp { op, left, right } = ast.node_type {
+        if let ASTNodeType::BinaryOp { op, left, right } = &ast.node_type {
             assert_eq!(op, "+");
 
-            if let ASTNodeType::Reference { reference, .. } = left.node_type {
-                assert_eq!(reference, ReferenceType::cell(None, 1, 1));
+            if let ASTNodeType::Reference { reference, .. } = &left.node_type {
+                assert_eq!(*reference, ReferenceType::cell(None, 1, 1));
             } else {
                 panic!("Expected Reference node for left operand");
             }
 
-            if let ASTNodeType::Reference { reference, .. } = right.node_type {
-                assert_eq!(reference, ReferenceType::cell(None, 2, 2));
+            if let ASTNodeType::Reference { reference, .. } = &right.node_type {
+                assert_eq!(*reference, ReferenceType::cell(None, 2, 2));
             } else {
                 panic!("Expected Reference node for right operand");
             }
@@ -413,7 +413,7 @@ mod tests {
 
         println!("AST: {ast:?}");
 
-        if let ASTNodeType::Function { name, args } = ast.node_type {
+        if let ASTNodeType::Function { name, args } = &ast.node_type {
             assert_eq!(name, "SUM");
             assert_eq!(args.len(), 1);
 
@@ -443,12 +443,12 @@ mod tests {
             op: op1,
             left: left1,
             right: right1,
-        } = ast.node_type
+        } = &ast.node_type
         {
             assert_eq!(op1, "+");
 
-            if let ASTNodeType::Reference { reference, .. } = left1.node_type {
-                assert_eq!(reference, ReferenceType::cell(None, 1, 1));
+            if let ASTNodeType::Reference { reference, .. } = &left1.node_type {
+                assert_eq!(*reference, ReferenceType::cell(None, 1, 1));
             } else {
                 panic!("Expected Reference node for left operand of +");
             }
@@ -457,18 +457,18 @@ mod tests {
                 op: op2,
                 left: left2,
                 right: right2,
-            } = right1.node_type
+            } = &right1.node_type
             {
                 assert_eq!(op2, "*");
 
-                if let ASTNodeType::Reference { reference, .. } = left2.node_type {
-                    assert_eq!(reference, ReferenceType::cell(None, 2, 2));
+                if let ASTNodeType::Reference { reference, .. } = &left2.node_type {
+                    assert_eq!(*reference, ReferenceType::cell(None, 2, 2));
                 } else {
                     panic!("Expected Reference node for left operand of *");
                 }
 
-                if let ASTNodeType::Reference { reference, .. } = right2.node_type {
-                    assert_eq!(reference, ReferenceType::cell(None, 3, 3));
+                if let ASTNodeType::Reference { reference, .. } = &right2.node_type {
+                    assert_eq!(*reference, ReferenceType::cell(None, 3, 3));
                 } else {
                     panic!("Expected Reference node for right operand of *");
                 }
@@ -484,17 +484,17 @@ mod tests {
     fn test_parentheses() {
         let ast = parse_formula("=(A1+B2)*C3").unwrap();
 
-        if let ASTNodeType::BinaryOp { op, left, right } = ast.node_type {
+        if let ASTNodeType::BinaryOp { op, left, right } = &ast.node_type {
             assert_eq!(op, "*");
 
-            if let ASTNodeType::BinaryOp { op: inner_op, .. } = left.node_type {
+            if let ASTNodeType::BinaryOp { op: inner_op, .. } = &left.node_type {
                 assert_eq!(inner_op, "+");
             } else {
                 panic!("Expected BinaryOp node for left operand");
             }
 
-            if let ASTNodeType::Reference { reference, .. } = right.node_type {
-                assert_eq!(reference, ReferenceType::cell(None, 3, 3));
+            if let ASTNodeType::Reference { reference, .. } = &right.node_type {
+                assert_eq!(*reference, ReferenceType::cell(None, 3, 3));
             } else {
                 panic!("Expected Reference node for right operand");
             }
@@ -509,7 +509,7 @@ mod tests {
 
         println!("AST: {ast:?}");
 
-        if let ASTNodeType::Function { name, args } = ast.node_type {
+        if let ASTNodeType::Function { name, args } = &ast.node_type {
             assert_eq!(name, "IF");
             assert_eq!(args.len(), 3);
 
@@ -541,7 +541,7 @@ mod tests {
     fn test_functions_with_optional_arguments() {
         // Test with all arguments provided
         let ast = parse_formula("=VLOOKUP(A1,B1:C10,2,FALSE)").unwrap();
-        if let ASTNodeType::Function { name, args } = ast.node_type {
+        if let ASTNodeType::Function { name, args } = &ast.node_type {
             assert_eq!(name, "VLOOKUP");
             assert_eq!(args.len(), 4);
         } else {
@@ -550,7 +550,7 @@ mod tests {
 
         // Test with missing optional argument
         let ast = parse_formula("=VLOOKUP(A1,B1:C10,2)").unwrap();
-        if let ASTNodeType::Function { name, args } = ast.node_type {
+        if let ASTNodeType::Function { name, args } = &ast.node_type {
             assert_eq!(name, "VLOOKUP");
             assert_eq!(args.len(), 3);
         } else {
@@ -576,7 +576,7 @@ mod tests {
 
         // Test skipping middle arguments
         let ast = parse_formula("=IF(A1>0,,C1)").unwrap();
-        if let ASTNodeType::Function { name, args } = ast.node_type {
+        if let ASTNodeType::Function { name, args } = &ast.node_type {
             assert_eq!(name, "IF");
             assert_eq!(args.len(), 3);
             // Middle argument should be empty
@@ -593,7 +593,7 @@ mod tests {
 
         // Test with multiple trailing empty arguments
         let ast = parse_formula("=IF(A1>0,,)").unwrap();
-        if let ASTNodeType::Function { name, args } = ast.node_type {
+        if let ASTNodeType::Function { name, args } = &ast.node_type {
             assert_eq!(name, "IF");
             assert_eq!(args.len(), 3);
             // Both optional arguments should be empty
@@ -617,7 +617,7 @@ mod tests {
 
         // Test with complex empty arguments combination
         let ast = parse_formula("=CHOOSE(1,A1,,C1,,E1)").unwrap();
-        if let ASTNodeType::Function { name, args } = ast.node_type {
+        if let ASTNodeType::Function { name, args } = &ast.node_type {
             assert_eq!(name, "CHOOSE");
             assert_eq!(args.len(), 6);
             // Check the empty arguments (3rd and 5th)
@@ -646,7 +646,7 @@ mod tests {
 
         println!("AST: {ast:?}");
 
-        if let ASTNodeType::Function { name, args } = ast.node_type {
+        if let ASTNodeType::Function { name, args } = &ast.node_type {
             assert_eq!(name, "IF");
             assert_eq!(args.len(), 3);
 
@@ -691,11 +691,11 @@ mod tests {
     fn test_unary_operators() {
         let ast = parse_formula("=-A1").unwrap();
 
-        if let ASTNodeType::UnaryOp { op, expr } = ast.node_type {
+        if let ASTNodeType::UnaryOp { op, expr } = &ast.node_type {
             assert_eq!(op, "-");
 
-            if let ASTNodeType::Reference { reference, .. } = expr.node_type {
-                assert_eq!(reference, ReferenceType::cell(None, 1, 1));
+            if let ASTNodeType::Reference { reference, .. } = &expr.node_type {
+                assert_eq!(*reference, ReferenceType::cell(None, 1, 1));
             } else {
                 panic!("Expected Reference node for operand");
             }
@@ -708,7 +708,7 @@ mod tests {
     fn test_double_unary_operator() {
         let ast = parse_formula("=--A1").unwrap();
 
-        if let ASTNodeType::UnaryOp { op, expr: _ } = ast.node_type {
+        if let ASTNodeType::UnaryOp { op, expr: _ } = &ast.node_type {
             assert_eq!(op, "-");
         }
     }
@@ -719,13 +719,13 @@ mod tests {
 
         // Range
         let ast = parse_formula("=@A1:A3").unwrap();
-        match ast.node_type {
+        match &ast.node_type {
             ASTNodeType::UnaryOp { op, expr } => {
                 assert_eq!(op, "@");
-                match expr.node_type {
+                match &expr.node_type {
                     ASTNodeType::Reference { reference, .. } => {
                         assert_eq!(
-                            reference,
+                            *reference,
                             ReferenceType::range(None, Some(1), Some(1), Some(3), Some(1))
                         );
                     }
@@ -737,13 +737,13 @@ mod tests {
 
         // Table reference (table evaluation may be unsupported, but parsing should succeed)
         let ast = parse_formula("=@Table1[Col]").unwrap();
-        match ast.node_type {
+        match &ast.node_type {
             ASTNodeType::UnaryOp { op, expr } => {
                 assert_eq!(op, "@");
-                match expr.node_type {
+                match &expr.node_type {
                     ASTNodeType::Reference { reference, .. } => {
                         assert_eq!(
-                            reference,
+                            *reference,
                             ReferenceType::Table(TableReference {
                                 name: "Table1".to_string(),
                                 specifier: Some(TableSpecifier::Column("Col".to_string())),
@@ -758,10 +758,10 @@ mod tests {
 
         // Function call
         let ast = parse_formula("=@SEQUENCE(3,1)").unwrap();
-        match ast.node_type {
+        match &ast.node_type {
             ASTNodeType::UnaryOp { op, expr } => {
                 assert_eq!(op, "@");
-                match expr.node_type {
+                match &expr.node_type {
                     ASTNodeType::Function { name, args } => {
                         assert_eq!(name, "SEQUENCE");
                         assert_eq!(args.len(), 2);
@@ -779,7 +779,7 @@ mod tests {
         let formula = "=SUM(A:A)";
         let ast = parse_formula(formula).unwrap();
 
-        if let ASTNodeType::Function { name, args } = ast.node_type {
+        if let ASTNodeType::Function { name, args } = &ast.node_type {
             assert_eq!(name, "SUM");
             assert_eq!(args.len(), 1);
 
@@ -810,7 +810,7 @@ mod tests {
         let formula = "=SUM(1:1)";
         let ast = parse_formula(formula).unwrap();
 
-        if let ASTNodeType::Function { name, args } = ast.node_type {
+        if let ASTNodeType::Function { name, args } = &ast.node_type {
             assert_eq!(name, "SUM");
             assert_eq!(args.len(), 1);
 
@@ -901,7 +901,7 @@ mod tests {
     fn test_array_literal() {
         let ast = parse_formula("={1,2;3,4}").unwrap();
 
-        if let ASTNodeType::Array(rows) = ast.node_type {
+        if let ASTNodeType::Array(rows) = &ast.node_type {
             assert_eq!(rows.len(), 2);
             assert_eq!(rows[0].len(), 2);
             assert_eq!(rows[1].len(), 2);
@@ -954,7 +954,7 @@ mod tests {
             ("={1,2;3,4;5,6}", 3, 2),
         ] {
             let ast = parse_formula(formula).expect(formula);
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::Array(r) => {
                     assert_eq!(r.len(), rows, "{formula}");
                     assert!(r.iter().all(|row| row.len() == cols), "{formula}");
@@ -970,7 +970,7 @@ mod tests {
 
         println!("AST: {ast:?}");
 
-        if let ASTNodeType::Function { name, args } = ast.node_type {
+        if let ASTNodeType::Function { name, args } = &ast.node_type {
             assert_eq!(name, "IF");
             assert_eq!(args.len(), 3);
 
@@ -1015,17 +1015,17 @@ mod tests {
     fn test_whitespace_handling() {
         let ast = parse_formula("= A1 + B2 ").unwrap();
 
-        if let ASTNodeType::BinaryOp { op, left, right } = ast.node_type {
+        if let ASTNodeType::BinaryOp { op, left, right } = &ast.node_type {
             assert_eq!(op, "+");
 
-            if let ASTNodeType::Reference { reference, .. } = left.node_type {
-                assert_eq!(reference, ReferenceType::cell(None, 1, 1));
+            if let ASTNodeType::Reference { reference, .. } = &left.node_type {
+                assert_eq!(*reference, ReferenceType::cell(None, 1, 1));
             } else {
                 panic!("Expected Reference node for left operand");
             }
 
-            if let ASTNodeType::Reference { reference, .. } = right.node_type {
-                assert_eq!(reference, ReferenceType::cell(None, 2, 2));
+            if let ASTNodeType::Reference { reference, .. } = &right.node_type {
+                assert_eq!(*reference, ReferenceType::cell(None, 2, 2));
             } else {
                 panic!("Expected Reference node for right operand");
             }
@@ -1038,7 +1038,7 @@ mod tests {
     fn test_string_literals() {
         let ast = parse_formula("=\"Hello\"").unwrap();
 
-        if let ASTNodeType::Literal(LiteralValue::Text(text)) = ast.node_type {
+        if let ASTNodeType::Literal(LiteralValue::Text(text)) = &ast.node_type {
             assert_eq!(text, "Hello");
         } else {
             panic!("Expected Text literal");
@@ -1047,7 +1047,7 @@ mod tests {
         // Test string with escaped quotes
         let ast = parse_formula("=\"Hello\"\"World\"").unwrap();
 
-        if let ASTNodeType::Literal(LiteralValue::Text(text)) = ast.node_type {
+        if let ASTNodeType::Literal(LiteralValue::Text(text)) = &ast.node_type {
             assert_eq!(text, "Hello\"World");
         } else {
             panic!("Expected Text literal");
@@ -1082,9 +1082,9 @@ mod tests {
             ("=fAlSe", false),
         ] {
             let ast = parse_formula(formula).unwrap();
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::Literal(LiteralValue::Boolean(v)) => {
-                    assert_eq!(v, expected, "classic parser: {formula}");
+                    assert_eq!(*v, expected, "classic parser: {formula}");
                 }
                 other => {
                     panic!("classic parser: expected Boolean literal for {formula}, got {other:?}")
@@ -1092,9 +1092,9 @@ mod tests {
             }
 
             let ast = crate::parser::parse(formula).unwrap();
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::Literal(LiteralValue::Boolean(v)) => {
-                    assert_eq!(v, expected, "span parser: {formula}");
+                    assert_eq!(*v, expected, "span parser: {formula}");
                 }
                 other => {
                     panic!("span parser: expected Boolean literal for {formula}, got {other:?}")
@@ -1109,7 +1109,7 @@ mod tests {
         let parsers: [ParseFn; 2] = [parse_formula, |s| crate::parser::parse(s)];
         for parse in parsers {
             let ast = parse("=IF(true,1,2)").unwrap();
-            let ASTNodeType::Function { name, args } = ast.node_type else {
+            let ASTNodeType::Function { name, args } = &ast.node_type else {
                 panic!("expected Function node");
             };
             assert_eq!(name, "IF");
@@ -1127,7 +1127,7 @@ mod tests {
         let parsers: [ParseFn; 2] = [parse_formula, |s| crate::parser::parse(s)];
         for parse in parsers {
             let ast = parse("=a1+true").unwrap();
-            let ASTNodeType::BinaryOp { op, left, right } = ast.node_type else {
+            let ASTNodeType::BinaryOp { op, left, right } = &ast.node_type else {
                 panic!("expected BinaryOp node");
             };
             assert_eq!(op, "+");
@@ -1167,8 +1167,8 @@ mod tests {
     fn test_error_literals() {
         let ast = parse_formula("=#DIV/0!").unwrap();
 
-        if let ASTNodeType::Literal(LiteralValue::Error(error)) = ast.node_type {
-            assert_eq!(error, ExcelError::new_div());
+        if let ASTNodeType::Literal(LiteralValue::Error(error)) = &ast.node_type {
+            assert_eq!(*error, ExcelError::new_div());
         } else {
             panic!("Expected Error literal");
         }
@@ -1178,7 +1178,7 @@ mod tests {
     fn test_empty_function_arguments() {
         // Parsing a function call with an empty argument list.
         let ast = parse_formula("=SUM()").unwrap();
-        if let ASTNodeType::Function { name, args } = ast.node_type {
+        if let ASTNodeType::Function { name, args } = &ast.node_type {
             assert_eq!(name, "SUM");
             assert_eq!(args.len(), 0);
         } else {
@@ -1238,7 +1238,7 @@ mod tests {
         #[test]
         fn spill_in_iferror_function_argument() {
             let ast = parse_both("=IFERROR(A1, #SPILL!)");
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::Function { name, args } => {
                     assert_eq!(name, "IFERROR");
                     assert_eq!(args.len(), 2);
@@ -1252,7 +1252,7 @@ mod tests {
         fn calc_in_arithmetic_expression() {
             // Nonsensical semantically, but must parse syntactically.
             let ast = parse_both("=#CALC! + 1");
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::BinaryOp { op, left, right } => {
                     assert_eq!(op, "+");
                     expect_error_kind(&left, ExcelErrorKind::Calc);
@@ -1292,12 +1292,12 @@ mod tests {
         use crate::pretty::pretty_parse_render;
 
         fn assert_unary_ref(ast: crate::parser::ASTNode, op: &str, expected: ReferenceType) {
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::UnaryOp { op: o, expr } => {
                     assert_eq!(o, op);
-                    match expr.node_type {
+                    match &expr.node_type {
                         ASTNodeType::Reference { reference, .. } => {
-                            assert_eq!(reference, expected);
+                            assert_eq!(*reference, expected);
                         }
                         other => panic!("expected Reference under UnaryOp, got {other:?}"),
                     }
@@ -1323,17 +1323,17 @@ mod tests {
                 parse_formula("=B2#+1").expect("classic"),
                 crate::parser::parse("=B2#+1").expect("span"),
             ] {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::BinaryOp { op, left, right } => {
                         assert_eq!(op, "+");
-                        match left.node_type {
+                        match &left.node_type {
                             ASTNodeType::UnaryOp { op: o, expr } => {
                                 assert_eq!(o, "#");
                                 assert!(matches!(expr.node_type, ASTNodeType::Reference { .. }));
                             }
                             other => panic!("expected UnaryOp on left, got {other:?}"),
                         }
-                        match right.node_type {
+                        match &right.node_type {
                             ASTNodeType::Literal(_) => {}
                             other => panic!("expected literal on right, got {other:?}"),
                         }
@@ -1349,7 +1349,7 @@ mod tests {
                 parse_formula("=SUM(A1#)").expect("classic"),
                 crate::parser::parse("=SUM(A1#)").expect("span"),
             ] {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::Function { name, args } => {
                         assert_eq!(name, "SUM");
                         assert_eq!(args.len(), 1);
@@ -1373,10 +1373,10 @@ mod tests {
                 parse_formula("=@A1#").expect("classic"),
                 crate::parser::parse("=@A1#").expect("span"),
             ] {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::UnaryOp { op, expr } => {
                         assert_eq!(op, "@");
-                        match expr.node_type {
+                        match &expr.node_type {
                             ASTNodeType::UnaryOp {
                                 op: inner_op,
                                 expr: inner,
@@ -1413,7 +1413,7 @@ mod tests {
                 parse_formula("=_xlfn.ANCHORARRAY(A1)").expect("classic"),
                 crate::parser::parse("=_xlfn.ANCHORARRAY(A1)").expect("span"),
             ] {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::Function { name, args } => {
                         assert!(name.eq_ignore_ascii_case("_xlfn.ANCHORARRAY"));
                         assert_eq!(args.len(), 1);
@@ -1458,10 +1458,10 @@ mod tests {
                 parse_formula("=A1##").expect("classic"),
                 crate::parser::parse("=A1##").expect("span"),
             ] {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::UnaryOp { op, expr } => {
                         assert_eq!(op, "#");
-                        match expr.node_type {
+                        match &expr.node_type {
                             ASTNodeType::UnaryOp { op: inner_op, .. } => {
                                 assert_eq!(inner_op, "#");
                             }
@@ -1488,10 +1488,10 @@ mod tests {
                 parse_formula("=#REF!#").expect("classic"),
                 crate::parser::parse("=#REF!#").expect("span"),
             ] {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::UnaryOp { op, expr } => {
                         assert_eq!(op, "#");
-                        match expr.node_type {
+                        match &expr.node_type {
                             ASTNodeType::Literal(formualizer_common::LiteralValue::Error(e)) => {
                                 assert_eq!(e.kind, formualizer_common::ExcelErrorKind::Ref);
                             }
@@ -1582,7 +1582,7 @@ mod tests {
         #[test]
         fn space_intersection_basic() {
             for ast in parse_both("=A1:A3 B1:B3") {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::BinaryOp { op, left, right } => {
                         assert_eq!(op, " ");
                         assert_range_ref(&left, "A1:A3");
@@ -1596,7 +1596,7 @@ mod tests {
         #[test]
         fn space_intersection_inside_function() {
             for ast in parse_both("=SUM(A1:A3 A2:C2)") {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::Function { name, args } => {
                         assert_eq!(name, "SUM");
                         assert_eq!(args.len(), 1);
@@ -1617,7 +1617,7 @@ mod tests {
         #[test]
         fn colon_composed_with_function() {
             for ast in parse_both("=OFFSET(A1,1,1):B10") {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::BinaryOp { op, left, right } => {
                         assert_eq!(op, ":");
                         match &left.node_type {
@@ -1636,7 +1636,7 @@ mod tests {
         #[test]
         fn colon_composed_with_index() {
             for ast in parse_both("=INDEX(A:A,1):B10") {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::BinaryOp { op, left, right } => {
                         assert_eq!(op, ":");
                         match &left.node_type {
@@ -1655,7 +1655,7 @@ mod tests {
         #[test]
         fn colon_composed_with_paren() {
             for ast in parse_both("=(A1:A3):A5") {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::BinaryOp { op, left, right } => {
                         assert_eq!(op, ":");
                         assert_range_ref(&left, "A1:A3");
@@ -1671,7 +1671,7 @@ mod tests {
             // 'Sheet1'!A1:'Sheet2'!B1 must compose as BinaryOp(:, A1, B1) with
             // distinct sheets on each side.
             for ast in parse_both("='Sheet1'!A1:'Sheet2'!B1") {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::BinaryOp { op, left, right } => {
                         assert_eq!(op, ":");
                         match &left.node_type {
@@ -1703,7 +1703,7 @@ mod tests {
             // =A1:A3:A5 — the first simple range remains on the fast path, then
             // the second colon is parsed as a composed reference operator.
             for ast in parse_both("=A1:A3:A5") {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::BinaryOp { op, left, right } => {
                         assert_eq!(op, ":");
                         assert_range_ref(&left, "A1:A3");
@@ -1719,7 +1719,7 @@ mod tests {
             // =A1:B2 C1:D2 → BinaryOp(" ", Range(A1:B2), Range(C1:D2)).
             // Both sides must be ranges (the simple-range fast path is preserved).
             for ast in parse_both("=A1:B2 C1:D2") {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::BinaryOp { op, left, right } => {
                         assert_eq!(op, " ");
                         assert_range_ref(&left, "A1:B2");
@@ -1736,7 +1736,7 @@ mod tests {
             // attaches to A1 first because it is a prefix unary. The parentheses
             // force a composed colon instead of the simple-range fast path.
             for ast in parse_both("=(@A1):A3") {
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::BinaryOp { op, left, right: _ } => {
                         assert_eq!(op, ":");
                         match &left.node_type {
@@ -2846,16 +2846,16 @@ mod structured_references {
     fn parse_via_classic(formula: &str) -> Result<ReferenceType, String> {
         let mut parser = Parser::new(formula).map_err(|e| e.to_string())?;
         let ast = parser.parse().map_err(|e| e.to_string())?;
-        match ast.node_type {
-            ASTNodeType::Reference { reference, .. } => Ok(reference),
+        match &ast.node_type {
+            ASTNodeType::Reference { reference, .. } => Ok(reference.clone()),
             other => Err(format!("expected reference node, got {other:?}")),
         }
     }
 
     fn parse_via_span(formula: &str) -> Result<ReferenceType, String> {
         let ast = crate::parse(formula).map_err(|e| e.to_string())?;
-        match ast.node_type {
-            ASTNodeType::Reference { reference, .. } => Ok(reference),
+        match &ast.node_type {
+            ASTNodeType::Reference { reference, .. } => Ok(reference.clone()),
             other => Err(format!("expected reference node, got {other:?}")),
         }
     }
@@ -3405,10 +3405,10 @@ mod semantics_regressions {
         let mut p = Parser::new("=2^3^2").unwrap();
         let ast = p.parse().unwrap();
 
-        match ast.node_type {
+        match &ast.node_type {
             ASTNodeType::BinaryOp { op, left, right } => {
                 assert_eq!(op, "^");
-                match left.node_type {
+                match &left.node_type {
                     ASTNodeType::BinaryOp { op: op2, .. } => assert_eq!(op2, "^"),
                     other => panic!("expected left child to be exponent, got {other:?}"),
                 }
@@ -3427,11 +3427,11 @@ mod semantics_regressions {
         let mut p = Parser::new("=2^(3^2)").unwrap();
         let ast = p.parse().unwrap();
 
-        match ast.node_type {
+        match &ast.node_type {
             ASTNodeType::BinaryOp { op, left, right } => {
                 assert_eq!(op, "^");
                 assert!(!matches!(left.node_type, ASTNodeType::BinaryOp { .. }));
-                match right.node_type {
+                match &right.node_type {
                     ASTNodeType::BinaryOp { op: op2, .. } => assert_eq!(op2, "^"),
                     other => panic!("expected right child to be exponent, got {other:?}"),
                 }
@@ -3446,10 +3446,10 @@ mod semantics_regressions {
         let ast = p.parse().unwrap();
 
         // Excel: =-2^2 means (-2)^2 = 4
-        match ast.node_type {
+        match &ast.node_type {
             ASTNodeType::BinaryOp { op, left, .. } => {
                 assert_eq!(op, "^");
-                match left.node_type {
+                match &left.node_type {
                     ASTNodeType::UnaryOp { op: op2, .. } => assert_eq!(op2, "-"),
                     other => panic!("expected unary under exponent, got {other:?}"),
                 }
@@ -3482,8 +3482,8 @@ mod semantics_regressions {
         #[test]
         fn test_sci_number_basic() {
             let ast = parse_formula("=1.5E+3").unwrap();
-            match ast.node_type {
-                ASTNodeType::Literal(LiteralValue::Number(n)) => assert_eq!(n, 1500.0),
+            match &ast.node_type {
+                ASTNodeType::Literal(LiteralValue::Number(n)) => assert_eq!(*n, 1500.0),
                 other => panic!("expected Literal Number, got {other:?}"),
             }
             assert_parsers_agree("=1.5E+3");
@@ -3493,19 +3493,19 @@ mod semantics_regressions {
         fn test_sci_minus_cell_ref() {
             // `=1E-A1` should parse as `1E - A1`, not as a single named range.
             let ast = parse_formula("=1E-A1").unwrap();
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::BinaryOp { op, left, right } => {
                     assert_eq!(op, "-");
-                    match left.node_type {
+                    match &left.node_type {
                         ASTNodeType::Reference { reference, .. } => match reference {
                             ReferenceType::NamedRange(name) => assert_eq!(name, "1E"),
                             other => panic!("expected NamedRange(\"1E\"), got {other:?}"),
                         },
                         other => panic!("expected reference on lhs, got {other:?}"),
                     }
-                    match right.node_type {
+                    match &right.node_type {
                         ASTNodeType::Reference { reference, .. } => {
-                            assert_eq!(reference, ReferenceType::cell(None, 1, 1))
+                            assert_eq!(*reference, ReferenceType::cell(None, 1, 1))
                         }
                         other => panic!("expected A1 reference on rhs, got {other:?}"),
                     }
@@ -3518,19 +3518,19 @@ mod semantics_regressions {
         #[test]
         fn test_sci_plus_cell_ref() {
             let ast = parse_formula("=1E+A1").unwrap();
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::BinaryOp { op, left, right } => {
                     assert_eq!(op, "+");
-                    match left.node_type {
+                    match &left.node_type {
                         ASTNodeType::Reference { reference, .. } => match reference {
                             ReferenceType::NamedRange(name) => assert_eq!(name, "1E"),
                             other => panic!("expected NamedRange(\"1E\"), got {other:?}"),
                         },
                         other => panic!("expected reference on lhs, got {other:?}"),
                     }
-                    match right.node_type {
+                    match &right.node_type {
                         ASTNodeType::Reference { reference, .. } => {
-                            assert_eq!(reference, ReferenceType::cell(None, 1, 1))
+                            assert_eq!(*reference, ReferenceType::cell(None, 1, 1))
                         }
                         other => panic!("expected A1 reference on rhs, got {other:?}"),
                     }
@@ -3571,7 +3571,7 @@ mod semantics_regressions {
             ] {
                 let ast = parse_formula(formula)
                     .unwrap_or_else(|e| panic!("failed to parse {formula:?}: {}", e.message));
-                match ast.node_type {
+                match &ast.node_type {
                     ASTNodeType::Literal(LiteralValue::Number(n)) => {
                         assert!(
                             (n - expected).abs() < 1e-9,
@@ -3610,7 +3610,7 @@ mod semantics_regressions {
         #[test]
         fn test_lambda_immediate_invocation_unary() {
             let ast = parse_both("=LAMBDA(x,x+1)(5)");
-            let (callee, args) = match ast.node_type {
+            let (callee, args) = match &ast.node_type {
                 ASTNodeType::Call { callee, args } => (callee, args),
                 other => panic!("expected Call, got {other:?}"),
             };
@@ -3619,7 +3619,7 @@ mod semantics_regressions {
                 ASTNodeType::Literal(LiteralValue::Number(n)) => assert_eq!(*n, 5.0),
                 other => panic!("expected literal 5, got {other:?}"),
             }
-            match callee.node_type {
+            match &callee.node_type {
                 ASTNodeType::Function {
                     name,
                     args: fn_args,
@@ -3639,12 +3639,12 @@ mod semantics_regressions {
         #[test]
         fn test_lambda_immediate_invocation_binary() {
             let ast = parse_both("=LAMBDA(a,b,a+b)(1,2)");
-            let (callee, args) = match ast.node_type {
+            let (callee, args) = match &ast.node_type {
                 ASTNodeType::Call { callee, args } => (callee, args),
                 other => panic!("expected Call, got {other:?}"),
             };
             assert_eq!(args.len(), 2);
-            match callee.node_type {
+            match &callee.node_type {
                 ASTNodeType::Function {
                     name,
                     args: fn_args,
@@ -3659,10 +3659,10 @@ mod semantics_regressions {
         #[test]
         fn test_parenthesized_lambda_invocation() {
             let ast = parse_both("=(LAMBDA(x,x))(5)");
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::Call { callee, args } => {
                     assert_eq!(args.len(), 1);
-                    match callee.node_type {
+                    match &callee.node_type {
                         ASTNodeType::Function { name, .. } => {
                             assert_eq!(name.to_uppercase(), "LAMBDA")
                         }
@@ -3679,10 +3679,10 @@ mod semantics_regressions {
             // Note: tokenizer sees `f(` as Func/Open, so the first call binds
             // to Function. The trailing `()` is the postfix Call.
             let ast = parse_both("=f()()");
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::Call { callee, args } => {
                     assert!(args.is_empty(), "outer call should have no args");
-                    match callee.node_type {
+                    match &callee.node_type {
                         ASTNodeType::Function {
                             name,
                             args: inner_args,
@@ -3701,20 +3701,20 @@ mod semantics_regressions {
         fn test_double_postfix_call() {
             // (LAMBDA(x,x))(5)(6) => two postfix Call nodes stacked.
             let ast = parse_both("=(LAMBDA(x,x))(5)(6)");
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::Call { callee, args } => {
                     assert_eq!(args.len(), 1);
                     match &args[0].node_type {
                         ASTNodeType::Literal(LiteralValue::Number(n)) => assert_eq!(*n, 6.0),
                         other => panic!("expected literal 6, got {other:?}"),
                     }
-                    match callee.node_type {
+                    match &callee.node_type {
                         ASTNodeType::Call {
                             callee: inner_callee,
                             args: inner_args,
                         } => {
                             assert_eq!(inner_args.len(), 1);
-                            match inner_callee.node_type {
+                            match &inner_callee.node_type {
                                 ASTNodeType::Function { name, .. } => {
                                     assert_eq!(name.to_uppercase(), "LAMBDA")
                                 }
@@ -3732,7 +3732,7 @@ mod semantics_regressions {
         fn test_lambda_nested_in_let_uses_plain_function_call() {
             // LET body's `f(3)` is a regular Function(f, [3]), not a Call node.
             let ast = parse_both("=LET(f,LAMBDA(x,x*2),f(3))");
-            let args = match ast.node_type {
+            let args = match &ast.node_type {
                 ASTNodeType::Function { name, args } => {
                     assert_eq!(name.to_uppercase(), "LET");
                     args
@@ -3753,10 +3753,10 @@ mod semantics_regressions {
         fn test_call_on_number_literal() {
             // Permissive parse: `(1+2)(3)` parses as Call(BinaryOp, [3]).
             let ast = parse_both("=(1+2)(3)");
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::Call { callee, args } => {
                     assert_eq!(args.len(), 1);
-                    match callee.node_type {
+                    match &callee.node_type {
                         ASTNodeType::BinaryOp { op, .. } => assert_eq!(op, "+"),
                         other => panic!("expected BinaryOp callee, got {other:?}"),
                     }
@@ -3771,10 +3771,10 @@ mod semantics_regressions {
             // trailing `(3)` becomes a postfix Call. (`A1(3)` itself tokenizes
             // as a function token `A1(` and so parses as Function("A1", [3]).)
             let ast = parse_both("=(A1)(3)");
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::Call { callee, args } => {
                     assert_eq!(args.len(), 1);
-                    match callee.node_type {
+                    match &callee.node_type {
                         ASTNodeType::Reference { .. } => {}
                         other => panic!("expected Reference callee, got {other:?}"),
                     }
@@ -3787,7 +3787,7 @@ mod semantics_regressions {
         fn test_lambda_empty_body_call_parses() {
             // `LAMBDA()(1)` parses; evaluator may complain. Parser should accept.
             let ast = parse_both("=LAMBDA()(1)");
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::Call { args, .. } => assert_eq!(args.len(), 1),
                 other => panic!("expected Call, got {other:?}"),
             }
@@ -3796,7 +3796,7 @@ mod semantics_regressions {
         #[test]
         fn test_bare_lambda_still_parses_as_function() {
             let ast = parse_both("=LAMBDA(x, x+1)");
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::Function { name, args } => {
                     assert_eq!(name.to_uppercase(), "LAMBDA");
                     assert_eq!(args.len(), 2);
@@ -3808,7 +3808,7 @@ mod semantics_regressions {
         #[test]
         fn test_lambda_as_argument_unchanged() {
             let ast = parse_both("=SUM(LAMBDA(x,x),1,2,3)");
-            match ast.node_type {
+            match &ast.node_type {
                 ASTNodeType::Function { name, args } => {
                     assert_eq!(name.to_uppercase(), "SUM");
                     assert_eq!(args.len(), 4);

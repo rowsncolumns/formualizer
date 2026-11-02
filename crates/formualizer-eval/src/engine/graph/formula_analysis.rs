@@ -334,31 +334,24 @@ impl DependencyGraph {
                     }
                 }
             }
-            super::super::arena::ast::AstNodeData::BinaryOp {
-                left_id, right_id, ..
-            } => {
-                self.extract_dependencies_recursive_arena(
-                    left_id,
-                    current_sheet_id,
-                    dependencies,
-                    range_dependencies,
-                    created_placeholders,
-                    named_dependencies,
-                    unresolved_names,
-                    local_scopes,
-                    unresolved_name_policy,
-                )?;
-                self.extract_dependencies_recursive_arena(
-                    right_id,
-                    current_sheet_id,
-                    dependencies,
-                    range_dependencies,
-                    created_placeholders,
-                    named_dependencies,
-                    unresolved_names,
-                    local_scopes,
-                    unresolved_name_policy,
-                )?;
+            super::super::arena::ast::AstNodeData::BinaryOp { .. } => {
+                // A chain is as deep as it is long: walk its left spine with a loop (FX-02).
+                let (bottom, spine) = self.data_store.binary_chain(ast_id);
+                let operands =
+                    std::iter::once(bottom).chain(spine.into_iter().map(|(_, _, right)| right));
+                for operand in operands {
+                    self.extract_dependencies_recursive_arena(
+                        operand,
+                        current_sheet_id,
+                        dependencies,
+                        range_dependencies,
+                        created_placeholders,
+                        named_dependencies,
+                        unresolved_names,
+                        local_scopes,
+                        unresolved_name_policy,
+                    )?;
+                }
             }
             super::super::arena::ast::AstNodeData::UnaryOp { expr_id, .. } => {
                 self.extract_dependencies_recursive_arena(
@@ -823,29 +816,24 @@ impl DependencyGraph {
                     )?;
                 }
             },
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                self.extract_dependencies_recursive(
-                    left,
-                    current_sheet_id,
-                    dependencies,
-                    range_dependencies,
-                    created_placeholders,
-                    named_dependencies,
-                    unresolved_names,
-                    local_scopes,
-                    unresolved_name_policy,
-                )?;
-                self.extract_dependencies_recursive(
-                    right,
-                    current_sheet_id,
-                    dependencies,
-                    range_dependencies,
-                    created_placeholders,
-                    named_dependencies,
-                    unresolved_names,
-                    local_scopes,
-                    unresolved_name_policy,
-                )?;
+            ASTNodeType::BinaryOp { .. } => {
+                // A chain is as deep as it is long: walk its left spine with a loop (FX-02).
+                let (bottom, spine) = ast.binary_chain();
+                let operands = std::iter::once(bottom)
+                    .chain(spine.into_iter().map(|node| node.binary_parts().1));
+                for operand in operands {
+                    self.extract_dependencies_recursive(
+                        operand,
+                        current_sheet_id,
+                        dependencies,
+                        range_dependencies,
+                        created_placeholders,
+                        named_dependencies,
+                        unresolved_names,
+                        local_scopes,
+                        unresolved_name_policy,
+                    )?;
+                }
             }
             ASTNodeType::UnaryOp { expr, .. } => {
                 self.extract_dependencies_recursive(
@@ -1013,8 +1001,8 @@ impl DependencyGraph {
                 }
                 args.iter().any(|arg| self.is_ast_volatile(arg))
             }
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                self.is_ast_volatile(left) || self.is_ast_volatile(right)
+            ASTNodeType::BinaryOp { .. } => {
+                ast.any_chain_operand(|operand| self.is_ast_volatile(operand))
             }
             ASTNodeType::UnaryOp { expr, .. } => self.is_ast_volatile(expr),
             ASTNodeType::Array(rows) => rows
@@ -1041,8 +1029,8 @@ impl DependencyGraph {
                 }
                 args.iter().any(|arg| self.is_ast_dynamic(arg))
             }
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                self.is_ast_dynamic(left) || self.is_ast_dynamic(right)
+            ASTNodeType::BinaryOp { .. } => {
+                ast.any_chain_operand(|operand| self.is_ast_dynamic(operand))
             }
             ASTNodeType::UnaryOp { expr, .. } => self.is_ast_dynamic(expr),
             ASTNodeType::Array(rows) => rows

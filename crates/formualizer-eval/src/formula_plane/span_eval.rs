@@ -1050,11 +1050,14 @@ fn validate_relocatable_arena_ast(
         AstNodeData::UnaryOp { expr_id, .. } => {
             validate_relocatable_arena_ast(*expr_id, data_store)
         }
-        AstNodeData::BinaryOp {
-            left_id, right_id, ..
-        } => {
-            validate_relocatable_arena_ast(*left_id, data_store)?;
-            validate_relocatable_arena_ast(*right_id, data_store)
+        AstNodeData::BinaryOp { .. } => {
+            // A chain is as deep as it is long: walk its left spine with a loop (FX-02).
+            let (bottom, spine) = data_store.binary_chain(node_id);
+            validate_relocatable_arena_ast(bottom, data_store)?;
+            for (_, _, right_id) in spine {
+                validate_relocatable_arena_ast(right_id, data_store)?;
+            }
+            Ok(())
         }
         AstNodeData::Function { .. } => {
             let args = data_store

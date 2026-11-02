@@ -2437,10 +2437,13 @@ impl DependencyGraph {
             ASTNodeType::UnaryOp { expr, .. } => {
                 self.rewrite_structured_references_node(expr, cell)
             }
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                let left_rewritten = self.rewrite_structured_references_node(left, cell)?;
-                let right_rewritten = self.rewrite_structured_references_node(right, cell)?;
-                Ok(left_rewritten || right_rewritten)
+            ASTNodeType::BinaryOp { .. } => {
+                let mut rewritten = false;
+                node.try_for_each_chain_operand_mut(|operand| -> Result<(), ExcelError> {
+                    rewritten |= self.rewrite_structured_references_node(operand, cell)?;
+                    Ok(())
+                })?;
+                Ok(rewritten)
             }
             ASTNodeType::Function { args, .. } => {
                 let mut rewritten = false;

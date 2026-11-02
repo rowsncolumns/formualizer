@@ -734,8 +734,8 @@ impl SummaryAnalyzer {
             CanonicalExpr::Unary { op, expr } => {
                 self.analyze_unary(op, expr, context, in_function_arg)
             }
-            CanonicalExpr::Binary { op, left, right } => {
-                self.analyze_binary(op, left, right, context, in_function_arg)
+            CanonicalExpr::Binary { first, rest } => {
+                self.analyze_binary_chain(first, rest, context, in_function_arg)
             }
             CanonicalExpr::Function { id, args } => {
                 let mut all_args_supported = true;
@@ -815,33 +815,45 @@ impl SummaryAnalyzer {
         }
     }
 
-    fn analyze_binary(
+    /// A [`CanonicalExpr::Binary`] chain, analyzed as the nested binary nodes it stands for: each
+    /// link's left side (the chain so far) and right operand, then the link's own verdict.
+    fn analyze_binary_chain(
         &mut self,
-        op: &str,
-        left: &CanonicalExpr,
-        right: &CanonicalExpr,
+        first: &CanonicalExpr,
+        rest: &[(String, CanonicalExpr)],
         context: AnalyzerContext,
         in_function_arg: bool,
     ) -> bool {
-        if is_supported_pointwise_binary_operator(op) {
-            let left_supported = self.analyze_expr(left, context, in_function_arg);
-            let right_supported = self.analyze_expr(right, context, in_function_arg);
-            left_supported && right_supported
-        } else if is_reference_returning_binary_operator(op) {
-            self.analyze_expr(left, AnalyzerContext::Reference, in_function_arg);
-            self.analyze_expr(right, AnalyzerContext::Reference, in_function_arg);
-            self.reasons
-                .insert(DependencyRejectReason::ReferenceReturningUnsupported { function: None });
-            false
-        } else {
-            self.analyze_expr(left, context, in_function_arg);
-            self.analyze_expr(right, context, in_function_arg);
-            self.reasons
-                .insert(DependencyRejectReason::UnsupportedAstNode {
-                    node: format!("binary_operator:{op}"),
-                });
-            false
+        // Every link but a single one is a value operator, whose operands inherit `context`; a
+        // reference-returning link reads both operands as references.
+        let operand_context = |op: &str| {
+            if is_reference_returning_binary_operator(op) {
+                AnalyzerContext::Reference
+            } else {
+                context
+            }
+        };
+        let first_context = rest.first().map_or(context, |(op, _)| operand_context(op));
+        let mut supported = self.analyze_expr(first, first_context, in_function_arg);
+        for (op, right) in rest {
+            let right_supported = self.analyze_expr(right, operand_context(op), in_function_arg);
+            if is_supported_pointwise_binary_operator(op) {
+                supported = supported && right_supported;
+            } else if is_reference_returning_binary_operator(op) {
+                self.reasons
+                    .insert(DependencyRejectReason::ReferenceReturningUnsupported {
+                        function: None,
+                    });
+                supported = false;
+            } else {
+                self.reasons
+                    .insert(DependencyRejectReason::UnsupportedAstNode {
+                        node: format!("binary_operator:{op}"),
+                    });
+                supported = false;
+            }
         }
+        supported
     }
 
     fn analyze_reference(
