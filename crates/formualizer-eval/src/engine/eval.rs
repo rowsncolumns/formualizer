@@ -5318,6 +5318,23 @@ where
         self.has_edited = true;
     }
 
+    /// Mark every formula dirty, so the next evaluation recalculates all of them — Excel's
+    /// Ctrl+Alt+F9 ("recalculate all formulas … regardless of whether they have changed since the
+    /// last recalculation").
+    pub fn mark_all_formulas_dirty(&mut self) {
+        self.mark_all_formula_vertices_dirty();
+    }
+
+    /// Mark the members of every circular group that iterated dirty, so the next evaluation
+    /// iterates them again — what a forced recalculation (F9) does to a circular group when
+    /// [`EvalConfig::iterate_circular_on_every_recalc`] is off.
+    pub fn mark_circular_groups_dirty(&mut self) {
+        let members: Vec<VertexId> = self.iterative_state_values.keys().copied().collect();
+        if !members.is_empty() {
+            self.graph.redirty_iterative_members(&members);
+        }
+    }
+
     fn mark_all_formula_vertices_dirty(&mut self) {
         let vertices: Vec<VertexId> = self.graph.vertices_with_formulas().collect();
         for vertex in vertices {

@@ -58,6 +58,31 @@ fn circular_group_iterates_only_when_dirty() {
         .unwrap();
     e.evaluate_all().unwrap();
     assert_eq!(num(&e, 1, 1), 300.0, "B1 changed: 100 more passes of +2");
+
+    // A forced recalculation (F9) iterates the circular group again; nothing else.
+    e.mark_circular_groups_dirty();
+    e.evaluate_all().unwrap();
+    assert_eq!(num(&e, 1, 1), 500.0, "F9: 100 more passes");
+    assert_eq!(num(&e, 6, 5), 84.0);
+}
+
+#[test]
+fn mark_all_formulas_dirty_recalculates_every_formula() {
+    let mut e = engine(dirty_only_iteration(10));
+    formula(&mut e, 1, 1, "=A1+1");
+    formula(&mut e, 2, 1, "=1+1");
+    e.evaluate_all().unwrap();
+    assert_eq!(num(&e, 1, 1), 10.0);
+    e.evaluate_all().unwrap();
+    assert_eq!(num(&e, 1, 1), 10.0, "nothing dirty, nothing iterates");
+    e.mark_all_formulas_dirty();
+    e.evaluate_all().unwrap();
+    assert_eq!(
+        num(&e, 1, 1),
+        20.0,
+        "Ctrl+Alt+F9 recalculates the circular cell too"
+    );
+    assert_eq!(num(&e, 2, 1), 2.0);
 }
 
 #[test]

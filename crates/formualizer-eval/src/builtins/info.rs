@@ -1939,7 +1939,9 @@ impl Function for CellFn {
 pub struct InfoFn;
 
 impl Function for InfoFn {
-    func_caps!(PURE);
+    // Volatile, as Excel lists it (learn.microsoft.com "Excel Recalculation"): `INFO("recalc")`
+    // follows a calculation-mode change on the next recalc.
+    func_caps!(VOLATILE);
     fn name(&self) -> &'static str {
         "INFO"
     }
