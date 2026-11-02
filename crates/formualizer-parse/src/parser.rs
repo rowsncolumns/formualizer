@@ -2911,6 +2911,29 @@ impl Parser {
                 ))
             }
             TokenSubType::Range => {
+                if self.dialect == FormulaDialect::Excel
+                    && let Some((range_text, function)) = split_trim_reference(value)
+                {
+                    let reference =
+                        ReferenceType::from_string(&range_text).map_err(|e| ParserError {
+                            message: format!("Invalid reference '{value}': {e}"),
+                            position: Some(self.position),
+                        })?;
+                    let inner = ASTNode::new(
+                        ASTNodeType::Reference {
+                            original: range_text,
+                            reference,
+                        },
+                        Some(token.clone()),
+                    );
+                    return Ok(ASTNode::new(
+                        ASTNodeType::Function {
+                            name: function.to_string(),
+                            args: vec![inner],
+                        },
+                        Some(token),
+                    ));
+                }
                 let reference = ReferenceType::from_string_with_dialect(value, self.dialect)
                     .map_err(|e| ParserError {
                         message: format!("Invalid reference '{value}': {e}"),
@@ -3245,6 +3268,49 @@ impl ParserBuilder {
 pub fn normalise_reference(reference: &str) -> Result<String, ParsingError> {
     let ref_type = ReferenceType::from_string(reference)?;
     Ok(ref_type.to_string())
+}
+
+/// Excel's trim-reference operators and the function each is stored as in a workbook file
+/// (`_xlfn._TRO_ALL(A1:A10)` for `A1.:.A10`): a dot after the colon trims trailing blank rows and
+/// columns, a dot before it leading ones, both trims both — `TRIMRANGE` with that mode.
+/// <https://support.microsoft.com/en-us/office/trimrange-function-d7812248-3bc5-4c6b-901c-1afa9564f999>
+pub const TRIM_REFERENCE_FUNCTIONS: [(&str, &str); 3] = [
+    (".:.", "_TRO_ALL"),
+    (":.", "_TRO_TRAILING"),
+    (".:", "_TRO_LEADING"),
+];
+
+/// `A1:.A10` → (`A1:A10`, `_TRO_TRAILING`); `Sheet1!A.:.A` → (`Sheet1!A:A`, `_TRO_ALL`).
+/// `None` for anything that is not a trim reference.
+pub fn split_trim_reference(text: &str) -> Option<(String, &'static str)> {
+    // Only the part after the sheet qualifier can carry the operator (a quoted sheet name may
+    // contain dots and colons).
+    let addr_start = text.rfind('!').map_or(0, |i| i + 1);
+    let (sheet, addr) = text.split_at(addr_start);
+    for (op, function) in TRIM_REFERENCE_FUNCTIONS {
+        if let Some((left, right)) = addr.split_once(op) {
+            let valid = |part: &str| {
+                !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'$')
+            };
+            if valid(left) && valid(right) {
+                return Some((format!("{sheet}{left}:{right}"), function));
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// The trim operator `name` (a `_TRO_*` function, with or without `_xlfn.`) stands for.
+pub fn trim_reference_operator(name: &str) -> Option<&'static str> {
+    let bare = name
+        .get(..6)
+        .filter(|p| p.eq_ignore_ascii_case("_xlfn."))
+        .map_or(name, |_| &name[6..]);
+    TRIM_REFERENCE_FUNCTIONS
+        .iter()
+        .find(|(_, f)| f.eq_ignore_ascii_case(bare))
+        .map(|(op, _)| *op)
 }
 
 pub fn parse<T: AsRef<str>>(formula: T) -> Result<ASTNode, ParserError> {

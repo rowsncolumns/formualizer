@@ -3719,6 +3719,19 @@ impl Function for TrimRangeFn {
             Ok(v) => v,
             Err(e) => return scalar_err(e),
         };
+        Ok(trim_view(&view, trim_rows, trim_cols, ctx))
+    }
+}
+
+/// TRIMRANGE's core: drop blank leading (bit 1) / trailing (bit 2) rows and columns.
+fn trim_view<'b>(
+    view: &crate::engine::range_view::RangeView<'_>,
+    trim_rows: u8,
+    trim_cols: u8,
+    ctx: &dyn FunctionContext<'b>,
+) -> crate::traits::CalcValue<'b> {
+    let scalar_err = |e: ExcelError| crate::traits::CalcValue::Scalar(LiteralValue::Error(e));
+    {
         let (rows, cols) = view.dims();
         if rows == 0 || cols == 0 {
             return scalar_err(ExcelError::new_ref());
@@ -3762,7 +3775,45 @@ impl Function for TrimRangeFn {
             }
             out.push(row_out);
         }
-        Ok(collapse_if_scalar(out, ctx.date_system()))
+        collapse_if_scalar(out, ctx.date_system())
+    }
+}
+
+/// The trim-reference operators `A1.:.A10`, `A1:.A10` and `A1.:A10`, which parse to these
+/// functions (Excel stores them as `_xlfn._TRO_ALL(…)`, `_TRO_TRAILING`, `_TRO_LEADING`): the
+/// range with blank leading and/or trailing rows and columns removed, as TRIMRANGE does.
+/// <https://support.microsoft.com/en-us/office/trimrange-function-d7812248-3bc5-4c6b-901c-1afa9564f999>
+#[derive(Debug)]
+pub struct TrimRefFn {
+    name: &'static str,
+    mode: u8,
+}
+
+impl Function for TrimRefFn {
+    func_caps!(PURE, MAY_SPILL);
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn min_args(&self) -> usize {
+        1
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        &TrimRangeFn.arg_schema()[..1]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        if args.len() != 1 {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new_value(),
+            )));
+        }
+        Ok(match args[0].range_view() {
+            Ok(view) => trim_view(&view, self.mode, self.mode, ctx),
+            Err(e) => crate::traits::CalcValue::Scalar(LiteralValue::Error(e)),
+        })
     }
 }
 
@@ -3777,6 +3828,9 @@ pub fn register_builtins() {
     register_builtin(Arc::new(TakeFn));
     register_builtin(Arc::new(DropFn));
     register_builtin(Arc::new(TrimRangeFn));
+    for (name, mode) in [("_TRO_ALL", 3), ("_TRO_TRAILING", 2), ("_TRO_LEADING", 1)] {
+        register_builtin(Arc::new(TrimRefFn { name, mode }));
+    }
     register_builtin(Arc::new(XMatchFn));
     register_builtin(Arc::new(SortFn));
     register_builtin(Arc::new(SortByFn));
