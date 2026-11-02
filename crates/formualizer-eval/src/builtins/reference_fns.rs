@@ -158,6 +158,23 @@ fn resolve_reference_bounds<'b>(
         ReferenceType::Cell {
             sheet, row, col, ..
         } => Ok((sheet.clone(), *row, *col, *row, *col)),
+        // A structured reference (`Sales[Qty]`, `Sales[#Data]`, `Sales[[Qty]:[Price]]`, a bare
+        // `Sales`) addresses the grid cells its table covers: the engine's view carries the
+        // table's own sheet and absolute bounds. A table the engine materialises (a source
+        // table) has no grid address, so it is not a reference here.
+        ReferenceType::Table(_) => {
+            let rv = ctx.resolve_range_view(base, ctx.current_sheet())?;
+            if rv.is_owned() || rv.is_empty() {
+                return Err(ExcelError::new(ExcelErrorKind::Ref));
+            }
+            Ok((
+                Some(rv.sheet_name().to_string()),
+                rv.start_row() as u32 + 1,
+                rv.start_col() as u32 + 1,
+                rv.end_row() as u32 + 1,
+                rv.end_col() as u32 + 1,
+            ))
+        }
         _ => Err(ExcelError::new(ExcelErrorKind::Ref)),
     }
 }
@@ -300,10 +317,12 @@ impl Function for IndexFn {
             None
         };
 
-        // Only Range/Cell supported for now; unbounded ranges (e.g. B:B, 2:2)
+        // Range/Cell/structured references; unbounded ranges (e.g. B:B, 2:2)
         // are clamped to the used region instead of erroring.
         let (sheet, sr, sc, er, ec) = match resolve_reference_bounds(ctx, &base) {
             Ok(bounds) => bounds,
+            // A table without a grid address indexes by value in eval().
+            Err(_) if matches!(base, ReferenceType::Table(_)) => return None,
             Err(e) => return Some(Err(e)),
         };
 
