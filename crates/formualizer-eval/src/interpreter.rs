@@ -1344,6 +1344,17 @@ impl<'a> Interpreter<'a> {
                 if matches!(target, ReferenceType::NamedRange(_))
                     && e.kind != ExcelErrorKind::Cancelled =>
             {
+                // The dot-field operator over a cell (`A1.Price`) that nothing resolved: no linked
+                // data type, so Excel's `#FIELD!`.
+                if e.kind == ExcelErrorKind::Name
+                    && let ReferenceType::NamedRange(name) = target
+                    && formualizer_parse::parser::split_field_access(name).is_some()
+                {
+                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                        ExcelError::new(ExcelErrorKind::Field)
+                            .with_message(format!("{name}: the value has no linked data type")),
+                    )));
+                }
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
             }
             Err(e) => return Err(e),
