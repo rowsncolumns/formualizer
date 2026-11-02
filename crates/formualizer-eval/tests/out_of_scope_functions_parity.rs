@@ -1,7 +1,8 @@
 //! rowsncolumns/spreadsheet#546 U28 (A-17, A-22, A-23, A-24) — out-of-scope functions degrade
 //! gracefully. Functions Excel evaluates through an external service or add-in (`CUBE*`, `RTD`,
-//! `STOCKHISTORY`, `CALL`, `REGISTER.ID`, `EUROCONVERT`, `TRANSLATE`, `DETECTLANGUAGE`,
-//! `WEBSERVICE`) are recognised and yield `#N/A` (catchable with `IFNA`) instead of `#NAME?`;
+//! `STOCKHISTORY`, `CALL`, `REGISTER.ID`, `TRANSLATE`, `DETECTLANGUAGE`, `WEBSERVICE`) are
+//! recognised and yield the error Excel documents without the provider (demo-app-monorepo#49969
+//! FX-15);
 //! `FILTERXML`, `PERMUTATIONA`, `BAHTTEXT`, `DBCS` / `JIS` and `PHONETIC` are implemented; `N`
 //! reduces an array argument to its top-left element; and the registry exposes no test helpers.
 
@@ -45,41 +46,73 @@ fn num(v: &LiteralValue) -> f64 {
     }
 }
 
-const EXTERNAL_SERVICE_CALLS: &[&str] = &[
-    "=CUBEKPIMEMBER(\"Sales\",\"[KPI]\",1)",
-    "=CUBEMEMBER(\"Sales\",\"[Time].[2024]\")",
-    "=CUBEMEMBERPROPERTY(\"Sales\",\"[Store].[1]\",\"Name\")",
-    "=CUBERANKEDMEMBER(\"Sales\",A1,1)",
-    "=CUBESET(\"Sales\",\"[Product].Children\",\"Products\")",
-    "=CUBESETCOUNT(A1)",
-    "=CUBEVALUE(\"Sales\",\"[Measures].[Amount]\")",
-    "=CUBEVALUE(\"Sales\")",
-    "=RTD(\"prog.id\",,\"topic\")",
-    "=STOCKHISTORY(\"MSFT\",\"1/1/2024\")",
-    "=STOCKHISTORY(\"MSFT\",\"1/1/2024\",\"1/31/2024\",0,1,0,1)",
-    "=CALL(\"Kernel32\",\"GetTickCount\",\"J\")",
-    "=REGISTER.ID(\"Kernel32\",\"GetTickCount\",\"J\")",
-    "=EUROCONVERT(100,\"DEM\",\"EUR\")",
-    "=TRANSLATE(\"hello\",\"en\",\"fr\")",
-    "=DETECTLANGUAGE(\"hello\")",
-    "=WEBSERVICE(\"https://example.com/api\")",
+/// Each provider function and the error Excel documents without its provider
+/// (demo-app-monorepo#49969 FX-15): `#NAME?` for a cube without a workbook connection, `#N/A` for
+/// RTD without a server, `#CONNECT!` for an unreachable data / translation service, `#VALUE!` for
+/// WEBSERVICE, `#BLOCKED!` for XLM / DLL bridges.
+const EXTERNAL_SERVICE_CALLS: &[(&str, ExcelErrorKind)] = &[
+    (
+        "=CUBEKPIMEMBER(\"Sales\",\"[KPI]\",1)",
+        ExcelErrorKind::Name,
+    ),
+    (
+        "=CUBEMEMBER(\"Sales\",\"[Time].[2024]\")",
+        ExcelErrorKind::Name,
+    ),
+    (
+        "=CUBEMEMBERPROPERTY(\"Sales\",\"[Store].[1]\",\"Name\")",
+        ExcelErrorKind::Name,
+    ),
+    ("=CUBERANKEDMEMBER(\"Sales\",A1,1)", ExcelErrorKind::Name),
+    (
+        "=CUBESET(\"Sales\",\"[Product].Children\",\"Products\")",
+        ExcelErrorKind::Name,
+    ),
+    ("=CUBESETCOUNT(A1)", ExcelErrorKind::Name),
+    (
+        "=CUBEVALUE(\"Sales\",\"[Measures].[Amount]\")",
+        ExcelErrorKind::Name,
+    ),
+    ("=CUBEVALUE(\"Sales\")", ExcelErrorKind::Name),
+    ("=RTD(\"prog.id\",,\"topic\")", ExcelErrorKind::Na),
+    (
+        "=STOCKHISTORY(\"MSFT\",\"1/1/2024\")",
+        ExcelErrorKind::Connect,
+    ),
+    (
+        "=STOCKHISTORY(\"MSFT\",\"1/1/2024\",\"1/31/2024\",0,1,0,1)",
+        ExcelErrorKind::Connect,
+    ),
+    (
+        "=CALL(\"Kernel32\",\"GetTickCount\",\"J\")",
+        ExcelErrorKind::Blocked,
+    ),
+    (
+        "=REGISTER.ID(\"Kernel32\",\"GetTickCount\",\"J\")",
+        ExcelErrorKind::Blocked,
+    ),
+    (
+        "=TRANSLATE(\"hello\",\"en\",\"fr\")",
+        ExcelErrorKind::Connect,
+    ),
+    ("=DETECTLANGUAGE(\"hello\")", ExcelErrorKind::Connect),
+    (
+        "=WEBSERVICE(\"https://example.com/api\")",
+        ExcelErrorKind::Value,
+    ),
 ];
 
 #[test]
-fn external_service_functions_yield_na_not_name() {
-    for formula in EXTERNAL_SERVICE_CALLS {
-        assert_eq!(
-            err_kind(&eval(formula)),
-            ExcelErrorKind::Na,
-            "{formula} must be a recognised call that degrades to #N/A"
-        );
+fn external_service_functions_yield_excels_no_provider_error() {
+    for (formula, kind) in EXTERNAL_SERVICE_CALLS {
+        assert_eq!(err_kind(&eval(formula)), *kind, "{formula}");
     }
 }
 
 #[test]
-fn external_service_na_is_catchable_with_ifna() {
+fn external_service_errors_are_catchable() {
     assert_eq!(
-        eval("=IFNA(CUBEVALUE(\"Sales\",\"[Measures].[Amount]\"),\"offline\")"),
+        eval("=IFERROR(CUBEVALUE(\"Sales\",\"[Measures].[Amount]\"),\"offline\")"),
         text("offline")
     );
     assert_eq!(
@@ -90,13 +123,8 @@ fn external_service_na_is_catchable_with_ifna() {
         eval("=ISNA(RTD(\"prog.id\",,\"topic\"))"),
         LiteralValue::Boolean(true)
     );
-    // #NAME? stays reserved for genuinely unknown identifiers.
     assert_eq!(
         err_kind(&eval("=NOTAREALFUNCTION(1)")),
-        ExcelErrorKind::Name
-    );
-    assert_eq!(
-        err_kind(&eval("=IFNA(NOTAREALFUNCTION(1),\"na\")")),
         ExcelErrorKind::Name
     );
 }

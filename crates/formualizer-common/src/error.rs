@@ -36,6 +36,12 @@ pub enum ExcelErrorKind {
     Calc,
     Circ,
     Cancelled,
+    /// `#CONNECT!` — a service or data source the formula needs can't be reached.
+    Connect,
+    /// `#BLOCKED!` — a capability the formula needs is blocked or unavailable.
+    Blocked,
+    /// `#FIELD!` — the value has no field of that name (linked data types).
+    Field,
 }
 
 impl fmt::Display for ExcelErrorKind {
@@ -54,6 +60,9 @@ impl fmt::Display for ExcelErrorKind {
             Self::Calc => "#CALC!",
             Self::Circ => "#CIRC!",
             Self::Cancelled => "#CANCELLED!",
+            Self::Connect => "#CONNECT!",
+            Self::Blocked => "#BLOCKED!",
+            Self::Field => "#FIELD!",
         })
     }
 }
@@ -74,6 +83,9 @@ impl ExcelErrorKind {
             "#calc!" => Some(Self::Calc),
             "#circ!" => Some(Self::Circ),
             "#cancelled!" => Some(Self::Cancelled),
+            "#connect!" => Some(Self::Connect),
+            "#blocked!" => Some(Self::Blocked),
+            "#field!" => Some(Self::Field),
             _ => None,
         }
     }

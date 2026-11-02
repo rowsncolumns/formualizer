@@ -2934,6 +2934,29 @@ impl Parser {
                         Some(token),
                     ));
                 }
+                if self.dialect == FormulaDialect::Excel
+                    && let Some((cell_text, field)) = split_field_access(value)
+                    && let Ok(reference) = ReferenceType::from_string(cell_text)
+                {
+                    let target = ASTNode::new(
+                        ASTNodeType::Reference {
+                            original: cell_text.to_string(),
+                            reference,
+                        },
+                        Some(token.clone()),
+                    );
+                    let name = ASTNode::new(
+                        ASTNodeType::Literal(LiteralValue::Text(field)),
+                        Some(token.clone()),
+                    );
+                    return Ok(ASTNode::new(
+                        ASTNodeType::Function {
+                            name: FIELD_ACCESS_FUNCTION.to_string(),
+                            args: vec![target, name],
+                        },
+                        Some(token),
+                    ));
+                }
                 let reference = ReferenceType::from_string_with_dialect(value, self.dialect)
                     .map_err(|e| ParserError {
                         message: format!("Invalid reference '{value}': {e}"),
@@ -3268,6 +3291,40 @@ impl ParserBuilder {
 pub fn normalise_reference(reference: &str) -> Result<String, ParsingError> {
     let ref_type = ReferenceType::from_string(reference)?;
     Ok(ref_type.to_string())
+}
+
+/// The function Excel stores the dot-field operator as: `A1.Price` is `_FV(A1,"Price")` in a
+/// workbook file — the field of a linked data type value (`FIELDVALUE`).
+pub const FIELD_ACCESS_FUNCTION: &str = "_FV";
+
+/// `A1.Price` → (`A1`, `Price`); `Sheet1!$B$2.[Market cap]` → (`Sheet1!$B$2`, `Market cap`).
+/// The left side must be a single cell reference; `None` for anything else.
+pub fn split_field_access(text: &str) -> Option<(&str, String)> {
+    let addr_start = text.rfind('!').map_or(0, |i| i + 1);
+    let (cell_end, field) = if text.ends_with(']') {
+        let open = text[addr_start..].find(".[")? + addr_start;
+        (open, text[open + 2..text.len() - 1].to_string())
+    } else {
+        let dot = text[addr_start..].find('.')? + addr_start;
+        let field = &text[dot + 1..];
+        let mut chars = field.chars();
+        let first_ok = chars.next().is_some_and(|c| c.is_alphabetic() || c == '_');
+        if !first_ok || !chars.all(|c| c.is_alphanumeric() || c == '_') {
+            return None;
+        }
+        (dot, field.to_string())
+    };
+    if field.is_empty() {
+        return None;
+    }
+    let cell = &text[addr_start..cell_end];
+    let cell = cell.strip_prefix('$').unwrap_or(cell);
+    let letters = cell.bytes().take_while(u8::is_ascii_alphabetic).count();
+    let rest = &cell[letters..];
+    let rest = rest.strip_prefix('$').unwrap_or(rest);
+    let is_cell =
+        (1..=3).contains(&letters) && !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
+    is_cell.then(|| (&text[..cell_end], field))
 }
 
 /// Excel's trim-reference operators and the function each is stored as in a workbook file

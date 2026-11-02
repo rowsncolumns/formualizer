@@ -701,6 +701,22 @@ impl Default for WorkbookLoadLimits {
     }
 }
 
+/// The host's description of the open workbook and its environment, for the information functions
+/// Excel answers from the file system and the OS: `CELL("filename")` is
+/// `{directory}[{file_name}]{sheet}`, `INFO("directory")` the directory, `INFO("osversion")` /
+/// `INFO("system")` the platform when the host knows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkbookIdentity {
+    /// Folder path with a trailing separator (`https://host/files/`, `C:\\Reports\\`), or empty.
+    pub directory: String,
+    /// File name shown inside the brackets (`Budget.xlsx`).
+    pub file_name: String,
+    /// `INFO("osversion")`, when the host reports one.
+    pub os_version: Option<String>,
+    /// `INFO("system")`: `pcdos` (Windows) or `mac`, when the host reports one.
+    pub system: Option<String>,
+}
+
 /// Configuration for the evaluation engine
 #[derive(Debug, Clone)]
 pub struct EvalConfig {
@@ -833,11 +849,15 @@ pub struct EvalConfig {
 
     /// Maximum bytes for the engine-side lookup-index cache.
     pub lookup_index_cache_max_bytes: usize,
+    /// Where the workbook lives, for `CELL("filename")` and `INFO("directory")`. `None` is an
+    /// unsaved workbook (Excel then answers `""`).
+    pub workbook_identity: Option<WorkbookIdentity>,
 }
 
 impl Default for EvalConfig {
     fn default() -> Self {
         Self {
+            workbook_identity: None,
             enable_parallel: true,
             max_threads: None,
             max_vertices: None,
