@@ -1833,8 +1833,11 @@ static ARG_CELL: std::sync::LazyLock<Vec<ArgSchema>> = std::sync::LazyLock::new(
     ]
 });
 
+// Volatile like Excel's CELL / INFO ("volatile … depending on the arguments"), so a host's
+// workbook-identity change (a rename) or a sheet change reaches them on the next recalc:
+// https://learn.microsoft.com/en-us/office/client-developer/excel/excel-recalculation
 impl Function for CellFn {
-    func_caps!(PURE);
+    func_caps!(VOLATILE);
     fn name(&self) -> &'static str {
         "CELL"
     }
@@ -1969,7 +1972,7 @@ impl Function for CellFn {
 pub struct InfoFn;
 
 impl Function for InfoFn {
-    func_caps!(PURE);
+    func_caps!(VOLATILE);
     fn name(&self) -> &'static str {
         "INFO"
     }

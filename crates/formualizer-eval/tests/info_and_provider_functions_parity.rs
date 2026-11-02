@@ -92,6 +92,19 @@ fn cell_filename_and_the_sheet_name_idiom() {
     );
     // Unsaved workbook: "".
     assert_eq!(eval("=CELL(\"filename\")"), text(""));
+
+    // CELL is volatile (as in Excel): a new identity reaches an existing cell on the next recalc.
+    eval_with(&mut e, "=CELL(\"filename\")");
+    e.config.workbook_identity = Some(WorkbookIdentity {
+        file_name: "Renamed.xlsx".to_string(),
+        directory: String::new(),
+        ..Default::default()
+    });
+    e.evaluate_all().unwrap();
+    assert_eq!(
+        e.get_cell_value("Sheet1", 1, 5),
+        Some(text("[Renamed.xlsx]Sheet1"))
+    );
 }
 
 #[test]
