@@ -144,19 +144,10 @@ impl ReferenceAdjuster {
                     contains_volatile: ast.contains_volatile,
                 }
             }
-            ASTNodeType::BinaryOp {
-                op: bin_op,
-                left,
-                right,
-            } => ASTNode {
-                node_type: ASTNodeType::BinaryOp {
-                    op: bin_op.clone(),
-                    left: Box::new(self.adjust_ast_with_policy_scoped(left, op, policy, scope)),
-                    right: Box::new(self.adjust_ast_with_policy_scoped(right, op, policy, scope)),
-                },
-                source_token: ast.source_token.clone(),
-                contains_volatile: ast.contains_volatile,
-            },
+            // A chain is as deep as it is long: walk its left spine with a loop (FX-02).
+            ASTNodeType::BinaryOp { .. } => ast.map_binary_chain(|operand| {
+                self.adjust_ast_with_policy_scoped(operand, op, policy, scope)
+            }),
             ASTNodeType::UnaryOp { op: un_op, expr } => ASTNode {
                 node_type: ASTNodeType::UnaryOp {
                     op: un_op.clone(),
@@ -234,26 +225,9 @@ impl ReferenceAdjuster {
                     contains_volatile: ast.contains_volatile,
                 })
             }
-            ASTNodeType::BinaryOp {
-                op: bin_op,
-                left,
-                right,
-            } => {
-                let adjusted_left = self.adjust_ast_if_changed_impl(left, op, policy, scope);
-                let adjusted_right = self.adjust_ast_if_changed_impl(right, op, policy, scope);
-                if adjusted_left.is_none() && adjusted_right.is_none() {
-                    return None;
-                }
-                Some(ASTNode {
-                    node_type: ASTNodeType::BinaryOp {
-                        op: bin_op.clone(),
-                        left: Box::new(adjusted_left.unwrap_or_else(|| (**left).clone())),
-                        right: Box::new(adjusted_right.unwrap_or_else(|| (**right).clone())),
-                    },
-                    source_token: ast.source_token.clone(),
-                    contains_volatile: ast.contains_volatile,
-                })
-            }
+            ASTNodeType::BinaryOp { .. } => ast.map_binary_chain_if_changed(|operand| {
+                self.adjust_ast_if_changed_impl(operand, op, policy, scope)
+            }),
             ASTNodeType::UnaryOp { op: un_op, expr } => {
                 let adjusted_expr = self.adjust_ast_if_changed_impl(expr, op, policy, scope)?;
                 Some(ASTNode {
@@ -747,15 +721,9 @@ impl RelativeReferenceAdjuster {
                     contains_volatile: ast.contains_volatile,
                 }
             }
-            ASTNodeType::BinaryOp { op, left, right } => ASTNode {
-                node_type: ASTNodeType::BinaryOp {
-                    op: op.clone(),
-                    left: Box::new(self.adjust_formula(left)),
-                    right: Box::new(self.adjust_formula(right)),
-                },
-                source_token: ast.source_token.clone(),
-                contains_volatile: ast.contains_volatile,
-            },
+            ASTNodeType::BinaryOp { .. } => {
+                ast.map_binary_chain(|operand| self.adjust_formula(operand))
+            }
             ASTNodeType::UnaryOp { op, expr } => ASTNode {
                 node_type: ASTNodeType::UnaryOp {
                     op: op.clone(),
@@ -925,24 +893,14 @@ impl MoveReferenceAdjuster {
                     true,
                 )
             }
-            ASTNodeType::BinaryOp { op, left, right } => {
-                let (l_adj, l_ch) = self.adjust_ast_inner(left, formula_sheet_id);
-                let (r_adj, r_ch) = self.adjust_ast_inner(right, formula_sheet_id);
-                if !l_ch && !r_ch {
-                    return (ast.clone(), false);
+            ASTNodeType::BinaryOp { .. } => {
+                match ast.map_binary_chain_if_changed(|operand| {
+                    let (adjusted, changed) = self.adjust_ast_inner(operand, formula_sheet_id);
+                    changed.then_some(adjusted)
+                }) {
+                    Some(adjusted) => (adjusted, true),
+                    None => (ast.clone(), false),
                 }
-                (
-                    ASTNode {
-                        node_type: ASTNodeType::BinaryOp {
-                            op: op.clone(),
-                            left: Box::new(l_adj),
-                            right: Box::new(r_adj),
-                        },
-                        source_token: ast.source_token.clone(),
-                        contains_volatile: ast.contains_volatile,
-                    },
-                    true,
-                )
             }
             ASTNodeType::UnaryOp { op, expr } => {
                 let (e_adj, e_ch) = self.adjust_ast_inner(expr, formula_sheet_id);

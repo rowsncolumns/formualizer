@@ -212,7 +212,7 @@ fn parser_builder_supports_dialect_and_volatility_classifier() {
 #[test]
 fn leading_empty_argument_followed_by_argument_parses() {
     let ast = parse("=VLOOKUP(,A1:C10,2,FALSE)").unwrap();
-    match ast.node_type {
+    match &ast.node_type {
         ASTNodeType::Function { name, args } => {
             assert_eq!(name, "VLOOKUP");
             assert_eq!(args.len(), 4);
@@ -228,7 +228,7 @@ fn leading_empty_argument_followed_by_argument_parses() {
 #[test]
 fn comma_only_empty_arguments_preserve_arity() {
     let ast = parse("=FOO(,)").unwrap();
-    match ast.node_type {
+    match &ast.node_type {
         ASTNodeType::Function { args, .. } => {
             assert_eq!(args.len(), 2);
             assert!(

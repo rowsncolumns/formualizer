@@ -1853,7 +1853,7 @@ impl Display for ASTNodeType {
 
 /// An AST node represents a parsed formula element
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub struct ASTNode {
     pub node_type: ASTNodeType,
     pub source_token: Option<Token>,
@@ -1917,11 +1917,18 @@ impl ASTNode {
                 hasher.write(op.as_bytes());
                 expr.hash_node(hasher);
             }
-            ASTNodeType::BinaryOp { op, left, right } => {
-                hasher.write(&[4]); // Discriminant for BinaryOp
-                hasher.write(op.as_bytes());
-                left.hash_node(hasher);
-                right.hash_node(hasher);
+            ASTNodeType::BinaryOp { .. } => {
+                // Same byte stream as recursing (each node's tag + op, then its left, then its
+                // right), but the left spine is walked with a loop (FX-02).
+                let (bottom, spine) = self.binary_chain();
+                for node in spine.iter().rev() {
+                    hasher.write(&[4]); // Discriminant for BinaryOp
+                    hasher.write(node.binary_parts().0.as_bytes());
+                }
+                bottom.hash_node(hasher);
+                for node in spine {
+                    node.binary_parts().1.hash_node(hasher);
+                }
             }
             ASTNodeType::Function { name, args } => {
                 hasher.write(&[5]); // Discriminant for Function
@@ -1975,9 +1982,8 @@ impl ASTNode {
             ASTNodeType::UnaryOp { expr, .. } => {
                 expr.collect_dependencies(dependencies);
             }
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                left.collect_dependencies(dependencies);
-                right.collect_dependencies(dependencies);
+            ASTNodeType::BinaryOp { .. } => {
+                self.for_each_chain_operand(|operand| operand.collect_dependencies(dependencies));
             }
             ASTNodeType::Function { args, .. } => {
                 for arg in args {
@@ -2213,9 +2219,10 @@ impl ASTNode {
             ASTNodeType::UnaryOp { expr, .. } => {
                 expr.update_sheet_references(target_name, new_name);
             }
-            ASTNodeType::BinaryOp { left, right, .. } => {
-                left.update_sheet_references(target_name, new_name);
-                right.update_sheet_references(target_name, new_name);
+            ASTNodeType::BinaryOp { .. } => {
+                self.for_each_chain_operand_mut(|operand| {
+                    operand.update_sheet_references(target_name, new_name)
+                });
             }
             ASTNodeType::Function { args, .. } => {
                 for arg in args {

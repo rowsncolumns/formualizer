@@ -39,15 +39,26 @@ pub fn relocate_ast_for_template_placement(
                 expr, row_delta, col_delta,
             )?),
         },
-        ASTNodeType::BinaryOp { op, left, right } => ASTNodeType::BinaryOp {
-            op: op.clone(),
-            left: Box::new(relocate_ast_for_template_placement(
-                left, row_delta, col_delta,
-            )?),
-            right: Box::new(relocate_ast_for_template_placement(
-                right, row_delta, col_delta,
-            )?),
-        },
+        ASTNodeType::BinaryOp { .. } => {
+            // A chain is as deep as it is long: walk its left spine with a loop (FX-02).
+            let (bottom, spine) = ast.binary_chain();
+            let mut acc = relocate_ast_for_template_placement(bottom, row_delta, col_delta)?;
+            for node in spine {
+                let (op, right) = node.binary_parts();
+                acc = ASTNode {
+                    node_type: ASTNodeType::BinaryOp {
+                        op: op.to_string(),
+                        left: Box::new(acc),
+                        right: Box::new(relocate_ast_for_template_placement(
+                            right, row_delta, col_delta,
+                        )?),
+                    },
+                    source_token: node.source_token.clone(),
+                    contains_volatile: node.contains_volatile,
+                };
+            }
+            return Ok(acc);
+        }
         ASTNodeType::Function { name, args } => ASTNodeType::Function {
             name: name.clone(),
             args: args
@@ -190,13 +201,13 @@ mod tests {
             None,
         );
         let relocated = relocate_ast_for_template_placement(&ast, 4, 2).unwrap();
-        match relocated.node_type {
+        match &relocated.node_type {
             ASTNodeType::Reference {
                 reference: ReferenceType::Cell { row, col, .. },
                 ..
             } => {
-                assert_eq!(row, 5);
-                assert_eq!(col, 3);
+                assert_eq!(*row, 5);
+                assert_eq!(*col, 3);
             }
             other => panic!("unexpected AST: {other:?}"),
         }
