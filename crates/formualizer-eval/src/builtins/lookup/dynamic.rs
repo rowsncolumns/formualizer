@@ -2,7 +2,7 @@
 //!
 //! Notes / Simplifications (documented for future refinement):
 //! - XLOOKUP supports: lookup_value, lookup_array, return_array, [if_not_found], [match_mode], [search_mode]
-//!   * match_mode: 0 exact (default), -1 exact-or-next-smaller, 1 exact-or-next-larger, 2 wildcard (basic * ?)
+//!   * match_mode: 0 exact (default), -1 exact-or-next-smaller, 1 exact-or-next-larger, 2 wildcard (basic * ?), 3 regex
 //!   * search_mode: 1 forward (default), -1 reverse; (2 / -2 binary not yet implemented -> treated as 1 / -1)
 //!   * Wildcard mode (2) is case-insensitive and supports Excel-style escapes (~).
 //! - FILTER supports: array, include, [if_empty]; Shapes must be broadcast-compatible by rows (include is 1-D).
@@ -93,6 +93,52 @@ fn is_open_ended_reference(arg: &ArgumentHandle<'_, '_>) -> bool {
     }
 }
 
+/// `match_mode` 3 (regex match) of XLOOKUP / XMATCH: the first cell — the last when searching
+/// last-to-first — whose text the regular expression `pattern` matches, in REGEXTEST's flavour
+/// (case-sensitive, a match anywhere in the cell). An invalid pattern is `#VALUE!`.
+/// <https://support.microsoft.com/en-us/office/xlookup-function-b7fd680e-6d10-43e6-84f9-88eae8bf5929>
+fn regex_lookup_index(
+    view: &crate::engine::range_view::RangeView<'_>,
+    vertical: bool,
+    len: usize,
+    pattern: &LiteralValue,
+    reverse: bool,
+) -> Result<Option<usize>, ExcelError> {
+    let text_of = |v: &LiteralValue| -> Option<String> {
+        Some(match v {
+            LiteralValue::Text(s) => s.clone(),
+            LiteralValue::Empty => String::new(),
+            LiteralValue::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+            LiteralValue::Int(i) => i.to_string(),
+            LiteralValue::Number(n) => formualizer_common::number_to_excel_text(*n),
+            LiteralValue::Error(_) | LiteralValue::Array(_) | LiteralValue::Pending => {
+                return None;
+            }
+            other => other
+                .as_serial_number()
+                .map(formualizer_common::number_to_excel_text)?,
+        })
+    };
+    if let LiteralValue::Error(e) = pattern {
+        return Err(e.clone());
+    }
+    let pattern = text_of(pattern).ok_or_else(ExcelError::new_value)?;
+    let re = crate::builtins::text::regex_fns::compile(&pattern, 0)?;
+    let mut indices: Box<dyn Iterator<Item = usize>> = if reverse {
+        Box::new((0..len).rev())
+    } else {
+        Box::new(0..len)
+    };
+    Ok(indices.find(|&i| {
+        let cand = if vertical {
+            view.get_cell(i, 0)
+        } else {
+            view.get_cell(0, i)
+        };
+        text_of(&cand).is_some_and(|t| re.is_match(&t))
+    }))
+}
+
 /* ───────────────────────── XLOOKUP() ───────────────────────── */
 
 #[derive(Debug)]
@@ -105,7 +151,7 @@ pub struct XLookupFn;
 /// # Remarks
 /// - Defaults: `match_mode=0` (exact), `search_mode=1` (first-to-last).
 /// - `if_not_found` is optional; if omitted and no match exists, returns `#N/A`.
-/// - `match_mode`: `0` exact, `-1` exact-or-next-smaller, `1` exact-or-next-larger, `2` wildcard.
+/// - `match_mode`: `0` exact, `-1` exact-or-next-smaller, `1` exact-or-next-larger, `2` wildcard, `3` regex (REGEXTEST's flavour).
 /// - `search_mode`: `1` forward, `-1` reverse. Other modes are accepted with current fallback behavior.
 /// - `lookup_array` must be 1D. Invalid shape returns `#VALUE!`.
 /// - If `return_array` is multi-column or multi-row, the matched row/column is returned as a spill.
@@ -353,7 +399,20 @@ impl Function for XLookupFn {
         let mut found: Option<usize> = None;
         let needle = lookup_value;
         let prepared_matcher = PreparedLookupMatcher::new(&needle, wildcard);
-        if match_mode == 0 || wildcard {
+        if match_mode == 3 {
+            found = match regex_lookup_index(
+                &lookup_view,
+                vertical,
+                lookup_len,
+                &needle,
+                search_mode < 0,
+            ) {
+                Ok(found) => found,
+                Err(e) => {
+                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+                }
+            };
+        } else if match_mode == 0 || wildcard {
             if match_mode == 0 && search_mode == 1 && lookup_rows > 0 && lookup_cols > 0 {
                 let axis = if vertical {
                     LookupAxis::ColumnInView(0)
@@ -499,7 +558,7 @@ pub struct XMatchFn;
 ///
 /// # Remarks
 /// - Defaults: `match_mode=0` (exact), `search_mode=1` (first-to-last).
-/// - `match_mode`: `0` exact, `-1` exact-or-next-smaller, `1` exact-or-next-larger, `2` wildcard.
+/// - `match_mode`: `0` exact, `-1` exact-or-next-smaller, `1` exact-or-next-larger, `2` wildcard, `3` regex (REGEXTEST's flavour).
 /// - `search_mode`: `1` forward, `-1` reverse, `2` ascending binary intent, `-2` descending binary intent.
 /// - `lookup_array` must be a single row or single column, otherwise returns `#VALUE!`.
 /// - Not found returns `#N/A`.
@@ -682,7 +741,20 @@ impl Function for XMatchFn {
 
         let mut found: Option<usize> = None;
 
-        if match_mode == 0 || wildcard {
+        if match_mode == 3 {
+            found = match regex_lookup_index(
+                &lookup_view,
+                vertical,
+                lookup_len,
+                &needle,
+                search_mode < 0,
+            ) {
+                Ok(found) => found,
+                Err(e) => {
+                    return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
+                }
+            };
+        } else if match_mode == 0 || wildcard {
             // Exact match or wildcard match
             if search_mode == 1 || search_mode == 2 {
                 // Forward search (first to last) or binary ascending (treated as forward for exact)
@@ -2718,6 +2790,19 @@ impl Function for TrimRangeFn {
             Ok(v) => v,
             Err(e) => return scalar_err(e),
         };
+        Ok(trim_view(&view, trim_rows, trim_cols, ctx))
+    }
+}
+
+/// TRIMRANGE's core: drop blank leading (bit 1) / trailing (bit 2) rows and columns.
+fn trim_view<'b>(
+    view: &crate::engine::range_view::RangeView<'_>,
+    trim_rows: u8,
+    trim_cols: u8,
+    ctx: &dyn FunctionContext<'b>,
+) -> crate::traits::CalcValue<'b> {
+    let scalar_err = |e: ExcelError| crate::traits::CalcValue::Scalar(LiteralValue::Error(e));
+    {
         let (rows, cols) = view.dims();
         if rows == 0 || cols == 0 {
             return scalar_err(ExcelError::new_ref());
@@ -2761,7 +2846,45 @@ impl Function for TrimRangeFn {
             }
             out.push(row_out);
         }
-        Ok(collapse_if_scalar(out, ctx.date_system()))
+        collapse_if_scalar(out, ctx.date_system())
+    }
+}
+
+/// The trim-reference operators `A1.:.A10`, `A1:.A10` and `A1.:A10`, which parse to these
+/// functions (Excel stores them as `_xlfn._TRO_ALL(…)`, `_TRO_TRAILING`, `_TRO_LEADING`): the
+/// range with blank leading and/or trailing rows and columns removed, as TRIMRANGE does.
+/// <https://support.microsoft.com/en-us/office/trimrange-function-d7812248-3bc5-4c6b-901c-1afa9564f999>
+#[derive(Debug)]
+pub struct TrimRefFn {
+    name: &'static str,
+    mode: u8,
+}
+
+impl Function for TrimRefFn {
+    func_caps!(PURE, MAY_SPILL);
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn min_args(&self) -> usize {
+        1
+    }
+    fn arg_schema(&self) -> &'static [ArgSchema] {
+        &TrimRangeFn.arg_schema()[..1]
+    }
+    fn eval<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+    ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
+        if args.len() != 1 {
+            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                ExcelError::new_value(),
+            )));
+        }
+        Ok(match args[0].range_view() {
+            Ok(view) => trim_view(&view, self.mode, self.mode, ctx),
+            Err(e) => crate::traits::CalcValue::Scalar(LiteralValue::Error(e)),
+        })
     }
 }
 
@@ -2776,6 +2899,9 @@ pub fn register_builtins() {
     register_builtin(Arc::new(TakeFn));
     register_builtin(Arc::new(DropFn));
     register_builtin(Arc::new(TrimRangeFn));
+    for (name, mode) in [("_TRO_ALL", 3), ("_TRO_TRAILING", 2), ("_TRO_LEADING", 1)] {
+        register_builtin(Arc::new(TrimRefFn { name, mode }));
+    }
     register_builtin(Arc::new(XMatchFn));
     register_builtin(Arc::new(SortFn));
     register_builtin(Arc::new(SortByFn));

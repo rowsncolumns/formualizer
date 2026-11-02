@@ -236,6 +236,17 @@ fn pretty_print_node(ast: &ASTNode, spacing: Spacing) -> String {
             out
         }
         ASTNodeType::Function { name, args } => {
+            // `_TRO_ALL(A1:A10)` is how the trim operator `A1.:.A10` parses; print it back.
+            if let (Some(op), [arg]) = (
+                crate::parser::trim_reference_operator(name),
+                args.as_slice(),
+            ) && let ASTNodeType::Reference { reference, .. } = &arg.node_type
+            {
+                let text = reference.normalise();
+                if let Some(colon) = text.rfind(':') {
+                    return format!("{}{op}{}", &text[..colon], &text[colon + 1..]);
+                }
+            }
             let args_str = args
                 .iter()
                 .map(|a| pretty_print_node(a, spacing))
