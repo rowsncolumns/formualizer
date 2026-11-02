@@ -351,6 +351,18 @@ pub fn number_to_text(n: f64) -> String {
     formualizer_common::number_to_excel_text(n)
 }
 
+/// Excel's cell text limit: "Total number of characters that a cell can contain: 32,767"
+/// (<https://support.microsoft.com/en-us/office/excel-specifications-and-limits-1672b34d-7043-467e-8e27-269d656771c3>).
+/// A formula whose text result is longer is `#VALUE!`.
+pub const MAX_CELL_TEXT_CHARS: usize = 32_767;
+
+/// Whether `text` is longer than [`MAX_CELL_TEXT_CHARS`] characters. O(1) for short text (a
+/// string of at most that many bytes cannot hold more characters).
+#[inline]
+pub fn text_exceeds_cell_limit(text: &str) -> bool {
+    text.len() > MAX_CELL_TEXT_CHARS && text.chars().count() > MAX_CELL_TEXT_CHARS
+}
+
 /// Invariant textification for comparisons/concatenation.
 pub fn to_text_invariant(value: &LiteralValue) -> String {
     match value {

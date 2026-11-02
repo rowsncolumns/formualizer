@@ -1578,6 +1578,12 @@ pub trait EvaluationContext: Resolver + FunctionProvider + SourceResolver {
         crate::locale::Locale::invariant()
     }
 
+    /// Whether the workbook is in Manual calculation mode (Excel's Formulas > Calculation
+    /// Options > Manual). `INFO("recalc")` reports it.
+    fn manual_calculation(&self) -> bool {
+        false
+    }
+
     /// Number of active sheets in the workbook, if known.
     fn workbook_sheet_count(&self) -> Option<usize> {
         None
@@ -1807,6 +1813,11 @@ pub trait FunctionContext<'ctx> {
     /// Current formula sheet name.
     fn current_sheet(&self) -> &str;
 
+    /// Whether the workbook is in Manual calculation mode (`INFO("recalc")`).
+    fn manual_calculation(&self) -> bool {
+        false
+    }
+
     fn workbook_sheet_count(&self) -> Option<usize> {
         None
     }
@@ -1945,6 +1956,10 @@ impl<'a> FunctionContext<'a> for DefaultFunctionContext<'a> {
 
     fn current_sheet(&self) -> &str {
         self.current_sheet
+    }
+
+    fn manual_calculation(&self) -> bool {
+        self.base.manual_calculation()
     }
 
     fn workbook_sheet_count(&self) -> Option<usize> {

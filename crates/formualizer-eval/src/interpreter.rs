@@ -1797,17 +1797,34 @@ impl<'a> Interpreter<'a> {
         cv: crate::traits::CalcValue<'a>,
     ) -> crate::traits::CalcValue<'a> {
         use crate::traits::CalcValue;
+        // A non-finite number is `#NUM!`; text past Excel's 32,767-character cell limit is
+        // `#VALUE!` (CONCAT, TEXTJOIN, SUBSTITUTE, … — "Excel specifications and limits").
         fn non_finite(v: &LiteralValue) -> bool {
-            matches!(v, LiteralValue::Number(n) if !n.is_finite())
+            match v {
+                LiteralValue::Number(n) => !n.is_finite(),
+                LiteralValue::Text(s) => crate::coercion::text_exceeds_cell_limit(s),
+                _ => false,
+            }
         }
         fn to_num_error(v: &mut LiteralValue) {
-            if non_finite(v) {
-                *v = LiteralValue::Error(ExcelError::new_num());
+            match v {
+                LiteralValue::Number(n) if !n.is_finite() => {
+                    *v = LiteralValue::Error(ExcelError::new_num());
+                }
+                LiteralValue::Text(s) if crate::coercion::text_exceeds_cell_limit(s) => {
+                    *v = LiteralValue::Error(ExcelError::new_value());
+                }
+                _ => {}
             }
         }
         match cv {
             CalcValue::Scalar(LiteralValue::Number(n)) if !n.is_finite() => {
                 CalcValue::Scalar(LiteralValue::Error(ExcelError::new_num()))
+            }
+            CalcValue::Scalar(LiteralValue::Text(s))
+                if crate::coercion::text_exceeds_cell_limit(&s) =>
+            {
+                CalcValue::Scalar(LiteralValue::Error(ExcelError::new_value()))
             }
             CalcValue::Scalar(LiteralValue::Array(mut rows)) => {
                 for v in rows.iter_mut().flat_map(|r| r.iter_mut()) {
@@ -1946,11 +1963,15 @@ impl<'a> Interpreter<'a> {
             if let LiteralValue::Error(e) = r {
                 return Ok(LiteralValue::Error(e));
             }
-            Ok(LiteralValue::Text(format!(
+            let text = format!(
                 "{}{}",
                 crate::coercion::to_text_invariant(&l),
                 crate::coercion::to_text_invariant(&r)
-            )))
+            );
+            if crate::coercion::text_exceeds_cell_limit(&text) {
+                return Ok(LiteralValue::Error(ExcelError::new_value()));
+            }
+            Ok(LiteralValue::Text(text))
         })
     }
 

@@ -1966,7 +1966,15 @@ impl Function for InfoFn {
             "numfile" => LiteralValue::Int(ctx.workbook_sheet_count().unwrap_or(1) as i64),
             "origin" => LiteralValue::Text("$A:$A$1".to_string()),
             "osversion" => LiteralValue::Text("Windows (64-bit) NT 10.00".to_string()),
-            "recalc" => LiteralValue::Text("Automatic".to_string()),
+            // "Automatic" or "Manual" (Automatic Except for Data Tables reports "Automatic").
+            "recalc" => LiteralValue::Text(
+                if ctx.manual_calculation() {
+                    "Manual"
+                } else {
+                    "Automatic"
+                }
+                .to_string(),
+            ),
             "release" => LiteralValue::Text("16.0".to_string()),
             "system" => LiteralValue::Text("pcdos".to_string()),
             _ => return Ok(error_value(ExcelErrorKind::Value)),

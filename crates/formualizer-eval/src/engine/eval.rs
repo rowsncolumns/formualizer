@@ -3434,7 +3434,15 @@ where
         // home in canonical mode) so the next SCC task can re-seed from them
         // (see `iterative_state_values`). Replaced wholesale each recalc —
         // when nothing iterates the map empties and stays free.
-        self.iterative_state_values.clear();
+        if self.config.iterate_circular_on_every_recalc {
+            self.iterative_state_values.clear();
+        } else {
+            // Members that did not iterate this recalc keep their snapshot: they are not
+            // redirtied, so this recalc's values are still their latest.
+            let graph = &self.graph;
+            self.iterative_state_values
+                .retain(|&vertex, _| graph.vertex_exists(vertex));
+        }
         for &vertex in &pending {
             if !self.graph.vertex_exists(vertex) {
                 continue;
@@ -3449,7 +3457,7 @@ where
                 }
             }
         }
-        if !pending.is_empty() {
+        if !pending.is_empty() && self.config.iterate_circular_on_every_recalc {
             self.graph.redirty_iterative_members(&pending);
         }
     }
@@ -3746,6 +3754,18 @@ where
     /// Update the workbook seed for deterministic RNGs in functions.
     pub fn set_workbook_seed(&mut self, seed: u64) {
         self.config.workbook_seed = seed;
+    }
+
+    /// Report Excel's Manual calculation mode through `INFO("recalc")`
+    /// ([`EvalConfig::manual_calculation`]). Cells already showing the mode change on their next
+    /// evaluation; the host marks them dirty.
+    pub fn set_manual_calculation(&mut self, manual: bool) {
+        self.config.manual_calculation = manual;
+    }
+
+    /// See [`EvalConfig::iterate_circular_on_every_recalc`].
+    pub fn set_iterate_circular_on_every_recalc(&mut self, every_recalc: bool) {
+        self.config.iterate_circular_on_every_recalc = every_recalc;
     }
 
     /// Set the volatile level policy (Always/OnRecalc/OnOpen)
@@ -23102,6 +23122,10 @@ where
 
     fn recalc_epoch(&self) -> u64 {
         self.recalc_epoch
+    }
+
+    fn manual_calculation(&self) -> bool {
+        self.config.manual_calculation
     }
 
     fn workbook_sheet_count(&self) -> Option<usize> {

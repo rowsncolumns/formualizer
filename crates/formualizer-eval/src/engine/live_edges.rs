@@ -455,6 +455,9 @@ impl<'a, R: EvaluationContext> EvaluationContext for RecordingContext<'a, R> {
     fn locale(&self) -> crate::locale::Locale {
         self.engine.locale()
     }
+    fn manual_calculation(&self) -> bool {
+        self.engine.manual_calculation()
+    }
     fn workbook_sheet_count(&self) -> Option<usize> {
         self.engine.workbook_sheet_count()
     }
