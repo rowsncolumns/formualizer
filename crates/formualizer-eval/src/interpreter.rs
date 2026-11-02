@@ -248,6 +248,26 @@ impl<'a> Interpreter<'a> {
     /// callers consult them before this. The `LAMBDA(...)` expression is evaluated on a clean
     /// interpreter (no local scope, no relative-reference offset) because a name has no enclosing
     /// scope; the body resolves its references at call time, in the caller's context.
+    /// The built-in `name` denotes when used as a value: always for Excel's `_xleta.` storage
+    /// spelling, and for a bare name only when `prefixed_only` is false (the caller has already
+    /// established that no defined name of that spelling exists).
+    fn eta_callable(
+        &self,
+        name: &str,
+        prefixed_only: bool,
+    ) -> Option<Arc<dyn crate::traits::CustomCallable>> {
+        let prefix = crate::builtins::lambda::ETA_PREFIX;
+        let bare = match name.get(..prefix.len()) {
+            Some(p) if p.eq_ignore_ascii_case(prefix) => &name[prefix.len()..],
+            _ if prefixed_only => return None,
+            _ => name,
+        };
+        let function = self.context.get_function("", bare)?;
+        Some(Arc::new(crate::builtins::lambda::EtaCallable::new(
+            function,
+        )))
+    }
+
     fn resolve_named_callable(&self, name: &str) -> Option<Arc<dyn crate::traits::CustomCallable>> {
         let ast = self.context.named_lambda_ast(name, self.current_sheet)?;
         let clean = Interpreter {
@@ -1313,10 +1333,14 @@ impl<'a> Interpreter<'a> {
     ) -> Result<crate::traits::CalcValue<'a>, ExcelError> {
         // A lambda-valued defined name used as a VALUE (`MAP(A1:A3,Dbl)`, `LET(f,Dbl,f(3))`) is
         // the closure itself; the graph's cached literal for it can only be `#CALC!`.
-        if let ReferenceType::NamedRange(name) = reference
-            && let Some(callable) = self.resolve_named_callable(name)
-        {
-            return Ok(crate::traits::CalcValue::Callable(callable));
+        if let ReferenceType::NamedRange(name) = reference {
+            if let Some(callable) = self.resolve_named_callable(name) {
+                return Ok(crate::traits::CalcValue::Callable(callable));
+            }
+            // `_xleta.SUM` (how a file stores a function passed as a value) is always the function.
+            if let Some(callable) = self.eta_callable(name, true) {
+                return Ok(crate::traits::CalcValue::Callable(callable));
+            }
         }
         if let ReferenceType::Cell {
             sheet, row, col, ..
@@ -1344,6 +1368,14 @@ impl<'a> Interpreter<'a> {
                 if matches!(target, ReferenceType::NamedRange(_))
                     && e.kind != ExcelErrorKind::Cancelled =>
             {
+                // A bare built-in name that is not a defined name (`BYROW(r,SUM)`) is the function
+                // itself — Excel's eta-reduced lambda.
+                if e.kind == ExcelErrorKind::Name
+                    && let ReferenceType::NamedRange(name) = target
+                    && let Some(callable) = self.eta_callable(name, false)
+                {
+                    return Ok(crate::traits::CalcValue::Callable(callable));
+                }
                 return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(e)));
             }
             Err(e) => return Err(e),
