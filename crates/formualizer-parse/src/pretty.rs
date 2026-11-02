@@ -247,23 +247,6 @@ fn pretty_print_node(ast: &ASTNode, spacing: Spacing) -> String {
                     return format!("{}{op}{}", &text[..colon], &text[colon + 1..]);
                 }
             }
-            // `_FV(A1,"Price")` is how the dot-field operator `A1.Price` parses; print it back.
-            if name.eq_ignore_ascii_case(crate::parser::FIELD_ACCESS_FUNCTION)
-                && let [target, field] = args.as_slice()
-                && let ASTNodeType::Reference { reference, .. } = &target.node_type
-                && let ASTNodeType::Literal(crate::LiteralValue::Text(field)) = &field.node_type
-            {
-                let simple = field
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_alphabetic() || c == '_')
-                    && field.chars().all(|c| c.is_alphanumeric() || c == '_');
-                return if simple {
-                    format!("{}.{field}", reference.normalise())
-                } else {
-                    format!("{}.[{field}]", reference.normalise())
-                };
-            }
             let args_str = args
                 .iter()
                 .map(|a| pretty_print_node(a, spacing))

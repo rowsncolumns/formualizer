@@ -2934,29 +2934,6 @@ impl Parser {
                         Some(token),
                     ));
                 }
-                if self.dialect == FormulaDialect::Excel
-                    && let Some((cell_text, field)) = split_field_access(value)
-                    && let Ok(reference) = ReferenceType::from_string(cell_text)
-                {
-                    let target = ASTNode::new(
-                        ASTNodeType::Reference {
-                            original: cell_text.to_string(),
-                            reference,
-                        },
-                        Some(token.clone()),
-                    );
-                    let name = ASTNode::new(
-                        ASTNodeType::Literal(LiteralValue::Text(field)),
-                        Some(token.clone()),
-                    );
-                    return Ok(ASTNode::new(
-                        ASTNodeType::Function {
-                            name: FIELD_ACCESS_FUNCTION.to_string(),
-                            args: vec![target, name],
-                        },
-                        Some(token),
-                    ));
-                }
                 let reference = ReferenceType::from_string_with_dialect(value, self.dialect)
                     .map_err(|e| ParserError {
                         message: format!("Invalid reference '{value}': {e}"),
@@ -3294,7 +3271,9 @@ pub fn normalise_reference(reference: &str) -> Result<String, ParsingError> {
 }
 
 /// The function Excel stores the dot-field operator as: `A1.Price` is `_FV(A1,"Price")` in a
-/// workbook file — the field of a linked data type value (`FIELDVALUE`).
+/// workbook file — the field of a linked data type value (`FIELDVALUE`). The parser keeps
+/// `A1.Price` as a name token (hosts resolve whole-formula dot accessors themselves); the
+/// evaluator answers an unresolved one with `#FIELD!` (see [`split_field_access`]).
 pub const FIELD_ACCESS_FUNCTION: &str = "_FV";
 
 /// `A1.Price` → (`A1`, `Price`); `Sheet1!$B$2.[Market cap]` → (`Sheet1!$B$2`, `Market cap`).

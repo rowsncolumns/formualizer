@@ -7,7 +7,8 @@
 //!   sheet-name idiom works. INFO answers `directory` / `osversion` / `system` from the host and
 //!   `memavail` / `memused` / `totmem` with `#N/A`.
 //! - Provider functions return the error Excel documents when the provider is missing; EUROCONVERT
-//!   needs no provider (fixed EU rates) and computes.
+//!   needs no provider (fixed EU rates) and computes. `A1.Price` with no linked data type is
+//!   `#FIELD!` (the parser keeps it as a name token so hosts can resolve their own dot accessors).
 
 use formualizer_common::LiteralValue;
 use formualizer_eval::engine::{Engine, EvalConfig, WorkbookIdentity};
@@ -140,7 +141,8 @@ fn provider_functions_return_excels_errors() {
         ("=PY(\"1+1\",0)", "#BLOCKED!"),
         ("=FIELDVALUE(A1,\"Price\")", "#FIELD!"),
         ("=A1.Price", "#FIELD!"),
-        ("=Sheet1!$A$1.[Market cap]", "#FIELD!"),
+        ("=A1.Price*2", "#FIELD!"),
+        ("=_FV(A1,\"Price\")", "#FIELD!"),
     ] {
         assert_eq!(code(&eval(formula)), want, "{formula}");
     }
@@ -162,8 +164,8 @@ fn provider_functions_return_excels_errors() {
 }
 
 #[test]
-fn field_access_prints_back_as_typed() {
-    for f in ["=A1.Price", "=Sheet1!$A$1.[Market cap]", "=A1.Price*2"] {
+fn field_access_text_is_kept_as_typed() {
+    for f in ["=A1.Price", "=Sheet1!$A$1.Price", "=A1.Price*2"] {
         assert_eq!(excel_formula(&parse(f).unwrap()), f);
     }
 }
