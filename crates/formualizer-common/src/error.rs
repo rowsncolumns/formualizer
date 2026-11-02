@@ -36,6 +36,18 @@ pub enum ExcelErrorKind {
     Calc,
     Circ,
     Cancelled,
+    /// `#FIELD!` — a data-type field reference that does not exist.
+    Field,
+    /// `#BLOCKED!` — access to a needed resource is blocked.
+    Blocked,
+    /// `#CONNECT!` — a connection to a needed service failed.
+    Connect,
+    /// `#BUSY!` — a result is still being computed (async functions, linked data types).
+    Busy,
+    /// `#UNKNOWN!` — a data type the running version does not support.
+    Unknown,
+    /// `#PYTHON!` — a Python-in-Excel formula failed.
+    Python,
 }
 
 impl fmt::Display for ExcelErrorKind {
@@ -54,6 +66,12 @@ impl fmt::Display for ExcelErrorKind {
             Self::Calc => "#CALC!",
             Self::Circ => "#CIRC!",
             Self::Cancelled => "#CANCELLED!",
+            Self::Field => "#FIELD!",
+            Self::Blocked => "#BLOCKED!",
+            Self::Connect => "#CONNECT!",
+            Self::Busy => "#BUSY!",
+            Self::Unknown => "#UNKNOWN!",
+            Self::Python => "#PYTHON!",
         })
     }
 }
@@ -74,6 +92,12 @@ impl ExcelErrorKind {
             "#calc!" => Some(Self::Calc),
             "#circ!" => Some(Self::Circ),
             "#cancelled!" => Some(Self::Cancelled),
+            "#field!" => Some(Self::Field),
+            "#blocked!" => Some(Self::Blocked),
+            "#connect!" => Some(Self::Connect),
+            "#busy!" => Some(Self::Busy),
+            "#unknown!" => Some(Self::Unknown),
+            "#python!" => Some(Self::Python),
             _ => None,
         }
     }

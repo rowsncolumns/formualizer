@@ -5,8 +5,8 @@ pub use crate::function::Function;
 use crate::interpreter::Interpreter;
 use crate::reference::CellRef;
 use formualizer_common::{
-    LiteralValue,
     error::{ExcelError, ExcelErrorKind},
+    LiteralValue,
 };
 use std::any::Any;
 use std::borrow::Cow;
@@ -257,6 +257,11 @@ pub struct ArgumentHandle<'a, 'b> {
 }
 
 impl<'a, 'b> ArgumentHandle<'a, 'b> {
+    /// The workbook's date system (1900 or 1904) the argument's serials belong to.
+    pub fn date_system(&self) -> crate::engine::DateSystem {
+        self.interp.context.date_system()
+    }
+
     pub(crate) fn new(node: &'a ASTNode, interp: &'a Interpreter<'b>) -> Self {
         Self {
             expr: ArgumentExpr::Ast(node),

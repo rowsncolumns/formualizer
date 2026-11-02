@@ -1,6 +1,6 @@
 //! Date and time component extraction functions
 
-use super::serial::{serial_to_date, serial_to_datetime, serial_to_ymd};
+use super::serial::{serial_to_date, serial_to_date_for, serial_to_datetime, serial_to_ymd};
 use crate::args::ArgSchema;
 use crate::function::Function;
 use crate::traits::{ArgumentHandle, FunctionContext};
@@ -20,7 +20,7 @@ fn coerce_to_serial(arg: &ArgumentHandle) -> Result<f64, ExcelError> {
 
 fn coerce_to_date(arg: &ArgumentHandle) -> Result<NaiveDate, ExcelError> {
     let serial = coerce_to_serial(arg)?;
-    serial_to_date(serial)
+    serial_to_date_for(arg.date_system(), serial)
 }
 
 fn days_in_year(year: i32) -> f64 {

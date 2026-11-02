@@ -1660,7 +1660,17 @@ impl Function for ErrorTypeFn {
                     // Excel: #GETTING_DATA 8, #SPILL! 9, #CONNECT! 10, #BLOCKED! 11,
                     // #UNKNOWN! 12, #FIELD! 13, #CALC! 14.
                     ExcelErrorKind::Spill => 9,
+                    ExcelErrorKind::Connect => 10,
+                    ExcelErrorKind::Blocked => 11,
+                    ExcelErrorKind::Unknown => 12,
+                    ExcelErrorKind::Field => 13,
                     ExcelErrorKind::Calc => 14,
+                    // Not in Excel's ERROR.TYPE table ("anything else" is #N/A).
+                    ExcelErrorKind::Busy | ExcelErrorKind::Python => {
+                        return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
+                            ExcelError::new_na(),
+                        )));
+                    }
                     // Non-Excel kinds map onto #UNKNOWN! and codes past Excel's table.
                     ExcelErrorKind::NImpl => 12,
                     ExcelErrorKind::Circ => 15,

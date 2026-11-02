@@ -1,11 +1,11 @@
-use arrow_array::Array;
 use arrow_array::new_null_array;
+use arrow_array::Array;
 use arrow_schema::DataType;
 use chrono::Timelike;
 use std::sync::Arc;
 
 use arrow_array::builder::{BooleanBuilder, Float64Builder, StringBuilder, UInt8Builder};
-use arrow_array::{ArrayRef, BooleanArray, Float64Array, StringArray, UInt8Array, UInt32Array};
+use arrow_array::{ArrayRef, BooleanArray, Float64Array, StringArray, UInt32Array, UInt8Array};
 use once_cell::sync::OnceCell;
 
 use formualizer_common::{ExcelError, ExcelErrorKind, LiteralValue};
@@ -781,6 +781,12 @@ pub fn map_error_code(kind: ExcelErrorKind) -> u8 {
         ExcelErrorKind::Calc => 11,
         ExcelErrorKind::Circ => 12,
         ExcelErrorKind::Cancelled => 13,
+        ExcelErrorKind::Field => 14,
+        ExcelErrorKind::Blocked => 15,
+        ExcelErrorKind::Connect => 16,
+        ExcelErrorKind::Busy => 17,
+        ExcelErrorKind::Unknown => 18,
+        ExcelErrorKind::Python => 19,
     }
 }
 
@@ -799,6 +805,12 @@ pub fn unmap_error_code(code: u8) -> ExcelErrorKind {
         11 => ExcelErrorKind::Calc,
         12 => ExcelErrorKind::Circ,
         13 => ExcelErrorKind::Cancelled,
+        14 => ExcelErrorKind::Field,
+        15 => ExcelErrorKind::Blocked,
+        16 => ExcelErrorKind::Connect,
+        17 => ExcelErrorKind::Busy,
+        18 => ExcelErrorKind::Unknown,
+        19 => ExcelErrorKind::Python,
         _ => ExcelErrorKind::Error,
     }
 }
@@ -3700,13 +3712,21 @@ impl ArrowSheet {
             let sl = Array::slice(a.as_ref(), off, len);
             let fa = sl.as_any().downcast_ref::<Float64Array>().unwrap().clone();
             let nn = len.saturating_sub(fa.null_count());
-            if nn == 0 { None } else { Some(Arc::new(fa)) }
+            if nn == 0 {
+                None
+            } else {
+                Some(Arc::new(fa))
+            }
         });
         let booleans: Option<Arc<BooleanArray>> = ch.booleans.as_ref().and_then(|a| {
             let sl = Array::slice(a.as_ref(), off, len);
             let ba = sl.as_any().downcast_ref::<BooleanArray>().unwrap().clone();
             let nn = len.saturating_sub(ba.null_count());
-            if nn == 0 { None } else { Some(Arc::new(ba)) }
+            if nn == 0 {
+                None
+            } else {
+                Some(Arc::new(ba))
+            }
         });
         let text: Option<ArrayRef> = ch.text.as_ref().and_then(|a| {
             let sl = Array::slice(a.as_ref(), off, len);
@@ -3722,7 +3742,11 @@ impl ArrowSheet {
             let sl = Array::slice(a.as_ref(), off, len);
             let ea = sl.as_any().downcast_ref::<UInt8Array>().unwrap().clone();
             let nn = len.saturating_sub(ea.null_count());
-            if nn == 0 { None } else { Some(Arc::new(ea)) }
+            if nn == 0 {
+                None
+            } else {
+                Some(Arc::new(ea))
+            }
         });
         // Split overlays for this slice.
         let overlay = ch.overlay.slice(off, len);
@@ -6798,7 +6822,7 @@ mod tests {
         assert_eq!(bools[0], Some(true));
         assert_eq!(bools[1], Some(true)); // overlay to true
         assert_eq!(bools[2], None); // overshadowed by text overlay
-        // spot-check others remain base
+                                    // spot-check others remain base
         assert_eq!(bools[3], Some(false));
     }
 

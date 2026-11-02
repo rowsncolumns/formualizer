@@ -146,6 +146,25 @@ const EXCEL_1904_EPOCH: NaiveDate = NaiveDate::from_ymd_opt(1904, 1, 1).unwrap()
 /// Last date Excel can represent (serial 2958465 in the 1900 system).
 const EXCEL_MAX_DATE: NaiveDate = NaiveDate::from_ymd_opt(9999, 12, 31).unwrap();
 
+/// Days from the 1900 system's serial 0 to the 1904 system's: 1904-01-01 is 1900-system serial
+/// 1462 and 1904-system serial 0.
+pub const EXCEL_1904_OFFSET_DAYS: f64 = 1462.0;
+
+/// Convert an Excel serial to a date according to the provided date system. A 1904-system
+/// serial is 1462 days below the 1900-system serial of the same date; a negative 1904 serial is
+/// not a date (`#NUM!`).
+pub fn serial_to_date_for(system: DateSystem, serial: f64) -> Result<NaiveDate, ExcelError> {
+    match system {
+        DateSystem::Excel1900 => serial_to_date(serial),
+        DateSystem::Excel1904 => {
+            if !serial.is_finite() || serial < 0.0 {
+                return Err(ExcelError::new_num());
+            }
+            serial_to_date(serial + EXCEL_1904_OFFSET_DAYS)
+        }
+    }
+}
+
 /// Convert a date to Excel serial according to the provided date system.
 pub fn date_to_serial_for(system: DateSystem, date: &NaiveDate) -> f64 {
     match system {

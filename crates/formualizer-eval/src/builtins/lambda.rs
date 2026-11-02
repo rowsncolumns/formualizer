@@ -615,8 +615,16 @@ impl Function for ImmediateCallFn {
             }
             _ => return Ok(err_value("Only a LAMBDA value can be invoked")),
         };
-        let mut values = Vec::with_capacity(call_args.len());
-        for arg in call_args {
+        // Trailing skipped arguments (`LAMBDA(x,y,…)(1,)`) are not passed, so the callable binds
+        // those parameters as omitted and `ISOMITTED` reports them, as Excel does.
+        let skipped = call_args
+            .iter()
+            .rev()
+            .take_while(|a| a.is_skipped())
+            .count();
+        let passed = &call_args[..call_args.len() - skipped];
+        let mut values = Vec::with_capacity(passed.len());
+        for arg in passed {
             values.push(arg.value()?.into_literal());
         }
         callee.invoke_callable(&callable, &values)
