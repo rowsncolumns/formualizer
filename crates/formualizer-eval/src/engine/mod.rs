@@ -852,6 +852,17 @@ pub struct EvalConfig {
     /// Where the workbook lives, for `CELL("filename")` and `INFO("directory")`. `None` is an
     /// unsaved workbook (Excel then answers `""`).
     pub workbook_identity: Option<WorkbookIdentity>,
+
+    /// Under `CyclePolicy::Iterate`, re-evaluate the members of a circular group on every recalc
+    /// (the accumulator contract, spec §4/§7.6) — `true`, the default. `false` evaluates a
+    /// circular group only when it is dirty, like any other formula: an edit the group does not
+    /// depend on leaves `=A1+1` alone, and only a forced recalculation (every vertex marked
+    /// dirty) iterates it again.
+    pub iterate_circular_on_every_recalc: bool,
+
+    /// Excel's Manual calculation mode, as `INFO("recalc")` reports it. The host decides when to
+    /// evaluate; the engine only reports the mode.
+    pub manual_calculation: bool,
 }
 
 impl Default for EvalConfig {
@@ -912,6 +923,8 @@ impl Default for EvalConfig {
             max_formula_plane_cache_edges: 100_000,
             max_formula_plane_cache_bytes: 64 * 1024 * 1024,
             lookup_index_cache_max_bytes: 64 * 1024 * 1024,
+            iterate_circular_on_every_recalc: true,
+            manual_calculation: false,
         }
     }
 }

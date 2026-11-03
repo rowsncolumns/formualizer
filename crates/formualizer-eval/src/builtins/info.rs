@@ -1979,6 +1979,8 @@ impl Function for CellFn {
 pub struct InfoFn;
 
 impl Function for InfoFn {
+    // Volatile, as Excel lists it (learn.microsoft.com "Excel Recalculation"): `INFO("recalc")`
+    // follows a calculation-mode change on the next recalc.
     func_caps!(VOLATILE);
     fn name(&self) -> &'static str {
         "INFO"
@@ -2011,7 +2013,15 @@ impl Function for InfoFn {
                     .os_version
                     .unwrap_or_else(|| "Windows (64-bit) NT 10.00".to_string()),
             ),
-            "recalc" => LiteralValue::Text("Automatic".to_string()),
+            // "Automatic" or "Manual" (Automatic Except for Data Tables reports "Automatic").
+            "recalc" => LiteralValue::Text(
+                if ctx.manual_calculation() {
+                    "Manual"
+                } else {
+                    "Automatic"
+                }
+                .to_string(),
+            ),
             "release" => LiteralValue::Text("16.0".to_string()),
             "system" => LiteralValue::Text(identity.system.unwrap_or_else(|| "pcdos".to_string())),
             // Removed in Excel 2007: "these values are no longer supported" and return #N/A.

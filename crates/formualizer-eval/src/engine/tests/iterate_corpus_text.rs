@@ -69,10 +69,11 @@ fn self_concat_grows_one_char_per_pass_and_always_caps() {
 
 #[test]
 fn self_concat_with_long_seed_allocates_linearly_per_pass_and_survives() {
-    // A1 = A1 & B1 with an 8 KiB seed: pass k holds k·8 KiB; at cap 64 the
-    // final string is 512 KiB and total bytes copied ≈ cap²/2 · seed
-    // (~16 MiB) — memory-sane, but quadratic in the cap (report flag).
-    let seed = "s".repeat(8 * 1024);
+    // A1 = A1 & B1 with a 511-char seed: pass k holds k·511 chars; at cap 64
+    // the final string is 32,704 chars — just inside Excel's 32,767-character
+    // cell limit — and total bytes copied ≈ cap²/2 · seed (quadratic in the
+    // cap, report flag).
+    let seed = "s".repeat(511);
     let cap = 64u32;
     let mut engine = iterate_engine(cap, 0.001);
     set_value(
@@ -90,6 +91,14 @@ fn self_concat_with_long_seed_allocates_linearly_per_pass_and_survives() {
     let t = engine.last_cycle_telemetry();
     assert_eq!(t.capped_sccs, 1);
     assert_eq!(t.settle_passes_total, cap as usize);
+
+    // The next recalc's first pass crosses the limit: `&` is #VALUE! (Excel),
+    // and the error then feeds itself.
+    engine.evaluate_all().unwrap();
+    assert!(matches!(
+        engine.get_cell_value("Sheet1", 1, 1),
+        Some(LiteralValue::Error(e)) if e.kind == ExcelErrorKind::Value
+    ));
 }
 
 #[test]
