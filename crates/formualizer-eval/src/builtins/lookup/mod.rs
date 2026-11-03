@@ -10,6 +10,7 @@ mod array_shape;
 mod choose;
 mod core;
 mod dynamic;
+mod groupby; // GROUPBY, PIVOTBY
 mod legacy; // classic LOOKUP function (vector & array forms)
 pub(crate) mod lookup_utils; // shared helper utilities for lookup family
 mod reference_info; // modern lookup & dynamic array subset (XLOOKUP, FILTER, UNIQUE)
@@ -19,9 +20,8 @@ pub use address::AddressFn;
 pub use array_shape::{ExpandFn, ToColFn, ToRowFn, WrapColsFn, WrapRowsFn};
 pub use choose::ChooseFn;
 pub use core::{HLookupFn, MatchFn, VLookupFn};
-pub use dynamic::{
-    FilterFn, GroupByFn, PivotByFn, RandArrayFn, SortByFn, SortFn, UniqueFn, XLookupFn, XMatchFn,
-};
+pub use dynamic::{FilterFn, RandArrayFn, SortByFn, SortFn, UniqueFn, XLookupFn, XMatchFn};
+pub use groupby::{GroupByFn, PivotByFn};
 pub use legacy::LookupFn;
 pub use reference_info::{ColumnFn, ColumnsFn, RowFn, RowsFn};
 pub use stack::{HStackFn, VStackFn};

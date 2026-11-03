@@ -1583,6 +1583,11 @@ pub trait EvaluationContext: Resolver + FunctionProvider + SourceResolver {
         None
     }
 
+    /// The open workbook's location and host platform, if the host supplied them.
+    fn workbook_identity(&self) -> Option<crate::engine::WorkbookIdentity> {
+        None
+    }
+
     /// Excel-style 1-based active-sheet index for a sheet name, if known.
     fn sheet_index_by_name(&self, _sheet: &str) -> Option<usize> {
         None
@@ -1811,6 +1816,10 @@ pub trait FunctionContext<'ctx> {
         None
     }
 
+    fn workbook_identity(&self) -> Option<crate::engine::WorkbookIdentity> {
+        None
+    }
+
     fn sheet_index_by_name(&self, _sheet: &str) -> Option<usize> {
         None
     }
@@ -1949,6 +1958,10 @@ impl<'a> FunctionContext<'a> for DefaultFunctionContext<'a> {
 
     fn workbook_sheet_count(&self) -> Option<usize> {
         self.base.workbook_sheet_count()
+    }
+
+    fn workbook_identity(&self) -> Option<crate::engine::WorkbookIdentity> {
+        self.base.workbook_identity()
     }
 
     fn sheet_index_by_name(&self, sheet: &str) -> Option<usize> {

@@ -23108,6 +23108,10 @@ where
         Some(self.graph.sheet_reg().active_len())
     }
 
+    fn workbook_identity(&self) -> Option<crate::engine::WorkbookIdentity> {
+        self.config.workbook_identity.clone()
+    }
+
     fn sheet_index_by_name(&self, sheet: &str) -> Option<usize> {
         self.graph.sheet_reg().active_position(sheet)
     }

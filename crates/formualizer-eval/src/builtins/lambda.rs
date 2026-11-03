@@ -321,6 +321,63 @@ impl CustomCallable for LambdaClosure {
     }
 }
 
+/// The storage prefix Excel writes before a function name used as a value (`_xleta.SUM`).
+pub const ETA_PREFIX: &str = "_xleta.";
+
+/// A built-in function used as a value — Excel's eta-reduced lambda. `=BYROW(A1:C3,SUM)` passes
+/// `SUM` itself to BYROW, exactly as `LAMBDA(r,SUM(r))` would; `GROUPBY(…,SUM)`,
+/// `MAP(r,ABS)` and `REDUCE(0,r,SUM)` work the same way. Calling it evaluates the function on the
+/// supplied values.
+pub struct EtaCallable {
+    function: Arc<dyn Function>,
+}
+
+impl EtaCallable {
+    pub fn new(function: Arc<dyn Function>) -> Self {
+        Self { function }
+    }
+
+    pub fn function_name(&self) -> &str {
+        self.function.name()
+    }
+}
+
+impl CustomCallable for EtaCallable {
+    fn arity(&self) -> usize {
+        if self.function.variadic() {
+            // Excel's limit on the arguments of one call.
+            255
+        } else {
+            self.function
+                .arg_schema()
+                .len()
+                .max(self.function.min_args())
+        }
+    }
+
+    fn min_arity(&self) -> usize {
+        self.function.min_args().min(self.arity())
+    }
+
+    fn invoke<'ctx>(
+        &self,
+        interp: &crate::interpreter::Interpreter<'ctx>,
+        args: &[LiteralValue],
+    ) -> Result<CalcValue<'ctx>, ExcelError> {
+        let call = ASTNode::new(
+            ASTNodeType::Function {
+                name: self.function.name().to_string(),
+                args: args
+                    .iter()
+                    .map(|v| ASTNode::new(ASTNodeType::Literal(v.clone()), None))
+                    .collect(),
+            },
+            None,
+        );
+        interp.evaluate_ast(&call)
+    }
+}
+
 #[derive(Debug)]
 pub struct LambdaFn;
 

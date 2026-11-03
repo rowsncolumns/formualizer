@@ -561,38 +561,39 @@ impl Function for IsNaFn {
 }
 
 #[derive(Debug)]
-pub struct IsFormulaFn; // Requires provenance tracking (not yet) => always FALSE.
-/// Returns whether a value originates from a formula.
-///
-/// Current engine metadata does not track formula provenance at this call site.
+pub struct IsFormulaFn;
+/// Returns TRUE when the referenced cell contains a formula.
 ///
 /// # Remarks
-/// - This implementation currently returns FALSE for all inputs.
-/// - Errors are not raised solely due to provenance unavailability.
-/// - Arity mismatch returns `#VALUE!`.
+/// - A range reference checks its top-left cell.
+/// - An argument that is not a reference (`ISFORMULA(10)`) returns `#VALUE!`, as in Excel.
+/// - <https://support.microsoft.com/en-us/office/isformula-function-e4d1355f-7121-4ef2-801e-3839bfd6b1e5>
 ///
 /// # Examples
 ///
 /// ```yaml,sandbox
-/// title: "Literal value"
-/// formula: '=ISFORMULA(10)'
-/// expected: false
+/// title: "Formula cell"
+/// grid:
+///   A1: "=1+1"
+/// formula: '=ISFORMULA(A1)'
+/// expected: true
 /// ```
 ///
 /// ```yaml,sandbox
-/// title: "Computed value in expression context"
-/// formula: '=ISFORMULA(1+1)'
+/// title: "Constant cell"
+/// grid:
+///   A1: 2
+/// formula: '=ISFORMULA(A1)'
 /// expected: false
 /// ```
 ///
 /// ```yaml,docs
 /// related:
-///   - TYPE
-///   - ISNUMBER
-///   - ISTEXT
+///   - FORMULATEXT
+///   - ISREF
 /// faq:
-///   - q: "Can ISFORMULA currently detect formula provenance?"
-///     a: "Not yet. This implementation always returns FALSE because provenance metadata is not tracked here."
+///   - q: "What does ISFORMULA return for a value that is not a reference?"
+///     a: "#VALUE!, as in Excel."
 /// ```
 /// [formualizer-docgen:schema:start]
 /// Name: ISFORMULA
@@ -619,19 +620,32 @@ impl Function for IsFormulaFn {
     fn arg_schema(&self) -> &'static [ArgSchema] {
         &ARG_ANY_ONE[..]
     }
+    fn dispatch<'a, 'b, 'c>(
+        &self,
+        args: &'c [ArgumentHandle<'a, 'b>],
+        ctx: &dyn FunctionContext<'b>,
+    ) -> Result<CalcValue<'b>, ExcelError> {
+        self.eval(args, ctx)
+    }
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        _ctx: &dyn FunctionContext<'b>,
+        ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         if args.len() != 1 {
-            return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
-                ExcelError::new_value(),
-            )));
+            return arity_error();
         }
-        // Formula provenance metadata is not tracked yet, so ISFORMULA currently returns FALSE.
-        Ok(crate::traits::CalcValue::Scalar(LiteralValue::Boolean(
-            false,
+        let Ok(reference) = args[0].as_reference_or_eval() else {
+            return Ok(error_value(ExcelErrorKind::Value));
+        };
+        let Some(info) = ctx.inspect_reference(&reference)? else {
+            return Ok(error_value(ExcelErrorKind::Value));
+        };
+        let Some(cell) = info.first_cell else {
+            return Ok(error_value(ExcelErrorKind::Value));
+        };
+        Ok(scalar(LiteralValue::Boolean(
+            ctx.formula_text_at_cell(cell)?.is_some(),
         )))
     }
 }
@@ -1660,6 +1674,9 @@ impl Function for ErrorTypeFn {
                     // Excel: #GETTING_DATA 8, #SPILL! 9, #CONNECT! 10, #BLOCKED! 11,
                     // #UNKNOWN! 12, #FIELD! 13, #CALC! 14.
                     ExcelErrorKind::Spill => 9,
+                    ExcelErrorKind::Connect => 10,
+                    ExcelErrorKind::Blocked => 11,
+                    ExcelErrorKind::Field => 13,
                     ExcelErrorKind::Calc => 14,
                     // Non-Excel kinds map onto #UNKNOWN! and codes past Excel's table.
                     ExcelErrorKind::NImpl => 12,
@@ -1816,8 +1833,11 @@ static ARG_CELL: std::sync::LazyLock<Vec<ArgSchema>> = std::sync::LazyLock::new(
     ]
 });
 
+// Volatile like Excel's CELL / INFO ("volatile … depending on the arguments"), so a host's
+// workbook-identity change (a rename) or a sheet change reaches them on the next recalc:
+// https://learn.microsoft.com/en-us/office/client-developer/excel/excel-recalculation
 impl Function for CellFn {
-    func_caps!(PURE);
+    func_caps!(VOLATILE);
     fn name(&self) -> &'static str {
         "CELL"
     }
@@ -1925,7 +1945,17 @@ impl Function for CellFn {
             "protect" => LiteralValue::Int(1),
             "width" => LiteralValue::Int(8),
             "format" => LiteralValue::Text("G".to_string()),
-            "filename" => LiteralValue::Text(String::new()),
+            // `{directory}[{file}]{sheet}`, so `MID(CELL("filename"),FIND("]",…)+1,…)` yields the
+            // sheet name; an unsaved workbook (no identity) is "" as in Excel.
+            "filename" => match ctx.workbook_identity() {
+                Some(id) if !id.file_name.is_empty() => LiteralValue::Text(format!(
+                    "{}[{}]{}",
+                    id.directory,
+                    id.file_name,
+                    sheet.as_deref().unwrap_or(ctx.current_sheet())
+                )),
+                _ => LiteralValue::Text(String::new()),
+            },
             "color" | "parentheses" => LiteralValue::Int(0),
             _ => return Ok(error_value(ExcelErrorKind::Value)),
         };
@@ -1933,13 +1963,16 @@ impl Function for CellFn {
     }
 }
 
-/// `INFO(type_text)` — environment facts. The engine is host-agnostic, so it answers the values
-/// Excel reports on a default Windows install; `numfile` is the sheet count when known.
+/// `INFO(type_text)` — environment facts: `directory`, `osversion` and `system` come from the host's
+/// [`crate::engine::WorkbookIdentity`] (else the values Excel reports on a default Windows
+/// install); `numfile` is the sheet count; `memavail` / `memused` / `totmem` are `#N/A` as in
+/// Excel 2007+.
+/// <https://support.microsoft.com/en-us/office/info-function-725f259a-0e4b-49b3-8b52-58815c69acae>
 #[derive(Debug)]
 pub struct InfoFn;
 
 impl Function for InfoFn {
-    func_caps!(PURE);
+    func_caps!(VOLATILE);
     fn name(&self) -> &'static str {
         "INFO"
     }
@@ -1961,14 +1994,21 @@ impl Function for InfoFn {
             return arity_error();
         }
         let type_text = cell_info_text(&args[0])?.trim().to_ascii_lowercase();
+        let identity = ctx.workbook_identity().unwrap_or_default();
         let result = match type_text.as_str() {
-            "directory" => LiteralValue::Text(String::new()),
+            "directory" => LiteralValue::Text(identity.directory),
             "numfile" => LiteralValue::Int(ctx.workbook_sheet_count().unwrap_or(1) as i64),
             "origin" => LiteralValue::Text("$A:$A$1".to_string()),
-            "osversion" => LiteralValue::Text("Windows (64-bit) NT 10.00".to_string()),
+            "osversion" => LiteralValue::Text(
+                identity
+                    .os_version
+                    .unwrap_or_else(|| "Windows (64-bit) NT 10.00".to_string()),
+            ),
             "recalc" => LiteralValue::Text("Automatic".to_string()),
             "release" => LiteralValue::Text("16.0".to_string()),
-            "system" => LiteralValue::Text("pcdos".to_string()),
+            "system" => LiteralValue::Text(identity.system.unwrap_or_else(|| "pcdos".to_string())),
+            // Removed in Excel 2007: "these values are no longer supported" and return #N/A.
+            "memavail" | "memused" | "totmem" => return Ok(error_value(ExcelErrorKind::Na)),
             _ => return Ok(error_value(ExcelErrorKind::Value)),
         };
         Ok(scalar(result))

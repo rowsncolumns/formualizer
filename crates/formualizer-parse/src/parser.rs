@@ -2911,6 +2911,29 @@ impl Parser {
                 ))
             }
             TokenSubType::Range => {
+                if self.dialect == FormulaDialect::Excel
+                    && let Some((range_text, function)) = split_trim_reference(value)
+                {
+                    let reference =
+                        ReferenceType::from_string(&range_text).map_err(|e| ParserError {
+                            message: format!("Invalid reference '{value}': {e}"),
+                            position: Some(self.position),
+                        })?;
+                    let inner = ASTNode::new(
+                        ASTNodeType::Reference {
+                            original: range_text,
+                            reference,
+                        },
+                        Some(token.clone()),
+                    );
+                    return Ok(ASTNode::new(
+                        ASTNodeType::Function {
+                            name: function.to_string(),
+                            args: vec![inner],
+                        },
+                        Some(token),
+                    ));
+                }
                 let reference = ReferenceType::from_string_with_dialect(value, self.dialect)
                     .map_err(|e| ParserError {
                         message: format!("Invalid reference '{value}': {e}"),
@@ -3245,6 +3268,85 @@ impl ParserBuilder {
 pub fn normalise_reference(reference: &str) -> Result<String, ParsingError> {
     let ref_type = ReferenceType::from_string(reference)?;
     Ok(ref_type.to_string())
+}
+
+/// The function Excel stores the dot-field operator as: `A1.Price` is `_FV(A1,"Price")` in a
+/// workbook file — the field of a linked data type value (`FIELDVALUE`). The parser keeps
+/// `A1.Price` as a name token (hosts resolve whole-formula dot accessors themselves); the
+/// evaluator answers an unresolved one with `#FIELD!` (see [`split_field_access`]).
+pub const FIELD_ACCESS_FUNCTION: &str = "_FV";
+
+/// `A1.Price` → (`A1`, `Price`); `Sheet1!$B$2.[Market cap]` → (`Sheet1!$B$2`, `Market cap`).
+/// The left side must be a single cell reference; `None` for anything else.
+pub fn split_field_access(text: &str) -> Option<(&str, String)> {
+    let addr_start = text.rfind('!').map_or(0, |i| i + 1);
+    let (cell_end, field) = if text.ends_with(']') {
+        let open = text[addr_start..].find(".[")? + addr_start;
+        (open, text[open + 2..text.len() - 1].to_string())
+    } else {
+        let dot = text[addr_start..].find('.')? + addr_start;
+        let field = &text[dot + 1..];
+        let mut chars = field.chars();
+        let first_ok = chars.next().is_some_and(|c| c.is_alphabetic() || c == '_');
+        if !first_ok || !chars.all(|c| c.is_alphanumeric() || c == '_') {
+            return None;
+        }
+        (dot, field.to_string())
+    };
+    if field.is_empty() {
+        return None;
+    }
+    let cell = &text[addr_start..cell_end];
+    let cell = cell.strip_prefix('$').unwrap_or(cell);
+    let letters = cell.bytes().take_while(u8::is_ascii_alphabetic).count();
+    let rest = &cell[letters..];
+    let rest = rest.strip_prefix('$').unwrap_or(rest);
+    let is_cell =
+        (1..=3).contains(&letters) && !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
+    is_cell.then(|| (&text[..cell_end], field))
+}
+
+/// Excel's trim-reference operators and the function each is stored as in a workbook file
+/// (`_xlfn._TRO_ALL(A1:A10)` for `A1.:.A10`): a dot after the colon trims trailing blank rows and
+/// columns, a dot before it leading ones, both trims both — `TRIMRANGE` with that mode.
+/// <https://support.microsoft.com/en-us/office/trimrange-function-d7812248-3bc5-4c6b-901c-1afa9564f999>
+pub const TRIM_REFERENCE_FUNCTIONS: [(&str, &str); 3] = [
+    (".:.", "_TRO_ALL"),
+    (":.", "_TRO_TRAILING"),
+    (".:", "_TRO_LEADING"),
+];
+
+/// `A1:.A10` → (`A1:A10`, `_TRO_TRAILING`); `Sheet1!A.:.A` → (`Sheet1!A:A`, `_TRO_ALL`).
+/// `None` for anything that is not a trim reference.
+pub fn split_trim_reference(text: &str) -> Option<(String, &'static str)> {
+    // Only the part after the sheet qualifier can carry the operator (a quoted sheet name may
+    // contain dots and colons).
+    let addr_start = text.rfind('!').map_or(0, |i| i + 1);
+    let (sheet, addr) = text.split_at(addr_start);
+    for (op, function) in TRIM_REFERENCE_FUNCTIONS {
+        if let Some((left, right)) = addr.split_once(op) {
+            let valid = |part: &str| {
+                !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'$')
+            };
+            if valid(left) && valid(right) {
+                return Some((format!("{sheet}{left}:{right}"), function));
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// The trim operator `name` (a `_TRO_*` function, with or without `_xlfn.`) stands for.
+pub fn trim_reference_operator(name: &str) -> Option<&'static str> {
+    let bare = name
+        .get(..6)
+        .filter(|p| p.eq_ignore_ascii_case("_xlfn."))
+        .map_or(name, |_| &name[6..]);
+    TRIM_REFERENCE_FUNCTIONS
+        .iter()
+        .find(|(_, f)| f.eq_ignore_ascii_case(bare))
+        .map(|(op, _)| *op)
 }
 
 pub fn parse<T: AsRef<str>>(formula: T) -> Result<ASTNode, ParserError> {

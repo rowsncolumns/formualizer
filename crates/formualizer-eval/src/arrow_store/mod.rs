@@ -781,6 +781,9 @@ pub fn map_error_code(kind: ExcelErrorKind) -> u8 {
         ExcelErrorKind::Calc => 11,
         ExcelErrorKind::Circ => 12,
         ExcelErrorKind::Cancelled => 13,
+        ExcelErrorKind::Connect => 14,
+        ExcelErrorKind::Blocked => 15,
+        ExcelErrorKind::Field => 16,
     }
 }
 
@@ -799,6 +802,9 @@ pub fn unmap_error_code(code: u8) -> ExcelErrorKind {
         11 => ExcelErrorKind::Calc,
         12 => ExcelErrorKind::Circ,
         13 => ExcelErrorKind::Cancelled,
+        14 => ExcelErrorKind::Connect,
+        15 => ExcelErrorKind::Blocked,
+        16 => ExcelErrorKind::Field,
         _ => ExcelErrorKind::Error,
     }
 }

@@ -458,6 +458,9 @@ impl<'a, R: EvaluationContext> EvaluationContext for RecordingContext<'a, R> {
     fn workbook_sheet_count(&self) -> Option<usize> {
         self.engine.workbook_sheet_count()
     }
+    fn workbook_identity(&self) -> Option<crate::engine::WorkbookIdentity> {
+        self.engine.workbook_identity()
+    }
     fn sheet_index_by_name(&self, sheet: &str) -> Option<usize> {
         self.engine.sheet_index_by_name(sheet)
     }
