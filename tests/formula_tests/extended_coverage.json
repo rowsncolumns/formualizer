@@ -2418,49 +2418,49 @@
     },
     {
       "formula": "=GROUPBY(A1:A5,B1:B5,\"SUM\",0)",
-      "result": [["A", 80], ["B", 70]],
+      "result": [["A", 80], ["B", 70], ["Total", 150]],
       "result_type": "array",
       "description": "GROUPBY sum with no headers",
       "context": {"A1": "A", "A2": "A", "A3": "B", "A4": "B", "A5": "A", "B1": 10, "B2": 20, "B3": 30, "B4": 40, "B5": 50}
     },
     {
       "formula": "=GROUPBY(A1:A5,B1:B5,\"COUNT\",0)",
-      "result": [["A", 3], ["B", 2]],
+      "result": [["A", 3], ["B", 2], ["Total", 5]],
       "result_type": "array",
       "description": "GROUPBY count with no headers",
       "context": {"A1": "A", "A2": "A", "A3": "B", "A4": "B", "A5": "A", "B1": 10, "B2": 20, "B3": 30, "B4": 40, "B5": 50}
     },
     {
       "formula": "=GROUPBY(A1:A5,B1:B5,\"AVERAGE\",0)",
-      "result": [["A", 26.666666666666668], ["B", 35]],
+      "result": [["A", 26.666666666666668], ["B", 35], ["Total", 30]],
       "result_type": "array",
       "description": "GROUPBY average with no headers",
       "context": {"A1": "A", "A2": "A", "A3": "B", "A4": "B", "A5": "A", "B1": 10, "B2": 20, "B3": 30, "B4": 40, "B5": 50}
     },
     {
       "formula": "=GROUPBY(A1:A5,B1:B5,\"MAX\",0)",
-      "result": [["A", 50], ["B", 40]],
+      "result": [["A", 50], ["B", 40], ["Total", 50]],
       "result_type": "array",
       "description": "GROUPBY max with no headers",
       "context": {"A1": "A", "A2": "A", "A3": "B", "A4": "B", "A5": "A", "B1": 10, "B2": 20, "B3": 30, "B4": 40, "B5": 50}
     },
     {
       "formula": "=GROUPBY(A1:A5,B1:B5,\"MIN\",0)",
-      "result": [["A", 10], ["B", 30]],
+      "result": [["A", 10], ["B", 30], ["Total", 10]],
       "result_type": "array",
       "description": "GROUPBY min with no headers",
       "context": {"A1": "A", "A2": "A", "A3": "B", "A4": "B", "A5": "A", "B1": 10, "B2": 20, "B3": 30, "B4": 40, "B5": 50}
     },
     {
       "formula": "=PIVOTBY(A2:A5,B2:B5,C2:C5,\"SUM\",1)",
-      "result": [[null, "West", "East"], ["Fruit", 200, null], ["Veggie", 75, 50]],
+      "result": [[null, "East", "West", "Total"], ["Fruit", null, 200, 200], ["Veggie", 50, 75, 125], ["Total", 50, 275, 325]],
       "result_type": "array",
       "description": "PIVOTBY sum with headers",
       "context": {"A1": "Category", "A2": "Fruit", "A3": "Fruit", "A4": "Veggie", "A5": "Veggie", "B1": "Region", "B2": "East", "B3": "West", "B4": "East", "B5": "West", "C1": "Sales", "C2": 100, "C3": 200, "C4": 50, "C5": 75}
     },
     {
       "formula": "=PIVOTBY(A2:A5,B2:B5,C2:C5,\"COUNT\",1)",
-      "result": [[null, "West", "East"], ["Fruit", 1, null], ["Veggie", 1, 1]],
+      "result": [[null, "East", "West", "Total"], ["Fruit", null, 1, 1], ["Veggie", 1, 1, 2], ["Total", 1, 2, 3]],
       "result_type": "array",
       "description": "PIVOTBY count with headers",
       "context": {"A1": "Category", "A2": "Fruit", "A3": "Fruit", "A4": "Veggie", "A5": "Veggie", "B1": "Region", "B2": "East", "B3": "West", "B4": "East", "B5": "West", "C1": "Sales", "C2": 100, "C3": 200, "C4": 50, "C5": 75}
