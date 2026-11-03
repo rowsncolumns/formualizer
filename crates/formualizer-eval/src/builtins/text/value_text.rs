@@ -92,7 +92,7 @@ impl Function for ValueFn {
     fn eval<'a, 'b, 'c>(
         &self,
         args: &'c [ArgumentHandle<'a, 'b>],
-        ctx: &dyn FunctionContext<'b>,
+        _ctx: &dyn FunctionContext<'b>,
     ) -> Result<crate::traits::CalcValue<'b>, ExcelError> {
         match scalar_like_value(&args[0])? {
             // A blank cell is 0, as in Excel; numbers pass through unchanged
@@ -113,9 +113,9 @@ impl Function for ValueFn {
             _ => {}
         }
         let s = to_text(&args[0])?;
-        let Some(n) =
-            crate::coercion::parse_numeric_text_on(&s, &ctx.locale(), Some(ctx.clock().today()))
-        else {
+        // The operators' text→number coercion: numeric and date/time text, year-less dates in the
+        // clock's year, date text on the workbook's date system (1900 or 1904).
+        let Ok(n) = args[0].lenient_number(&LiteralValue::Text(s)) else {
             return Ok(crate::traits::CalcValue::Scalar(LiteralValue::Error(
                 ExcelError::new_value(),
             )));

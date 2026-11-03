@@ -373,10 +373,14 @@ pub fn to_text_invariant(value: &LiteralValue) -> String {
     }
 }
 
-/// Numeric sanitization: NaN/Inf → #NUM!
+/// Numeric sanitization: NaN/Inf → #NUM!, and a subnormal result (below the smallest normal
+/// double, about 2.2E-308) flushes to 0 — Excel keeps no subnormal numbers.
 pub fn sanitize_numeric(n: f64) -> Result<f64, ExcelError> {
     if n.is_nan() || n.is_infinite() {
         return Err(ExcelError::new_num());
+    }
+    if n.is_subnormal() {
+        return Ok(0.0);
     }
     Ok(n)
 }

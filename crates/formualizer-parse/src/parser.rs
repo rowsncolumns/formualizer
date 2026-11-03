@@ -1932,7 +1932,7 @@ impl ASTNode {
             }
             ASTNodeType::Function { name, args } => {
                 hasher.write(&[5]); // Discriminant for Function
-                // Use lowercase function name to be case-insensitive
+                                    // Use lowercase function name to be case-insensitive
                 let name_lower = name.to_lowercase();
                 hasher.write(name_lower.as_bytes());
                 hasher.write_usize(args.len());
@@ -2880,6 +2880,9 @@ impl Parser {
                         message: format!("Invalid number: {value}"),
                         position: Some(self.position),
                     })?;
+                // Excel has no subnormal numbers: a literal below the smallest normal double
+                // (about 2.2E-308, e.g. `=1E-320`) is 0.
+                let value = if value.is_subnormal() { 0.0 } else { value };
                 Ok(ASTNode::new(
                     ASTNodeType::Literal(LiteralValue::Number(value)),
                     Some(token),
@@ -2998,7 +3001,7 @@ impl Parser {
 
         self.in_call_args_depth += 1;
         let result = (|| -> Result<Vec<ASTNode>, ParserError> {
-            args.push(self.parse_expression()?);
+            args.push(self.parse_call_argument()?);
             loop {
                 self.skip_whitespace();
                 if self.position >= self.tokens.len() {
@@ -3013,7 +3016,7 @@ impl Parser {
                     || (token.token_type == TokenType::OpInfix && self.span_value(token) == ",");
                 if is_separator {
                     self.position += 1;
-                    args.push(self.parse_expression()?);
+                    args.push(self.parse_call_argument()?);
                 } else if token.token_type == TokenType::Paren
                     && token.subtype == TokenSubType::Close
                 {
@@ -3029,6 +3032,26 @@ impl Parser {
         })();
         self.in_call_args_depth -= 1;
         result
+    }
+
+    /// One argument of a postfix call. An omitted argument — nothing before the next `,` or the
+    /// closing `)`, as in `LAMBDA(x,y,…)(1,)` — is an empty literal, exactly like an omitted
+    /// function argument (`SUM(1,)`), so `ISOMITTED` sees it as omitted.
+    fn parse_call_argument(&mut self) -> Result<ASTNode, ParserError> {
+        self.skip_whitespace();
+        if let Some(token) = self.tokens.get(self.position) {
+            let omitted = (token.token_type == TokenType::Sep
+                && token.subtype == TokenSubType::Arg)
+                || (token.token_type == TokenType::OpInfix && self.span_value(token) == ",")
+                || (token.token_type == TokenType::Paren && token.subtype == TokenSubType::Close);
+            if omitted {
+                return Ok(ASTNode::new(
+                    ASTNodeType::Literal(LiteralValue::Empty),
+                    None,
+                ));
+            }
+        }
+        self.parse_expression()
     }
 
     fn parse_function_arguments(&mut self) -> Result<Vec<ASTNode>, ParserError> {

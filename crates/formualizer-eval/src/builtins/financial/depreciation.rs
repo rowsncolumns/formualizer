@@ -1,14 +1,14 @@
 //! Depreciation functions: SLN, SYD, DB, DDB, VDB, AMORLINC, AMORDEGRC
 
 use crate::args::ArgSchema;
-use crate::builtins::datetime::serial_to_date;
+use crate::builtins::datetime::serial_to_date_for;
 use crate::function::Function;
 use crate::traits::{ArgumentHandle, CalcValue, FunctionContext};
 use chrono::NaiveDate;
 use formualizer_common::{ExcelError, LiteralValue};
 use formualizer_macros::func_caps;
 
-use super::bonds::{DayCountBasis, year_fraction};
+use super::bonds::{year_fraction, DayCountBasis};
 
 fn coerce_num(arg: &ArgumentHandle) -> Result<f64, ExcelError> {
     let v = arg.value()?.into_literal();
@@ -662,8 +662,8 @@ struct AmortizationArgs {
 /// first_period`, and a basis of 0, 1, 3 or 4 (Excel rejects basis 2 for these two functions).
 fn amortization_args(args: &[ArgumentHandle<'_, '_>]) -> Result<AmortizationArgs, ExcelError> {
     let cost = coerce_num(&args[0])?;
-    let date_purchased = serial_to_date(coerce_num(&args[1])?.trunc())?;
-    let first_period = serial_to_date(coerce_num(&args[2])?.trunc())?;
+    let date_purchased = serial_to_date_for(args[1].date_system(), coerce_num(&args[1])?.trunc())?;
+    let first_period = serial_to_date_for(args[2].date_system(), coerce_num(&args[2])?.trunc())?;
     let salvage = coerce_num(&args[3])?;
     let period = coerce_num(&args[4])?.trunc() as i32;
     let rate = coerce_num(&args[5])?;

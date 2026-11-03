@@ -10,7 +10,7 @@
 //! functions.
 
 use crate::args::ArgSchema;
-use crate::builtins::datetime::{actual_actual_year_length, serial_to_date};
+use crate::builtins::datetime::{actual_actual_year_length, serial_to_date_for};
 use crate::function::Function;
 use crate::traits::{ArgumentHandle, CalcValue, FunctionContext};
 use chrono::{Datelike, NaiveDate};
@@ -377,9 +377,9 @@ impl Function for AccrintFn {
             )));
         }
 
-        let issue = serial_to_date(coerce_num(&args[0])?)?;
-        let first_interest = serial_to_date(coerce_num(&args[1])?)?;
-        let settlement = serial_to_date(coerce_num(&args[2])?)?;
+        let issue = serial_to_date_for(args[0].date_system(), coerce_num(&args[0])?)?;
+        let first_interest = serial_to_date_for(args[1].date_system(), coerce_num(&args[1])?)?;
+        let settlement = serial_to_date_for(args[2].date_system(), coerce_num(&args[2])?)?;
         let rate = coerce_num(&args[3])?;
         let par = coerce_num(&args[4])?;
         let frequency = coerce_num(&args[5])?.trunc() as i32;
@@ -525,8 +525,8 @@ impl Function for AccrintmFn {
 
         let basis = DayCountBasis::from_int(basis_int)?;
 
-        let issue = serial_to_date(issue_serial)?;
-        let settlement = serial_to_date(settlement_serial)?;
+        let issue = serial_to_date_for(args[0].date_system(), issue_serial)?;
+        let settlement = serial_to_date_for(args[0].date_system(), settlement_serial)?;
 
         // settlement must be after issue
         if settlement <= issue {
@@ -657,8 +657,8 @@ impl Function for PriceFn {
 
         let basis = DayCountBasis::from_int(basis_int)?;
 
-        let settlement = serial_to_date(settlement_serial)?;
-        let maturity = serial_to_date(maturity_serial)?;
+        let settlement = serial_to_date_for(args[0].date_system(), settlement_serial)?;
+        let maturity = serial_to_date_for(args[0].date_system(), maturity_serial)?;
 
         // maturity must be after settlement
         if maturity <= settlement {
@@ -880,8 +880,8 @@ impl Function for YieldFn {
 
         let basis = DayCountBasis::from_int(basis_int)?;
 
-        let settlement = serial_to_date(settlement_serial)?;
-        let maturity = serial_to_date(maturity_serial)?;
+        let settlement = serial_to_date_for(args[0].date_system(), settlement_serial)?;
+        let maturity = serial_to_date_for(args[0].date_system(), maturity_serial)?;
 
         // maturity must be after settlement
         if maturity <= settlement {
@@ -1075,8 +1075,8 @@ impl Function for TbilleqFn {
             ));
         }
 
-        let settlement = serial_to_date(settlement_serial)?;
-        let maturity = serial_to_date(maturity_serial)?;
+        let settlement = serial_to_date_for(args[0].date_system(), settlement_serial)?;
+        let maturity = serial_to_date_for(args[0].date_system(), maturity_serial)?;
 
         if maturity <= settlement {
             return Ok(CalcValue::Scalar(
@@ -1190,8 +1190,8 @@ impl Function for TbillpriceFn {
             ));
         }
 
-        let settlement = serial_to_date(settlement_serial)?;
-        let maturity = serial_to_date(maturity_serial)?;
+        let settlement = serial_to_date_for(args[0].date_system(), settlement_serial)?;
+        let maturity = serial_to_date_for(args[0].date_system(), maturity_serial)?;
 
         if maturity <= settlement {
             return Ok(CalcValue::Scalar(
@@ -1289,8 +1289,8 @@ impl Function for TbillyieldFn {
             ));
         }
 
-        let settlement = serial_to_date(settlement_serial)?;
-        let maturity = serial_to_date(maturity_serial)?;
+        let settlement = serial_to_date_for(args[0].date_system(), settlement_serial)?;
+        let maturity = serial_to_date_for(args[0].date_system(), maturity_serial)?;
 
         if maturity <= settlement {
             return Ok(CalcValue::Scalar(
@@ -1316,8 +1316,8 @@ fn security_dates(
     args: &[ArgumentHandle<'_, '_>],
     basis_index: usize,
 ) -> Result<(NaiveDate, NaiveDate, DayCountBasis), ExcelError> {
-    let settlement = serial_to_date(coerce_num(&args[0])?.trunc())?;
-    let maturity = serial_to_date(coerce_num(&args[1])?.trunc())?;
+    let settlement = serial_to_date_for(args[0].date_system(), coerce_num(&args[0])?.trunc())?;
+    let maturity = serial_to_date_for(args[1].date_system(), coerce_num(&args[1])?.trunc())?;
     let basis =
         DayCountBasis::from_int(opt_num(args, basis_index)?.map_or(0, |v| v.trunc() as i32))?;
     if settlement >= maturity {
@@ -1392,8 +1392,12 @@ fn eval_coupon_metric(
             CouponMetric::DaysBs => coupon_days_bs(&period, &settlement, basis),
             CouponMetric::Days => coupon_days(&period, frequency, basis),
             CouponMetric::DaysNc => coupon_days_nc(&period, &settlement, frequency, basis),
-            CouponMetric::Ncd => crate::builtins::datetime::date_to_serial(&period.ncd),
-            CouponMetric::Pcd => crate::builtins::datetime::date_to_serial(&period.pcd),
+            CouponMetric::Ncd => {
+                crate::builtins::datetime::date_to_serial_for(args[0].date_system(), &period.ncd)
+            }
+            CouponMetric::Pcd => {
+                crate::builtins::datetime::date_to_serial_for(args[0].date_system(), &period.pcd)
+            }
             CouponMetric::Num => period.num as f64,
         })
     })())
@@ -1643,7 +1647,7 @@ fn eval_maturity_security(
 ) -> Result<CalcValue<'static>, ExcelError> {
     num_or_error((|| {
         let (settlement, maturity, basis) = security_dates(args, 5)?;
-        let issue = serial_to_date(coerce_num(&args[2])?.trunc())?;
+        let issue = serial_to_date_for(args[2].date_system(), coerce_num(&args[2])?.trunc())?;
         let rate = coerce_num(&args[3])?;
         let other = coerce_num(&args[4])?;
         if rate < 0.0 || (price_mode && other < 0.0) || (!price_mode && other <= 0.0) {
@@ -1825,8 +1829,8 @@ fn odd_first_args(
     ExcelError,
 > {
     let (settlement, maturity, basis) = security_dates(args, 8)?;
-    let issue = serial_to_date(coerce_num(&args[2])?.trunc())?;
-    let first_coupon = serial_to_date(coerce_num(&args[3])?.trunc())?;
+    let issue = serial_to_date_for(args[2].date_system(), coerce_num(&args[2])?.trunc())?;
+    let first_coupon = serial_to_date_for(args[3].date_system(), coerce_num(&args[3])?.trunc())?;
     let frequency = coupon_frequency(&args[7])?;
     if !(maturity > first_coupon && first_coupon > settlement && settlement > issue) {
         return Err(ExcelError::new_num());
@@ -1840,7 +1844,7 @@ fn odd_last_args(
     args: &[ArgumentHandle<'_, '_>],
 ) -> Result<(NaiveDate, NaiveDate, NaiveDate, i32, DayCountBasis), ExcelError> {
     let (settlement, maturity, basis) = security_dates(args, 7)?;
-    let last_interest = serial_to_date(coerce_num(&args[2])?.trunc())?;
+    let last_interest = serial_to_date_for(args[2].date_system(), coerce_num(&args[2])?.trunc())?;
     let frequency = coupon_frequency(&args[6])?;
     if settlement <= last_interest {
         return Err(ExcelError::new_num());

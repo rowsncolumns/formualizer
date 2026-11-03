@@ -1,8 +1,8 @@
 use crate::{
-    CellRef,
     broadcast::{broadcast_shape, project_index},
     coercion,
     traits::{ArgumentHandle, DefaultFunctionContext, EvaluationContext},
+    CellRef,
 };
 use formualizer_common::{ExcelError, ExcelErrorKind, LiteralValue};
 use formualizer_parse::parser::{ASTNode, ASTNodeType, ReferenceType};
@@ -1587,13 +1587,24 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Excel's lenient text→number coercion for operators: locale-aware numeric text and
-    /// date/time text, with year-less dates (`"1/2"`) taken in the evaluation clock's year.
+    /// date/time text, with year-less dates (`"1/2"`) taken in the evaluation clock's year. Date
+    /// text lands on the workbook's date system: in a 1904 workbook `"1/1/2024"+0` is 43830, and a
+    /// date before 1904-01-01 has no serial there (`#VALUE!`, as Excel returns).
     pub(crate) fn lenient_number(&self, v: &LiteralValue) -> Result<f64, ExcelError> {
-        crate::coercion::to_number_lenient_with_clock(
-            v,
-            &self.context.locale(),
-            self.context.clock(),
-        )
+        let locale = self.context.locale();
+        let n = crate::coercion::to_number_lenient_with_clock(v, &locale, self.context.clock())?;
+        match (v, self.context.date_system()) {
+            (LiteralValue::Text(s), crate::engine::DateSystem::Excel1904)
+                if n >= 1.0 && locale.parse_number_invariant(s).is_none() =>
+            {
+                let serial = n - crate::builtins::datetime::EXCEL_1904_OFFSET_DAYS;
+                if serial < 0.0 {
+                    return Err(ExcelError::new_value());
+                }
+                Ok(serial)
+            }
+            _ => Ok(n),
+        }
     }
 
     fn apply_number_unary<F>(&self, v: LiteralValue, f: F) -> Result<LiteralValue, ExcelError>
@@ -1800,7 +1811,7 @@ impl<'a> Interpreter<'a> {
             }
         };
         let mut eval_args = Vec::with_capacity(args.len());
-        for arg in args {
+        for arg in without_trailing_omitted(args) {
             eval_args.push(self.evaluate_ast(arg)?.into_literal());
         }
         callable.invoke(self, &eval_args)
@@ -1912,7 +1923,7 @@ impl<'a> Interpreter<'a> {
             .or_else(|| self.resolve_named_callable(name))
         {
             let mut eval_args = Vec::with_capacity(args.len());
-            for arg in args {
+            for arg in without_trailing_omitted(args) {
                 eval_args.push(self.evaluate_ast(arg)?.into_literal());
             }
             return callable.invoke(self, &eval_args);
@@ -2430,4 +2441,17 @@ fn shift_axis_for_offset(value: u32, delta: i64, is_absolute: bool) -> Result<u3
 fn unsupported_reference_relocation_error() -> ExcelError {
     ExcelError::new(ExcelErrorKind::Ref)
         .with_message("Unsupported reference relocation for FormulaPlane span evaluation")
+}
+
+/// A LAMBDA call's arguments without its trailing omitted ones (`LAMBDA(x,y,…)(1,)`, `MyFn(1,)` —
+/// the parser writes an empty literal for each skipped slot, and no expression evaluates to one).
+/// They are not passed, so the callable binds those parameters as omitted and `ISOMITTED`
+/// reports them, as Excel does.
+fn without_trailing_omitted(args: &[ASTNode]) -> &[ASTNode] {
+    let omitted = args
+        .iter()
+        .rev()
+        .take_while(|a| matches!(a.node_type, ASTNodeType::Literal(LiteralValue::Empty)))
+        .count();
+    &args[..args.len() - omitted]
 }

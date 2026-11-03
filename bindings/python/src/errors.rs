@@ -333,9 +333,12 @@ impl PyExcelError {
             ExcelErrorKind::Cancelled => "#CANCELLED!".to_string(),
             ExcelErrorKind::Error => "#ERROR!".to_string(),
             ExcelErrorKind::NImpl => "#N/IMPL!".to_string(),
-            ExcelErrorKind::Connect => "#CONNECT!".to_string(),
-            ExcelErrorKind::Blocked => "#BLOCKED!".to_string(),
-            ExcelErrorKind::Field => "#FIELD!".to_string(),
+            kind @ (ExcelErrorKind::Field
+            | ExcelErrorKind::Blocked
+            | ExcelErrorKind::Connect
+            | ExcelErrorKind::Busy
+            | ExcelErrorKind::Unknown
+            | ExcelErrorKind::Python) => kind.to_string(),
         }
     }
 }

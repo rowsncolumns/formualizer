@@ -33,22 +33,19 @@ fn is_token_ender(c: u8) -> bool {
 // sorted longest-first defensively so future additions don't introduce
 // prefix-collision ambiguity.
 //
-// Modern (Excel 2018+) literals currently recognised here are limited to the
-// ones whose `ExcelErrorKind` already exists in `formualizer-common`:
-//   - `#SPILL!` (dynamic-array spill blocked)
-//   - `#CALC!`  (generic calc-engine error)
-//   - `#CONNECT!`, `#BLOCKED!`, `#FIELD!` (data-provider functions)
-// Other modern literals (`#UNKNOWN!`, `#EXTERNAL!`, `#BUSY!`, `#PYTHON!`) are
-// intentionally not recognised yet;
-// adding them requires a coordinated change in `ExcelErrorKind` and all
-// downstream exhaustive matches/bindings/serde/display.
+// Every Excel error literal is recognised, each with its own `ExcelErrorKind`:
+// the classic set, `#SPILL!` / `#CALC!`, and the data-type / connection / Python
+// literals `#FIELD!`, `#BLOCKED!`, `#CONNECT!`, `#UNKNOWN!`, `#BUSY!`, `#PYTHON!`.
 //
 // `#GETTING_DATA` is kept for OOXML/legacy compatibility.
 static ERROR_CODES: &[&str] = &[
     "#GETTING_DATA",
     "#CONNECT!",
     "#BLOCKED!",
+    "#UNKNOWN!",
+    "#PYTHON!",
     "#FIELD!",
+    "#BUSY!",
     "#DIV/0!",
     "#VALUE!",
     "#SPILL!",
