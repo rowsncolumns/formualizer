@@ -863,6 +863,12 @@ pub struct EvalConfig {
     /// Excel's Manual calculation mode, as `INFO("recalc")` reports it. The host decides when to
     /// evaluate; the engine only reports the mode.
     pub manual_calculation: bool,
+
+    /// The workbook's locale (a BCP-47 tag such as `de-DE`) for the functions whose result Excel
+    /// derives from the regional settings — `TEXT`, `VALUE`, `DATEVALUE`, `NUMBERVALUE`, `DOLLAR`,
+    /// `FIXED`. `None` is the invariant (en-US) locale. The engine only carries it: the functions
+    /// that read it are host-registered ([`crate::traits::FunctionContext::locale_name`]).
+    pub locale_name: Option<std::sync::Arc<str>>,
 }
 
 impl Default for EvalConfig {
@@ -925,6 +931,7 @@ impl Default for EvalConfig {
             lookup_index_cache_max_bytes: 64 * 1024 * 1024,
             iterate_circular_on_every_recalc: true,
             manual_calculation: false,
+            locale_name: None,
         }
     }
 }

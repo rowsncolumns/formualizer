@@ -3763,6 +3763,12 @@ where
         self.config.manual_calculation = manual;
     }
 
+    /// The workbook locale locale-dependent functions read ([`EvalConfig::locale_name`]). Cells
+    /// already computed keep their values until they are next evaluated; the host recalculates.
+    pub fn set_locale_name(&mut self, locale: Option<std::sync::Arc<str>>) {
+        self.config.locale_name = locale;
+    }
+
     /// See [`EvalConfig::iterate_circular_on_every_recalc`].
     pub fn set_iterate_circular_on_every_recalc(&mut self, every_recalc: bool) {
         self.config.iterate_circular_on_every_recalc = every_recalc;
@@ -23143,6 +23149,10 @@ where
 
     fn manual_calculation(&self) -> bool {
         self.config.manual_calculation
+    }
+
+    fn locale_name(&self) -> Option<std::sync::Arc<str>> {
+        self.config.locale_name.clone()
     }
 
     fn workbook_sheet_count(&self) -> Option<usize> {
