@@ -458,6 +458,9 @@ impl<'a, R: EvaluationContext> EvaluationContext for RecordingContext<'a, R> {
     fn manual_calculation(&self) -> bool {
         self.engine.manual_calculation()
     }
+    fn locale_name(&self) -> Option<std::sync::Arc<str>> {
+        self.engine.locale_name()
+    }
     fn workbook_sheet_count(&self) -> Option<usize> {
         self.engine.workbook_sheet_count()
     }

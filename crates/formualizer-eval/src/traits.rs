@@ -5,8 +5,8 @@ pub use crate::function::Function;
 use crate::interpreter::Interpreter;
 use crate::reference::CellRef;
 use formualizer_common::{
-    error::{ExcelError, ExcelErrorKind},
     LiteralValue,
+    error::{ExcelError, ExcelErrorKind},
 };
 use std::any::Any;
 use std::borrow::Cow;
@@ -1589,6 +1589,12 @@ pub trait EvaluationContext: Resolver + FunctionProvider + SourceResolver {
         false
     }
 
+    /// The workbook locale (BCP-47, e.g. `de-DE`) for locale-dependent functions; `None` is the
+    /// invariant en-US locale. See [`crate::engine::EvalConfig::locale_name`].
+    fn locale_name(&self) -> Option<std::sync::Arc<str>> {
+        None
+    }
+
     /// Number of active sheets in the workbook, if known.
     fn workbook_sheet_count(&self) -> Option<usize> {
         None
@@ -1828,6 +1834,12 @@ pub trait FunctionContext<'ctx> {
         false
     }
 
+    /// The workbook locale (BCP-47, e.g. `de-DE`) the locale-dependent functions (`TEXT`, `VALUE`,
+    /// `DATEVALUE`, `NUMBERVALUE`, `DOLLAR`, `FIXED`) follow; `None` is the invariant en-US locale.
+    fn locale_name(&self) -> Option<std::sync::Arc<str>> {
+        None
+    }
+
     fn workbook_sheet_count(&self) -> Option<usize> {
         None
     }
@@ -1974,6 +1986,10 @@ impl<'a> FunctionContext<'a> for DefaultFunctionContext<'a> {
 
     fn manual_calculation(&self) -> bool {
         self.base.manual_calculation()
+    }
+
+    fn locale_name(&self) -> Option<std::sync::Arc<str>> {
+        self.base.locale_name()
     }
 
     fn workbook_sheet_count(&self) -> Option<usize> {
