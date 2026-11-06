@@ -38,7 +38,11 @@ fn take_whole_column_returns_single_cell_without_materializing() {
         .unwrap();
 
     engine.evaluate_all().unwrap();
-    assert_eq!(engine.get_cell_value("Sheet1", 1, 3), None);
+    // The single blank cell is the formula's result: the cell holds 0, as in Excel.
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 1, 3),
+        Some(LiteralValue::Number(0.0))
+    );
 }
 
 #[test]
@@ -53,5 +57,9 @@ fn drop_whole_column_can_return_last_cell_without_materializing() {
         .unwrap();
 
     engine.evaluate_all().unwrap();
-    assert_eq!(engine.get_cell_value("Sheet1", 1, 3), None);
+    // The single blank cell is the formula's result: the cell holds 0, as in Excel.
+    assert_eq!(
+        engine.get_cell_value("Sheet1", 1, 3),
+        Some(LiteralValue::Number(0.0))
+    );
 }

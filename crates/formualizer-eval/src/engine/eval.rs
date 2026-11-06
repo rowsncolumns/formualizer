@@ -17251,7 +17251,7 @@ where
         // If array result, perform spill from the anchor cell
         match result {
             Ok(cv) => {
-                let result_literal = empty_array_as_calc_error(cv.into_literal());
+                let result_literal = published_formula_result(cv.into_literal());
                 match result_literal {
                     LiteralValue::Array(rows) => {
                         // Update kind to FormulaArray for tracking
@@ -21737,7 +21737,7 @@ where
         // Only formula vertices spill dynamic arrays into the grid.
         let is_formula = matches!(kind, VertexKind::FormulaScalar | VertexKind::FormulaArray);
         if is_formula {
-            match empty_array_as_calc_error(result) {
+            match published_formula_result(result) {
                 LiteralValue::Array(rows) => {
                     self.apply_array_result_from_parallel(
                         vertex_id,
@@ -25147,7 +25147,7 @@ where
             }]);
         }
 
-        match empty_array_as_calc_error(computed_value) {
+        match published_formula_result(computed_value) {
             LiteralValue::Array(rows) => self.plan_array_effects(vertex_id, rows),
             other => self.plan_scalar_effects(vertex_id, other),
         }
@@ -26508,16 +26508,27 @@ where
     }
 }
 
-/// Excel has no zero-sized array: a formula whose result has no rows or no columns shows `#CALC!`
-/// (an "empty array" calc error). Normalising here — the one place every array result passes
-/// through before spill planning — keeps a `0×n` / `n×0` shape out of the spill machinery, whose
-/// inverted `anchor..=anchor+0-1` rectangles trapped the engine
-/// (rowsncolumns/spreadsheet#939 G-01).
-fn empty_array_as_calc_error(value: LiteralValue) -> LiteralValue {
+/// The value a formula cell holds for the result its expression evaluated to — the one place every
+/// formula result (scalar or array, sequential, parallel or effects-planned) passes through before
+/// it is published to the grid.
+///
+/// - Excel has no zero-sized array: a result with no rows or no columns shows `#CALC!` (an "empty
+///   array" calc error). Normalising here keeps a `0×n` / `n×0` shape out of the spill machinery,
+///   whose inverted `anchor..=anchor+0-1` rectangles trapped the engine
+///   (rowsncolumns/spreadsheet#939 G-01).
+/// - A formula cell never holds a blank scalar result: Excel dereferences a final reference to an
+///   empty cell (`=Z2`, `=XLOOKUP(…)` landing on an empty cell, `=IF(TRUE,Z2)`, a missing `IF`
+///   value argument) to the number 0. So the cell is not blank — `ISBLANK` of it is FALSE and
+///   references to it read 0. A direct reference to the empty cell INSIDE a formula is untouched
+///   (`=Z2=""`, `=ISBLANK(Z2)` stay TRUE), as is an explicit `=""`, which is text. Array elements
+///   are left as they are: a blank a function builds into its result (GROUPBY / PIVOTBY subtotal
+///   labels) stays blank in Excel, and the array cannot yet tell those from dereferenced blanks.
+fn published_formula_result(value: LiteralValue) -> LiteralValue {
     match value {
         LiteralValue::Array(rows) if rows.is_empty() || rows.iter().any(|r| r.is_empty()) => {
             LiteralValue::Error(ExcelError::new(ExcelErrorKind::Calc).with_message("Empty array"))
         }
+        LiteralValue::Empty => LiteralValue::Number(0.0),
         other => other,
     }
 }

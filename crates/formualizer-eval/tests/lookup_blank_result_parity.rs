@@ -41,7 +41,7 @@ fn seeded() -> Engine<TestWorkbook> {
     e
 }
 
-/// Evaluate `formula` in K1 and read K1 back; a blank result reads back as `Empty`.
+/// Evaluate `formula` in K1 and read K1 back.
 fn eval(formula: &str) -> LiteralValue {
     let mut e = seeded();
     e.set_cell_formula("Sheet1", 1, 11, parse(formula).unwrap())
@@ -65,7 +65,8 @@ fn is_error(v: &LiteralValue, kind: ExcelErrorKind) -> bool {
 
 /// Every value context Excel coerces a blank lookup result in, for one lookup expression.
 fn assert_blank_result(lookup: &str) {
-    assert_eq!(eval(&format!("={lookup}")), LiteralValue::Empty, "{lookup}");
+    // The formula cell itself holds 0 — Excel never leaves a formula cell blank.
+    assert_eq!(eval(&format!("={lookup}")), num(0.0), "{lookup}");
     assert_eq!(eval(&format!("={lookup}+0")), num(0.0), "{lookup}+0");
     assert_eq!(eval(&format!("={lookup}*2")), num(0.0), "{lookup}*2");
     assert_eq!(
