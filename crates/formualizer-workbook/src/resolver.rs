@@ -213,10 +213,10 @@ struct BackendTable {
 
 impl BackendTable {
     fn col_index(&self, header: &str) -> Option<usize> {
-        let header_key = header.to_lowercase();
+        let header_key = formualizer_eval::structured::table_column_key(header);
         self.headers
             .iter()
-            .position(|h| h.to_lowercase() == header_key)
+            .position(|h| formualizer_eval::structured::table_column_key(h) == header_key)
     }
 
     fn body_bounds(&self) -> (usize, usize) {

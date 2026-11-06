@@ -26,10 +26,10 @@ impl TableEntry {
     }
 
     pub fn col_index(&self, header: &str) -> Option<usize> {
-        let header_key = header.to_lowercase();
+        let header_key = crate::structured::table_column_key(header);
         self.headers
             .iter()
-            .position(|h| h.to_lowercase() == header_key)
+            .position(|h| crate::structured::table_column_key(h) == header_key)
     }
 }
 

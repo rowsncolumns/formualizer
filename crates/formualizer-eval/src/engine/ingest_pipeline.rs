@@ -69,10 +69,10 @@ impl TableEntrySnapshot {
     }
 
     fn col_index(&self, header: &str) -> Option<usize> {
-        let header_key = header.to_lowercase();
+        let header_key = crate::structured::table_column_key(header);
         self.headers
             .iter()
-            .position(|h| h.to_lowercase() == header_key)
+            .position(|h| crate::structured::table_column_key(h) == header_key)
     }
 }
 
@@ -803,8 +803,12 @@ impl<'a> IngestPipeline<'a> {
             {
                 if let Some(table) = self.tables.find_containing_cell(cell) {
                     if table.sheet_id() == cell.sheet_id {
-                        let column = tref.name.to_lowercase();
-                        if table.headers.iter().any(|h| h.to_lowercase() == column) {
+                        let column = crate::structured::table_column_key(&tref.name);
+                        if table
+                            .headers
+                            .iter()
+                            .any(|h| crate::structured::table_column_key(h) == column)
+                        {
                             *tref = TableReference {
                                 name: table.name.clone(),
                                 specifier: Some(TableSpecifier::Column(std::mem::take(
