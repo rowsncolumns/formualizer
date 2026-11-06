@@ -67,7 +67,8 @@ fn iferror_text_and_number_passthrough() {
 
 #[test]
 fn iferror_blank_value_arg_passes_through_as_empty() {
-    // A1 is blank; IFERROR(A1, 42) yields the blank (Empty), not the fallback.
+    // A1 is blank; IFERROR(A1, 42) yields the blank, not the fallback — and the cell holds it as
+    // 0, as Excel shows.
     let wb = TestWorkbook::new();
     let mut engine = Engine::new(wb, EvalConfig::default());
     engine
@@ -79,11 +80,12 @@ fn iferror_blank_value_arg_passes_through_as_empty() {
     engine.evaluate_all().unwrap();
     let v = engine.get_cell_value("Sheet1", 1, 2);
     let v2 = engine.get_cell_value("Sheet1", 2, 2);
-    // Blank arg0 is not an error: it passes through as Empty (engine stores
-    // an Empty result as an empty cell), NOT as the fallback.
-    assert!(
-        matches!(v, None | Some(LiteralValue::Empty)),
-        "blank passthrough changed: {v:?}"
+    // Blank arg0 is not an error: it passes through (a blank formula result
+    // is 0), NOT as the fallback.
+    assert_eq!(
+        v,
+        Some(LiteralValue::Number(0.0)),
+        "blank passthrough changed"
     );
     assert_eq!(v, v2, "IFERROR and IFNA must agree on blank passthrough");
 }

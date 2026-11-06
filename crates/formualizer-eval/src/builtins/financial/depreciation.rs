@@ -8,7 +8,7 @@ use chrono::NaiveDate;
 use formualizer_common::{ExcelError, LiteralValue};
 use formualizer_macros::func_caps;
 
-use super::bonds::{year_fraction, DayCountBasis};
+use super::bonds::{DayCountBasis, year_fraction};
 
 fn coerce_num(arg: &ArgumentHandle) -> Result<f64, ExcelError> {
     let v = arg.value()?.into_literal();

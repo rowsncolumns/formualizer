@@ -1559,7 +1559,10 @@ mod tests {
 
         assert_eq!(
             cell_values(&buffer),
-            vec![(0, 0, OverlayValue::Number(0.0)), (1, 0, OverlayValue::Number(0.0))]
+            vec![
+                (0, 0, OverlayValue::Number(0.0)),
+                (1, 0, OverlayValue::Number(0.0))
+            ]
         );
     }
 

@@ -65,23 +65,3 @@ fn blank_reads_inside_a_formula_and_empty_text_are_unchanged() {
     assert_eq!(at(&e, 3), Some(LiteralValue::Text(String::new())));
     assert_eq!(at(&e, 4), Some(LiteralValue::Boolean(false)));
 }
-
-#[test]
-fn spilled_blank_elements_hold_zero() {
-    let mut engine = Engine::new(TestWorkbook::new(), EvalConfig::default());
-    engine
-        .set_cell_value("Sheet1", 1, 26, LiteralValue::Text("a".into()))
-        .unwrap();
-    engine
-        .set_cell_value("Sheet1", 3, 26, LiteralValue::Text("c".into()))
-        .unwrap();
-    engine
-        .set_cell_formula("Sheet1", 1, 1, parse("=Z1:Z3").unwrap())
-        .unwrap();
-    engine.evaluate_all().unwrap();
-    assert_eq!(
-        engine.get_cell_value("Sheet1", 2, 1),
-        Some(LiteralValue::Number(0.0)),
-        "a spilled empty reference shows 0"
-    );
-}

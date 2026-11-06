@@ -26516,24 +26516,17 @@ where
 ///   array" calc error). Normalising here keeps a `0×n` / `n×0` shape out of the spill machinery,
 ///   whose inverted `anchor..=anchor+0-1` rectangles trapped the engine
 ///   (rowsncolumns/spreadsheet#939 G-01).
-/// - A cell never holds a blank as a formula's result: Excel dereferences a final reference to an
+/// - A formula cell never holds a blank scalar result: Excel dereferences a final reference to an
 ///   empty cell (`=Z2`, `=XLOOKUP(…)` landing on an empty cell, `=IF(TRUE,Z2)`, a missing `IF`
-///   value argument) to the number 0, and a spilled array shows 0 for each empty element. So a
-///   formula cell is never blank — `ISBLANK` of it is FALSE and references to it read 0. A direct
-///   reference to the empty cell INSIDE a formula is untouched (`=Z2=""`, `=ISBLANK(Z2)` stay
-///   TRUE), as is an explicit `=""`, which is text.
+///   value argument) to the number 0. So the cell is not blank — `ISBLANK` of it is FALSE and
+///   references to it read 0. A direct reference to the empty cell INSIDE a formula is untouched
+///   (`=Z2=""`, `=ISBLANK(Z2)` stay TRUE), as is an explicit `=""`, which is text. Array elements
+///   are left as they are: a blank a function builds into its result (GROUPBY / PIVOTBY subtotal
+///   labels) stays blank in Excel, and the array cannot yet tell those from dereferenced blanks.
 fn published_formula_result(value: LiteralValue) -> LiteralValue {
     match value {
         LiteralValue::Array(rows) if rows.is_empty() || rows.iter().any(|r| r.is_empty()) => {
             LiteralValue::Error(ExcelError::new(ExcelErrorKind::Calc).with_message("Empty array"))
-        }
-        LiteralValue::Array(mut rows) => {
-            for v in rows.iter_mut().flatten() {
-                if matches!(v, LiteralValue::Empty) {
-                    *v = LiteralValue::Number(0.0);
-                }
-            }
-            LiteralValue::Array(rows)
         }
         LiteralValue::Empty => LiteralValue::Number(0.0),
         other => other,
