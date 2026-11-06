@@ -1095,6 +1095,9 @@ fn validate_relocatable_compact_reference(reference: &CompactRefType) -> Result<
     }
 }
 
+/// A span formula's result as the overlay value its cell holds. Like the graph's
+/// `published_formula_result`, a blank result (a final reference to an empty cell) is the number 0:
+/// Excel never leaves a formula cell blank.
 fn literal_to_overlay(value: LiteralValue) -> OverlayValue {
     match value {
         LiteralValue::Int(i) => OverlayValue::Number(i as f64),
@@ -1115,7 +1118,7 @@ fn literal_to_overlay(value: LiteralValue) -> OverlayValue {
             .as_serial_number()
             .map(OverlayValue::Duration)
             .unwrap_or(OverlayValue::Empty),
-        LiteralValue::Empty => OverlayValue::Empty,
+        LiteralValue::Empty => OverlayValue::Number(0.0),
         LiteralValue::Pending => OverlayValue::Pending,
         LiteralValue::Error(err) => OverlayValue::Error(map_error_code(err.kind)),
     }
@@ -1517,7 +1520,7 @@ mod tests {
     }
 
     #[test]
-    fn span_eval_preserves_explicit_empty_outputs() {
+    fn span_eval_blank_outputs_hold_zero() {
         let mut plane = FormulaPlane::default();
         let mut data_store = DataStore::new();
         let sheet_registry = SheetRegistry::new();
@@ -1556,7 +1559,7 @@ mod tests {
 
         assert_eq!(
             cell_values(&buffer),
-            vec![(0, 0, OverlayValue::Empty), (1, 0, OverlayValue::Empty)]
+            vec![(0, 0, OverlayValue::Number(0.0)), (1, 0, OverlayValue::Number(0.0))]
         );
     }
 
