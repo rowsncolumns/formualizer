@@ -20,13 +20,8 @@ fn seeded() -> Engine<TestWorkbook> {
     let c = [5.0, 3.0, 5.0, 1.0, 2.0];
     for (i, fruit) in fruits.iter().enumerate() {
         let row = (i + 1) as u32;
-        e.set_cell_value(
-            "Sheet1",
-            row,
-            1,
-            LiteralValue::Number(((i + 1) * 10) as f64),
-        )
-        .unwrap();
+        e.set_cell_value("Sheet1", row, 1, LiteralValue::Number(((i + 1) * 10) as f64))
+            .unwrap();
         e.set_cell_value("Sheet1", row, 2, LiteralValue::Text((*fruit).into()))
             .unwrap();
         e.set_cell_value("Sheet1", row, 3, LiteralValue::Number(c[i]))
@@ -34,13 +29,8 @@ fn seeded() -> Engine<TestWorkbook> {
     }
     for (r, row) in [[1.0, 4.0], [2.0, 5.0]].iter().enumerate() {
         for (k, v) in row.iter().enumerate() {
-            e.set_cell_value(
-                "Sheet1",
-                (r + 1) as u32,
-                (6 + k) as u32,
-                LiteralValue::Number(*v),
-            )
-            .unwrap();
+            e.set_cell_value("Sheet1", (r + 1) as u32, (6 + k) as u32, LiteralValue::Number(*v))
+                .unwrap();
         }
     }
     // Table "Sales" at M1:N3 — header row + 2 data rows, NO totals row.
@@ -109,10 +99,7 @@ fn as_number(v: &LiteralValue) -> Option<f64> {
 fn assert_num(formula: &str, expected: f64) {
     let v = eval_one(formula);
     let got = as_number(&v).unwrap_or_else(|| panic!("{formula}: expected number, got {v:?}"));
-    assert!(
-        (got - expected).abs() < 1e-9,
-        "{formula}: expected {expected}, got {got}"
-    );
+    assert!((got - expected).abs() < 1e-9, "{formula}: expected {expected}, got {got}");
 }
 
 fn assert_err(formula: &str, kind: ExcelErrorKind) {
@@ -214,10 +201,7 @@ fn xlookup_return_array_must_match_lookup_length() {
     // Horizontal lookup with a matching width.
     assert_num("=XLOOKUP(4,F1:G1,F2:G2)", 5.0);
     // Array-literal arguments are sized by their values.
-    assert_eq!(
-        eval_one("=XLOOKUP(2,{1,2,3},{\"x\",\"y\",\"z\"})"),
-        text("y")
-    );
+    assert_eq!(eval_one("=XLOOKUP(2,{1,2,3},{\"x\",\"y\",\"z\"})"), text("y"));
     assert_err("=XLOOKUP(2,{1,2,3},{\"x\",\"y\"})", ExcelErrorKind::Value);
 }
 
@@ -252,20 +236,11 @@ fn choose_array_index_lifts_range_choices() {
     // A range choice contributes its cells, column-stacked against the index — the
     // `VLOOKUP(v,CHOOSE({1,2},B:B,A:A),2,0)` "lookup left" idiom.
     assert_num("=SUM(CHOOSE({1,2},A1:A5,C1:C5))", 166.0);
-    assert_num(
-        "=VLOOKUP(\"banana\",CHOOSE({1,2},B1:B5,A1:A5),2,FALSE)",
-        20.0,
-    );
+    assert_num("=VLOOKUP(\"banana\",CHOOSE({1,2},B1:B5,A1:A5),2,FALSE)", 20.0);
     let g = eval_grid("=CHOOSE({1,2},A1:A5,C1:C5)", 5, 2);
-    for (i, (a, c)) in [
-        (10.0, 5.0),
-        (20.0, 3.0),
-        (30.0, 5.0),
-        (40.0, 1.0),
-        (50.0, 2.0),
-    ]
-    .iter()
-    .enumerate()
+    for (i, (a, c)) in [(10.0, 5.0), (20.0, 3.0), (30.0, 5.0), (40.0, 1.0), (50.0, 2.0)]
+        .iter()
+        .enumerate()
     {
         assert_eq!(g[i][0], Some(num(*a)), "row {i} col 1");
         assert_eq!(g[i][1], Some(num(*c)), "row {i} col 2");
@@ -332,9 +307,7 @@ fn bare_this_row_reference_outside_any_table_is_name_error() {
         Err(err) => assert_eq!(err.kind, ExcelErrorKind::Name, "ingest rejects with #NAME?"),
         Ok(()) => {
             e.evaluate_all().unwrap();
-            let v = e
-                .get_cell_value("Sheet1", 10, 11)
-                .unwrap_or(LiteralValue::Empty);
+            let v = e.get_cell_value("Sheet1", 10, 11).unwrap_or(LiteralValue::Empty);
             assert!(
                 matches!(&v, LiteralValue::Error(er) if er.kind == ExcelErrorKind::Name),
                 "installed formula must evaluate to #NAME?, got {v:?}"
@@ -347,9 +320,7 @@ fn bare_this_row_reference_outside_any_table_is_name_error() {
         Err(err) => assert_eq!(err.kind, ExcelErrorKind::Value),
         Ok(()) => {
             e.evaluate_all().unwrap();
-            let v = e
-                .get_cell_value("Sheet1", 10, 12)
-                .unwrap_or(LiteralValue::Empty);
+            let v = e.get_cell_value("Sheet1", 10, 12).unwrap_or(LiteralValue::Empty);
             assert!(
                 matches!(&v, LiteralValue::Error(er) if er.kind == ExcelErrorKind::Value),
                 "installed formula must evaluate to #VALUE!, got {v:?}"

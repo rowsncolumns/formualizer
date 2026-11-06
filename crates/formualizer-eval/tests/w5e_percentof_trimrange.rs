@@ -61,10 +61,7 @@ fn as_number(v: &LiteralValue) -> Option<f64> {
 fn assert_num(formula: &str, expected: f64) {
     let v = eval_one(formula);
     let got = as_number(&v).unwrap_or_else(|| panic!("{formula}: expected number, got {v:?}"));
-    assert!(
-        (got - expected).abs() < 1e-9,
-        "{formula}: expected {expected}, got {got}"
-    );
+    assert!((got - expected).abs() < 1e-9, "{formula}: expected {expected}, got {got}");
 }
 
 fn assert_err(formula: &str, kind: ExcelErrorKind) {
