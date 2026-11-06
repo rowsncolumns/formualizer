@@ -52,11 +52,23 @@ impl TableGeometry {
     }
 
     pub fn col_index(&self, name: &str) -> Option<u32> {
-        let key = name.to_lowercase();
+        let key = table_column_key(name);
         self.columns
             .iter()
-            .position(|c| c.to_lowercase() == key)
+            .position(|c| table_column_key(c) == key)
             .map(|i| i as u32)
+    }
+}
+
+/// The key a table column name is matched by. Excel matches column names case-insensitively, and a
+/// name may hold a line break (Alt+Enter in the header cell): the header cell's text, the table
+/// part's `<tableColumn name>` and the formula text can carry it as CR LF or LF, which name the
+/// same column — so CR LF folds to LF before the case fold.
+pub fn table_column_key(name: &str) -> String {
+    if name.contains('\r') {
+        name.replace("\r\n", "\n").to_lowercase()
+    } else {
+        name.to_lowercase()
     }
 }
 

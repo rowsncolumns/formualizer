@@ -2509,8 +2509,12 @@ impl DependencyGraph {
             {
                 if let Some(table) = self.find_table_containing_cell(cell) {
                     if table.sheet_id() == cell.sheet_id {
-                        let column = tref.name.to_lowercase();
-                        if table.headers.iter().any(|h| h.to_lowercase() == column) {
+                        let column = crate::structured::table_column_key(&tref.name);
+                        if table
+                            .headers
+                            .iter()
+                            .any(|h| crate::structured::table_column_key(h) == column)
+                        {
                             *tref = TableReference {
                                 name: table.name.clone(),
                                 specifier: Some(TableSpecifier::Column(std::mem::take(

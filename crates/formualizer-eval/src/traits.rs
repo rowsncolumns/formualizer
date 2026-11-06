@@ -1352,10 +1352,14 @@ pub trait Resolver: ReferenceResolver + RangeResolver + NamedRangeResolver + Tab
                     Some(TableSpecifier::ColumnRange(start, end)) => {
                         // Build a rectangular range from start..=end columns in table order
                         let cols = t.columns();
-                        let start_key = start.to_lowercase();
-                        let end_key = end.to_lowercase();
-                        let start_idx = cols.iter().position(|n| n.to_lowercase() == start_key);
-                        let end_idx = cols.iter().position(|n| n.to_lowercase() == end_key);
+                        let start_key = crate::structured::table_column_key(start);
+                        let end_key = crate::structured::table_column_key(end);
+                        let start_idx = cols
+                            .iter()
+                            .position(|n| crate::structured::table_column_key(n) == start_key);
+                        let end_idx = cols
+                            .iter()
+                            .position(|n| crate::structured::table_column_key(n) == end_key);
                         if let (Some(mut si), Some(mut ei)) = (start_idx, end_idx) {
                             if si > ei {
                                 std::mem::swap(&mut si, &mut ei);
