@@ -4309,6 +4309,26 @@ where
         Ok(())
     }
 
+    /// Give a defined table a new range, header/totals flags and column names in place, as a row
+    /// or column inserted inside it, a resize, or a totals row toggled does. Formulas reading the
+    /// table keep their vertex: `Table[Col]` resolves through the table at evaluation, so they are
+    /// dirtied and re-evaluate over the new range. A host had to rebuild the whole engine to
+    /// redefine a table (`define_table` refuses an existing name).
+    pub fn update_table(
+        &mut self,
+        name: &str,
+        range: crate::reference::RangeRef,
+        header_row: bool,
+        headers: Vec<String>,
+        totals_row: bool,
+    ) -> Result<(), ExcelError> {
+        self.graph
+            .update_table(name, range, header_row, headers, totals_row)?;
+        self.record_formula_plane_structural_change(StructuralScope::AllSheets);
+        self.mark_topology_edited();
+        Ok(())
+    }
+
     pub fn define_source_scalar(
         &mut self,
         name: &str,

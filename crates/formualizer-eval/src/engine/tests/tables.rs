@@ -746,3 +746,57 @@ fn unqualified_column_and_item_specifiers_resolve_against_the_containing_table()
     assert_eq!(value(&engine, 5, 2), Some(LiteralValue::Number(16.0)));
     assert_eq!(value(&engine, 1, 10), Some(LiteralValue::Number(16.0)));
 }
+
+#[test]
+fn update_table_grows_a_table_in_place_and_its_readers_follow() {
+    let ctx = crate::test_workbook::TestWorkbook::new();
+    let mut engine: Engine<_> = Engine::new(ctx, EvalConfig::default());
+    engine.add_sheet("Sheet1").unwrap();
+    for (row, amount) in [(2, 10.0), (3, 20.0), (4, 40.0)] {
+        engine
+            .set_cell_value("Sheet1", row, 2, LiteralValue::Number(amount))
+            .unwrap();
+    }
+    let sheet_id = engine.sheet_id("Sheet1").unwrap();
+    let range = |last_row: u32| {
+        RangeRef::new(
+            CellRef::new(sheet_id, Coord::from_excel(1, 1, true, true)),
+            CellRef::new(sheet_id, Coord::from_excel(last_row, 2, true, true)),
+        )
+    };
+    let headers = || vec!["Region".to_string(), "Amount".to_string()];
+    engine
+        .define_table("Sales", range(3), true, headers(), false)
+        .unwrap();
+    let ast = formualizer_parse::parser::parse("=SUM(Sales[Amount])").unwrap();
+    engine.set_cell_formula("Sheet1", 1, 4, ast).unwrap();
+    let total = |engine: &mut Engine<_>| engine.evaluate_cell("Sheet1", 1, 4).unwrap();
+    assert_eq!(total(&mut engine), Some(LiteralValue::Number(30.0)));
+
+    // A row taken into the table (a row inserted inside it, or the table resized) is read.
+    engine
+        .update_table("Sales", range(4), true, headers(), false)
+        .unwrap();
+    assert_eq!(total(&mut engine), Some(LiteralValue::Number(70.0)));
+    assert_eq!(engine.table_metadata("Sales").map(|t| t.end_row), Some(4));
+
+    // The table's range dependencies moved with it: an edit in the new row propagates.
+    engine
+        .set_cell_value("Sheet1", 4, 2, LiteralValue::Number(50.0))
+        .unwrap();
+    assert_eq!(total(&mut engine), Some(LiteralValue::Number(80.0)));
+
+    // And shrinking it back drops the row again.
+    engine
+        .update_table("Sales", range(3), true, headers(), false)
+        .unwrap();
+    assert_eq!(total(&mut engine), Some(LiteralValue::Number(30.0)));
+
+    // An unknown table is refused, not created.
+    assert!(
+        engine
+            .update_table("Missing", range(3), true, headers(), false)
+            .is_err()
+    );
+    assert!(engine.table_metadata("Missing").is_none());
+}
