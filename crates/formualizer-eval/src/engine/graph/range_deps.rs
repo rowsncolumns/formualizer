@@ -33,6 +33,55 @@ impl DependencyGraph {
         &self.stripe_to_dependents
     }
 
+    /// True when the formula at `anchor` reads one of `cells` other than its own: through a cell
+    /// edge, or through a range it references (open-ended bounds cover the whole axis). A spill
+    /// onto such a cell would rewrite the formula's own input, so the result is a circular
+    /// reference (rowsncolumns/spreadsheet#1530).
+    pub(crate) fn formula_reads_any_cell_of(&self, anchor: VertexId, cells: &[CellRef]) -> bool {
+        let anchor_sheet = self.store.sheet_id(anchor);
+        let anchor_coord = self.store.coord(anchor);
+        let others = || {
+            cells.iter().filter(move |c| {
+                !(c.sheet_id == anchor_sheet
+                    && c.coord.row() == anchor_coord.row()
+                    && c.coord.col() == anchor_coord.col())
+            })
+        };
+        for dep in self.get_dependencies(anchor) {
+            if dep == anchor {
+                continue;
+            }
+            let (sheet, coord) = (self.store.sheet_id(dep), self.store.coord(dep));
+            if others().any(|c| {
+                c.sheet_id == sheet && c.coord.row() == coord.row() && c.coord.col() == coord.col()
+            }) {
+                return true;
+            }
+        }
+        let Some(ranges) = self.formula_to_range_deps.get(&anchor) else {
+            return false;
+        };
+        ranges.iter().any(|range| {
+            let sheet_id = match range.sheet {
+                SharedSheetLocator::Id(id) => id,
+                SharedSheetLocator::Current => anchor_sheet,
+                SharedSheetLocator::Name(_) => return false,
+            };
+            let s_row = range.start_row.map(|b| b.index);
+            let e_row = range.end_row.map(|b| b.index);
+            let s_col = range.start_col.map(|b| b.index);
+            let e_col = range.end_col.map(|b| b.index);
+            others().any(|c| {
+                let (r0, c0) = (c.coord.row(), c.coord.col());
+                c.sheet_id == sheet_id
+                    && s_row.is_none_or(|s| r0 >= s)
+                    && e_row.is_none_or(|e| r0 <= e)
+                    && s_col.is_none_or(|s| c0 >= s)
+                    && e_col.is_none_or(|e| c0 <= e)
+            })
+        })
+    }
+
     /// True when a (possibly open-ended) range region on `sheet_id` covers
     /// the formula vertex's own cell. Used to record a self-loop for
     /// stripe-compressed / whole-axis self-inclusion (#120): such references
