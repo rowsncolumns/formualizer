@@ -17442,7 +17442,7 @@ where
                                             );
                                         }
                                     }
-                                    let err_val = LiteralValue::Error(e.clone());
+                                    let err_val = self.spill_commit_error_value(&e);
                                     self.graph.update_vertex_value(vertex_id, err_val.clone());
                                     if self.config.arrow_storage_enabled
                                         && self.config.delta_overlay_enabled
@@ -21971,7 +21971,7 @@ where
                     preempted_spills,
                 ) {
                     self.clear_spill_projection_and_mirror(vertex_id, delta.as_deref_mut());
-                    let err_val = LiteralValue::Error(e.clone());
+                    let err_val = self.spill_commit_error_value(&e);
                     if let Some(d) = delta.as_deref_mut()
                         && d.mode != DeltaMode::Off
                     {
@@ -24984,6 +24984,52 @@ where
         }
     }
 
+    /// The anchor's value when its spill commit fails: the error itself, except a spill onto the
+    /// formula's own inputs (`#CIRC!`), which takes the cycle policy's verdict like any other
+    /// circular cell (`0` under `CyclePolicy::Zero`).
+    fn spill_commit_error_value(&self, e: &ExcelError) -> LiteralValue {
+        if e.kind == ExcelErrorKind::Circ {
+            self.config.cycle.policy.cycle_stamp_value()
+        } else {
+            LiteralValue::Error(e.clone())
+        }
+    }
+
+    /// Whether a spill of `targets` would be placed: the graph's blocker plan passes and, with
+    /// Arrow-canonical values, no target outside the anchor's own spill holds a value — the same
+    /// tests `commit_array_with_value_probe` applies, without writing anything.
+    fn spill_could_be_placed(
+        &self,
+        anchor_vertex: VertexId,
+        targets: &[CellRef],
+        own_spill: &[CellRef],
+        preempted_spills: Option<&rustc_hash::FxHashSet<VertexId>>,
+    ) -> bool {
+        if self
+            .graph
+            .plan_spill_region_preempting(anchor_vertex, targets, preempted_spills)
+            .is_err()
+        {
+            return false;
+        }
+        if self.graph.value_cache_enabled() {
+            return true;
+        }
+        let anchor_cell = self.graph.get_cell_ref_for_vertex(anchor_vertex);
+        !targets.iter().any(|cell| {
+            if Some(*cell) == anchor_cell || own_spill.contains(cell) {
+                return false;
+            }
+            let sheet_name = self.graph.sheet_name(cell.sheet_id);
+            self.arrow_sheets.sheet(sheet_name).is_some_and(|asheet| {
+                !matches!(
+                    asheet.get_cell_value(cell.coord.row() as usize, cell.coord.col() as usize),
+                    LiteralValue::Empty
+                )
+            })
+        })
+    }
+
     /// Helper: commit spill via shim and mirror resulting cells into Arrow overlay when enabled.
     fn commit_spill_and_mirror(
         &mut self,
@@ -24998,6 +25044,29 @@ where
             .spill_cells_for_anchor(anchor_vertex)
             .map(|cells| cells.to_vec())
             .unwrap_or_default();
+
+        // A result that spills onto cells the formula reads is a circular reference, as in
+        // Excel (rowsncolumns/spreadsheet#1530): the spill would rewrite its own input, and
+        // every write would queue the formula again. Decided BEFORE anything is written, and
+        // only for a spill that could be placed — a blocked one stays `#SPILL!`. The callers
+        // clear any earlier spill on this error and the anchor takes `#CIRC!` (shown as 0,
+        // reported as a circular cell).
+        if self.graph.formula_reads_any_cell_of(anchor_vertex, targets)
+            && self.spill_could_be_placed(
+                anchor_vertex,
+                targets,
+                &prev_spill_cells,
+                preempted_spills,
+            )
+        {
+            if let Some(cell) = self.graph.get_cell_ref_for_vertex(anchor_vertex)
+                && !self.last_cycle_cells.contains(&cell)
+            {
+                self.last_cycle_cells.push(cell);
+            }
+            return Err(ExcelError::new(ExcelErrorKind::Circ)
+                .with_message("The result spills onto cells the formula reads"));
+        }
 
         if let Some(delta) = delta
             && delta.mode != DeltaMode::Off
@@ -25325,6 +25394,31 @@ where
                     }
                 }
 
+                // A placeable spill that lands on cells the formula reads is a circular
+                // reference (rowsncolumns/spreadsheet#1530): nothing spills, an earlier spill
+                // is cleared, and the anchor takes the cycle policy's verdict.
+                if self.graph.formula_reads_any_cell_of(vertex_id, &targets) {
+                    self.spill_mgr.release_owner(vertex_id);
+                    if !self.last_cycle_cells.contains(&anchor) {
+                        self.last_cycle_cells.push(anchor);
+                    }
+                    let mut effects = Vec::new();
+                    if self
+                        .graph
+                        .spill_cells_for_anchor(vertex_id)
+                        .is_some_and(|c| !c.is_empty())
+                    {
+                        effects.push(Effect::SpillClear {
+                            anchor_vertex: vertex_id,
+                        });
+                    }
+                    effects.push(Effect::WriteCell {
+                        vertex_id,
+                        value: self.config.cycle.policy.cycle_stamp_value(),
+                    });
+                    return Ok(effects);
+                }
+
                 let top_left = rows
                     .first()
                     .and_then(|r| r.first())
@@ -25632,13 +25726,32 @@ where
         };
 
         // Delegate to existing commit_spill_and_mirror for delta + overlay logic.
-        self.commit_spill_and_mirror(
+        let mut delta = delta;
+        match self.commit_spill_and_mirror(
             anchor_vertex,
             target_cells,
             values.clone(),
-            delta,
+            delta.as_deref_mut(),
             None, // preempted spills were cleared by their SpillPreempt effects before this commit
-        )?;
+        ) {
+            Ok(()) => {}
+            // A spill onto the formula's own inputs: tear the spill down and stamp the anchor
+            // circular, like any other cycle member (#1530).
+            Err(e) if e.kind == ExcelErrorKind::Circ => {
+                let circ = self.spill_commit_error_value(&e);
+                self.stamp_cycle_error(anchor_vertex, &circ, delta);
+                if let Some(log) = log
+                    && let Some(old) = old_snapshot
+                {
+                    log.record(ChangeEvent::SpillCleared {
+                        anchor: anchor_vertex,
+                        old,
+                    });
+                }
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
 
         // ChangeLog.
         if let Some(log) = log {
