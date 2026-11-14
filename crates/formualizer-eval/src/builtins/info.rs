@@ -2016,8 +2016,8 @@ fn date_format_code(tokens: &str) -> String {
 ///
 /// `format`, `color` and `parentheses` read the cell's number format from the host
 /// ([`EvaluationContext::cell_number_format`](crate::traits::EvaluationContext::cell_number_format);
-/// a host that keeps none answers General: `"G"`, 0, 0); `width` answers Excel's default column width `8`; `filename` is empty
-/// for an unsaved workbook. Unknown info types are `#VALUE!` like Excel.
+/// a host that keeps none answers General: `"G"`, 0, 0); `width` answers Excel's default column
+/// width `8`; `filename` is empty for an unsaved workbook. Unknown info types are `#VALUE!` like Excel.
 #[derive(Debug)]
 pub struct CellFn;
 
