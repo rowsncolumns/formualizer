@@ -1813,13 +1813,210 @@ fn sheet_prefix(sheet: &str) -> String {
     }
 }
 
+/// What `CELL("format" | "color" | "parentheses")` report for a number format code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CellFormatInfo {
+    /// Excel's format code: `G`, `F0`, `,2`, `C2`, `P0`, `S2`, `D1`…`D9`, with `-` appended when
+    /// negative numbers are coloured and `()` when positive numbers are in parentheses.
+    pub code: String,
+    /// Negative numbers are drawn in a colour (`CELL("color")` is 1).
+    pub color: bool,
+    /// Positive (or all) numbers are in parentheses (`CELL("parentheses")` is 1).
+    pub parentheses: bool,
+}
+
+/// One format section with quoted text, `\x` / `_x` / `*x` escapes and `[...]` brackets taken
+/// out, lower-cased: what is left are the format's own tokens.
+fn format_section_tokens(section: &str) -> String {
+    let mut out = String::new();
+    let mut chars = section.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                for q in chars.by_ref() {
+                    if q == '"' {
+                        break;
+                    }
+                }
+            }
+            '\\' | '_' | '*' => {
+                chars.next();
+            }
+            '[' => {
+                // `[$€-407]` / `[$USD]` is a currency; keep a `$` marker for it. Colours,
+                // conditions and elapsed-time brackets (`[h]`) keep their letter for the date test.
+                let mut inner = String::new();
+                for b in chars.by_ref() {
+                    if b == ']' {
+                        break;
+                    }
+                    inner.push(b);
+                }
+                let lower = inner.to_ascii_lowercase();
+                if let Some(rest) = lower.strip_prefix('$') {
+                    if !rest.is_empty() && !rest.starts_with('-') {
+                        out.push('$');
+                    }
+                } else if matches!(lower.as_str(), "h" | "hh" | "m" | "mm" | "s" | "ss") {
+                    out.push_str(&lower);
+                }
+            }
+            _ => out.extend(c.to_lowercase()),
+        }
+    }
+    out
+}
+
+/// Split a format code on its `;` section separators (outside quotes and brackets).
+fn format_sections(code: &str) -> Vec<&str> {
+    let mut sections = Vec::new();
+    let (mut start, mut in_quotes, mut in_brackets, mut escaped) = (0, false, false, false);
+    for (i, c) in code.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if !in_quotes => escaped = true,
+            '"' => in_quotes = !in_quotes,
+            '[' if !in_quotes => in_brackets = true,
+            ']' if !in_quotes => in_brackets = false,
+            ';' if !in_quotes && !in_brackets => {
+                sections.push(&code[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    sections.push(&code[start..]);
+    sections
+}
+
+/// Does a section name a colour (`[Red]`, `[Color10]`)?
+fn section_has_color(section: &str) -> bool {
+    const COLORS: [&str; 8] = [
+        "black", "blue", "cyan", "green", "magenta", "red", "white", "yellow",
+    ];
+    let lower = section.to_ascii_lowercase();
+    let mut rest = lower.as_str();
+    while let Some(open) = rest.find('[') {
+        let Some(close) = rest[open..].find(']') else {
+            break;
+        };
+        let inner = &rest[open + 1..open + close];
+        if COLORS.contains(&inner) || inner.starts_with("color") {
+            return true;
+        }
+        rest = &rest[open + close + 1..];
+    }
+    false
+}
+
+/// Excel's `CELL("format")` code for a number format, with its `color` / `parentheses` flags
+/// (support.microsoft.com "CELL function": `G`, `F0`, `,2`, `C2-`, `P0`, `S2`, `D1`…`D9`).
+/// `None` (no format) is General.
+pub(crate) fn cell_format_info(number_format: Option<&str>) -> CellFormatInfo {
+    let code = number_format.map(str::trim).unwrap_or("");
+    let sections = format_sections(code);
+    let first = sections.first().copied().unwrap_or("");
+    let tokens = format_section_tokens(first);
+    // A colour on the negative section (or, with one section, on that one) is the `-` suffix.
+    let color = match sections.len() {
+        0 => false,
+        1 => section_has_color(first),
+        _ => section_has_color(sections[1]),
+    };
+    let parentheses = tokens.contains('(') && tokens.contains(')');
+    let decimals = |tokens: &str| -> usize {
+        tokens
+            .split_once('.')
+            .map(|(_, after)| {
+                after
+                    .chars()
+                    .take_while(|c| matches!(c, '0' | '#' | '?' | ','))
+                    .filter(|c| matches!(c, '0' | '#' | '?'))
+                    .count()
+            })
+            .unwrap_or(0)
+            .min(15)
+    };
+    let has = |c: char| tokens.contains(c);
+    let base = if tokens.is_empty() || tokens == "general" || tokens.contains("general") {
+        "G".to_string()
+    } else if tokens.contains('@') && !has('0') && !has('#') {
+        // Text format: Excel answers `@`.
+        "@".to_string()
+    } else if has('y') || has('d') || has('h') || has('s') || (has('m') && !has('0') && !has('#')) {
+        date_format_code(&tokens)
+    } else if has('%') {
+        format!("P{}", decimals(&tokens))
+    } else if tokens.contains("e+") || tokens.contains("e-") {
+        format!("S{}", decimals(&tokens))
+    } else if tokens.contains('/') && tokens.contains('?') {
+        // Fractions report General.
+        "G".to_string()
+    } else if has('$')
+        || tokens
+            .chars()
+            .any(|c| matches!(c, '€' | '£' | '¥' | '₩' | '₹'))
+    {
+        format!("C{}", decimals(&tokens))
+    } else if has(',') {
+        format!(",{}", decimals(&tokens))
+    } else {
+        format!("F{}", decimals(&tokens))
+    };
+    let mut out = base;
+    if color {
+        out.push('-');
+    }
+    if parentheses {
+        out.push_str("()");
+    }
+    CellFormatInfo {
+        code: out,
+        color,
+        parentheses,
+    }
+}
+
+/// `D1`…`D9` for a date / time section's tokens (lower-cased, literals removed).
+fn date_format_code(tokens: &str) -> String {
+    let has_year = tokens.contains('y');
+    let has_day = tokens.contains('d');
+    let has_month_name = tokens.contains("mmm");
+    let has_hour = tokens.contains('h');
+    let has_seconds = tokens.contains('s');
+    let am_pm = tokens.contains("am/pm") || tokens.contains("a/p");
+    let date = has_year || has_day || has_month_name || (tokens.contains('m') && !has_hour);
+    let code = if date && has_month_name {
+        match (has_day, has_year) {
+            (true, true) => 1,
+            (true, false) => 2,
+            (false, _) => 3,
+        }
+    } else if date {
+        // Numeric dates: m/d/yy (with or without a time) is D4, a month and day alone D5.
+        if has_year || has_hour { 4 } else { 5 }
+    } else {
+        match (has_seconds, am_pm) {
+            (true, true) => 6,
+            (false, true) => 7,
+            (true, false) => 8,
+            (false, false) => 9,
+        }
+    };
+    format!("D{code}")
+}
+
 /// `CELL(info_type, [reference])` — Excel's cell-metadata function for the info types the engine can
 /// answer without host layout data: address, col, row, contents, type, prefix, protect, width,
 /// format, filename, color, parentheses. With no reference it reports on the formula's own cell
 /// (Excel uses the last-changed cell; the engine has no such notion).
 ///
-/// `format` needs the cell's number format, which the evaluation context does not expose, so it
-/// answers `"G"` (General); `width` answers Excel's default column width `8`; `filename` is empty
+/// `format`, `color` and `parentheses` read the cell's number format from the host
+/// ([`EvaluationContext::cell_number_format`](crate::traits::EvaluationContext::cell_number_format);
+/// a host that keeps none answers General: `"G"`, 0, 0); `width` answers Excel's default column width `8`; `filename` is empty
 /// for an unsaved workbook. Unknown info types are `#VALUE!` like Excel.
 #[derive(Debug)]
 pub struct CellFn;
@@ -1919,6 +2116,13 @@ impl Function for CellFn {
             }
         };
 
+        // The reported cell's number format (`format`, `color`, `parentheses`), from the host.
+        let number_format = if matches!(info_type.as_str(), "format" | "color" | "parentheses") {
+            ctx.cell_number_format(sheet.as_deref(), row, col)
+        } else {
+            None
+        };
+
         let result = match info_type.as_str() {
             "address" => {
                 let prefix = sheet.as_deref().map(sheet_prefix).unwrap_or_default();
@@ -1951,7 +2155,7 @@ impl Function for CellFn {
             ),
             "protect" => LiteralValue::Int(1),
             "width" => LiteralValue::Int(8),
-            "format" => LiteralValue::Text("G".to_string()),
+            "format" => LiteralValue::Text(cell_format_info(number_format.as_deref()).code),
             // `{directory}[{file}]{sheet}`, so `MID(CELL("filename"),FIND("]",…)+1,…)` yields the
             // sheet name; an unsaved workbook (no identity) is "" as in Excel.
             "filename" => match ctx.workbook_identity() {
@@ -1963,7 +2167,10 @@ impl Function for CellFn {
                 )),
                 _ => LiteralValue::Text(String::new()),
             },
-            "color" | "parentheses" => LiteralValue::Int(0),
+            "color" => LiteralValue::Int(cell_format_info(number_format.as_deref()).color as i64),
+            "parentheses" => {
+                LiteralValue::Int(cell_format_info(number_format.as_deref()).parentheses as i64)
+            }
             _ => return Ok(error_value(ExcelErrorKind::Value)),
         };
         Ok(scalar(result))
@@ -2314,5 +2521,87 @@ mod tests {
                 .into_literal(),
             LiteralValue::Text("abc".into())
         );
+    }
+
+    /// rowsncolumns/spreadsheet (demo-app-monorepo#57258 E-9): `CELL("format")` answers Excel's code
+    /// for the cell's number format (support.microsoft.com "CELL function").
+    #[test]
+    fn cell_format_codes_follow_excels_table() {
+        for (format, code) in [
+            (None, "G"),
+            (Some("General"), "G"),
+            (Some("0"), "F0"),
+            (Some("0.00"), "F2"),
+            (Some("#,##0"), ",0"),
+            (Some("#,##0.00"), ",2"),
+            (Some("$#,##0_);($#,##0)"), "C0"),
+            (Some("$#,##0_);[Red]($#,##0)"), "C0-"),
+            (Some("$#,##0.00_);($#,##0.00)"), "C2"),
+            (Some("$#,##0.00_);[Red]($#,##0.00)"), "C2-"),
+            (
+                Some("_($* #,##0.00_);_($* (#,##0.00);_($* \"-\"??_);_(@_)"),
+                "C2",
+            ),
+            (Some("[$€-407] #,##0.00"), "C2"),
+            (Some("0%"), "P0"),
+            (Some("0.00%"), "P2"),
+            (Some("0.00E+00"), "S2"),
+            (Some("# ?/?"), "G"),
+            (Some("# ??/??"), "G"),
+            (Some("m/d/yy"), "D4"),
+            (Some("m/d/yyyy"), "D4"),
+            (Some("m/d/yy h:mm"), "D4"),
+            (Some("mm/dd/yy"), "D4"),
+            (Some("d-mmm-yy"), "D1"),
+            (Some("dd-mmm-yy"), "D1"),
+            (Some("d-mmm"), "D2"),
+            (Some("dd-mmm"), "D2"),
+            (Some("mmm-yy"), "D3"),
+            (Some("mm/dd"), "D5"),
+            (Some("h:mm:ss AM/PM"), "D6"),
+            (Some("h:mm AM/PM"), "D7"),
+            (Some("h:mm:ss"), "D8"),
+            (Some("h:mm"), "D9"),
+            (Some("[h]:mm:ss"), "D8"),
+            (Some("0;[Red]0"), "F0-"),
+            (Some("0.00_);(0.00)"), "F2"),
+            (Some("(0.00)"), "F2()"),
+            (Some("@"), "@"),
+        ] {
+            assert_eq!(cell_format_info(format).code, code, "{format:?}");
+        }
+        let red = cell_format_info(Some("$#,##0_);[Red]($#,##0)"));
+        assert!(red.color && !red.parentheses);
+        let paren = cell_format_info(Some("(#,##0)"));
+        assert!(paren.parentheses && !paren.color);
+    }
+
+    #[test]
+    fn cell_reads_the_reported_cells_number_format_from_the_host() {
+        let wb = TestWorkbook::new()
+            .with_function(std::sync::Arc::new(CellFn))
+            .with_cell("Sheet1", 1, 1, LiteralValue::Number(0.25))
+            .with_number_format("Sheet1", 1, 1, "0%")
+            .with_cell("Sheet1", 2, 1, LiteralValue::Number(-5.0))
+            .with_number_format("Sheet1", 2, 1, "$#,##0.00_);[Red]($#,##0.00)")
+            .with_cell("Sheet1", 3, 1, LiteralValue::Number(1.0));
+        let eval = |formula: &str| {
+            let mut parser = formualizer_parse::parser::Parser::new(formula).unwrap();
+            let ast = parser.parse().unwrap();
+            interp(&wb).evaluate_ast(&ast).unwrap().into_literal()
+        };
+        assert_eq!(
+            eval("=CELL(\"format\",A1)"),
+            LiteralValue::Text("P0".into())
+        );
+        assert_eq!(
+            eval("=CELL(\"format\",A2)"),
+            LiteralValue::Text("C2-".into())
+        );
+        assert_eq!(eval("=CELL(\"color\",A2)"), LiteralValue::Int(1));
+        assert_eq!(eval("=CELL(\"parentheses\",A2)"), LiteralValue::Int(0));
+        // A cell the host keeps no format for is General.
+        assert_eq!(eval("=CELL(\"format\",A3)"), LiteralValue::Text("G".into()));
+        assert_eq!(eval("=CELL(\"color\",A3)"), LiteralValue::Int(0));
     }
 }

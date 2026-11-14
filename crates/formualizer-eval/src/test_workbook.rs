@@ -31,6 +31,8 @@ pub struct TestWorkbook {
     fns: HashMap<(String, String), Arc<dyn Function>>,
     aliases: HashMap<(String, String), (String, String)>,
     planning_revision: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Number format codes by (sheet, row, col), 1-based (`EvaluationContext::cell_number_format`).
+    number_formats: HashMap<(String, u32, u32), String>,
 }
 
 impl Default for TestWorkbook {
@@ -42,6 +44,7 @@ impl Default for TestWorkbook {
             fns: HashMap::new(),
             aliases: HashMap::new(),
             planning_revision: Some(Arc::new(std::sync::atomic::AtomicU64::new(0))),
+            number_formats: HashMap::new(),
         }
     }
 }
@@ -83,6 +86,19 @@ impl TestWorkbook {
     pub fn with_cell<S: Into<String>>(mut self, sheet: S, row: u32, col: u32, v: V) -> Self {
         let sh = self.sheets.entry(sheet.into()).or_default();
         sh.cells.insert((row, col), v);
+        self
+    }
+
+    /// Give a cell a number format code (`"0.00%"`), 1-based.
+    pub fn with_number_format<S: Into<String>, F: Into<String>>(
+        mut self,
+        sheet: S,
+        row: u32,
+        col: u32,
+        format: F,
+    ) -> Self {
+        self.number_formats
+            .insert((sheet.into(), row, col), format.into());
         self
     }
 
@@ -252,6 +268,12 @@ impl TestWorkbook {
 impl EvaluationContext for TestWorkbook {
     fn cancellation_token(&self) -> Option<Arc<std::sync::atomic::AtomicBool>> {
         None
+    }
+
+    fn cell_number_format(&self, sheet: &str, row: u32, col: u32) -> Option<String> {
+        self.number_formats
+            .get(&(sheet.to_string(), row, col))
+            .cloned()
     }
 
     fn resolve_range_view<'c>(
