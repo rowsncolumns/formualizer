@@ -570,7 +570,8 @@ pub struct OffsetFn;
 /// # Remarks
 /// - `rows` and `cols` shift from the top-left of `reference`.
 /// - If omitted, `height` and `width` default to the original reference size.
-/// - Non-positive target coordinates or dimensions return `#REF!`.
+/// - Non-positive target coordinates or a zero height/width return `#REF!`; a negative height or
+///   width extends the result up or left from the shifted cell, as in Excel.
 /// - Non-numeric offset/size inputs return `#VALUE!`.
 /// - In value context, a 1x1 result returns a scalar; larger results spill as an array.
 ///
@@ -606,7 +607,7 @@ pub struct OffsetFn;
 ///   - q: "What defaults are used when height and width are omitted?"
 ///     a: "OFFSET keeps the source reference size, then applies the row/column shift to that same-sized block."
 ///   - q: "When does OFFSET return #REF!?"
-///     a: "It returns #REF! if the shifted start goes to row/column <= 0 or if requested height/width are non-positive."
+///     a: "It returns #REF! if the result reaches row/column <= 0 or if the requested height/width is zero; a negative height/width extends up/left."
 /// ```
 /// [formualizer-docgen:schema:start]
 /// Name: OFFSET
@@ -713,21 +714,28 @@ impl Function for OffsetFn {
             (ec as i64) - (sc as i64) + 1
         };
 
-        if nsr <= 0 || nsc <= 0 || height <= 0 || width <= 0 {
+        // Excel: a zero height / width is #REF!; a negative one extends the range up / left
+        // from the shifted cell (`OFFSET(B1,0,0,1,-2)` is A1:B1).
+        if height == 0 || width == 0 {
             return Some(Err(ExcelError::new(ExcelErrorKind::Ref)));
         }
-        let ner = nsr + height - 1;
-        let nec = nsc + width - 1;
+        let other_r = nsr + if height > 0 { height - 1 } else { height + 1 };
+        let other_c = nsc + if width > 0 { width - 1 } else { width + 1 };
+        let (top, bottom) = (nsr.min(other_r), nsr.max(other_r));
+        let (left, right) = (nsc.min(other_c), nsc.max(other_c));
+        if top <= 0 || left <= 0 {
+            return Some(Err(ExcelError::new(ExcelErrorKind::Ref)));
+        }
 
-        if height == 1 && width == 1 {
-            Some(Ok(ReferenceType::cell(sheet, nsr as u32, nsc as u32)))
+        if top == bottom && left == right {
+            Some(Ok(ReferenceType::cell(sheet, top as u32, left as u32)))
         } else {
             Some(Ok(ReferenceType::range(
                 sheet,
-                Some(nsr as u32),
-                Some(nsc as u32),
-                Some(ner as u32),
-                Some(nec as u32),
+                Some(top as u32),
+                Some(left as u32),
+                Some(bottom as u32),
+                Some(right as u32),
             )))
         }
     }

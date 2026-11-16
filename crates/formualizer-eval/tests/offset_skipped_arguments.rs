@@ -69,3 +69,39 @@ fn explicit_arguments_still_work() {
         Some(LiteralValue::Number(40.0)),
     );
 }
+
+/// rowsncolumns/spreadsheet#1548: a negative height / width extends the result up / left from the
+/// shifted cell, as Excel does; zero stays #REF!, and running past row 1 / column A is #REF!.
+#[test]
+fn negative_height_and_width_extend_up_and_left() {
+    assert_eq!(
+        eval_one("=SUM(OFFSET(B1,0,0,1,-2))"),
+        Some(LiteralValue::Number(30.0)),
+        "width -2 from B1 is A1:B1"
+    );
+    assert_eq!(
+        eval_one("=SUM(OFFSET(A2,0,0,-2,1))"),
+        Some(LiteralValue::Number(40.0)),
+        "height -2 from A2 is A1:A2"
+    );
+    assert_eq!(
+        eval_one("=SUM(OFFSET(A1,1,1,-2,-2))"),
+        Some(LiteralValue::Number(100.0)),
+        "both negative from B2 is A1:B2"
+    );
+    assert_eq!(
+        eval_one("=OFFSET(B2,0,0,-1,-1)"),
+        Some(LiteralValue::Number(40.0))
+    );
+    for f in [
+        "=OFFSET(A1,0,0,0,1)",
+        "=OFFSET(A1,0,0,1,0)",
+        "=SUM(OFFSET(A1,0,0,-2,1))",
+    ] {
+        assert!(
+            matches!(eval_one(f), Some(LiteralValue::Error(ref e)) if e.kind == formualizer_common::ExcelErrorKind::Ref),
+            "{f} should be #REF!, got {:?}",
+            eval_one(f)
+        );
+    }
+}
