@@ -1944,8 +1944,12 @@ pub(crate) fn cell_format_info(number_format: Option<&str>) -> CellFormatInfo {
     let base = if tokens.is_empty() || tokens == "general" || tokens.contains("general") {
         "G".to_string()
     } else if tokens.contains('@') && !has('0') && !has('#') {
-        // Text format: Excel answers `@`.
-        "@".to_string()
+        // Text format: Excel for Mac answers `G` (asked directly, 2026-11-17).
+        "G".to_string()
+    } else if has('s') && !has('h') && !has('d') && !has('y') {
+        // Minutes and seconds without hours (`mm:ss`, `[mm]:ss`, `mm:ss.0`): not one of Excel's
+        // date / time families; Excel for Mac answers `G`.
+        "G".to_string()
     } else if has('y') || has('d') || has('h') || has('s') || (has('m') && !has('0') && !has('#')) {
         date_format_code(&tokens)
     } else if has('%') {
@@ -1959,6 +1963,7 @@ pub(crate) fn cell_format_info(number_format: Option<&str>) -> CellFormatInfo {
         || tokens
             .chars()
             .any(|c| matches!(c, '€' | '£' | '¥' | '₩' | '₹'))
+        || accounting_symbol(first)
     {
         format!("C{}", decimals(&tokens))
     } else if has(',') {
@@ -1978,6 +1983,38 @@ pub(crate) fn cell_format_info(number_format: Option<&str>) -> CellFormatInfo {
         color,
         parentheses,
     }
+}
+
+/// An Accounting format: a currency symbol written as quoted text and a repeat fill (`*`) that
+/// pushes it to the cell's edge (`_("$"* #,##0.00_)…`, Excel's built-in 44). Excel answers `C` for
+/// it, while a quoted symbol with no fill (`#,##0.00 "€"`) stays a number (`,2`).
+fn accounting_symbol(section: &str) -> bool {
+    let mut quoted_symbol = false;
+    let mut fill = false;
+    let mut chars = section.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                for q in chars.by_ref() {
+                    if q == '"' {
+                        break;
+                    }
+                    if matches!(q, '$' | '€' | '£' | '¥' | '₩' | '₹') {
+                        quoted_symbol = true;
+                    }
+                }
+            }
+            '\\' | '_' => {
+                chars.next();
+            }
+            '*' => {
+                fill = true;
+                chars.next();
+            }
+            _ => {}
+        }
+    }
+    quoted_symbol && fill
 }
 
 /// `D1`…`D9` for a date / time section's tokens (lower-cased, literals removed).
@@ -2566,7 +2603,18 @@ mod tests {
             (Some("0;[Red]0"), "F0-"),
             (Some("0.00_);(0.00)"), "F2"),
             (Some("(0.00)"), "F2()"),
-            (Some("@"), "@"),
+            // Excel for Mac (asked directly): text and minutes:seconds formats are `G`, the
+            // Accounting format is `C2` whether its symbol is quoted or not.
+            (Some("@"), "G"),
+            (Some("mm:ss"), "G"),
+            (Some("[mm]:ss"), "G"),
+            (Some("mm:ss.0"), "G"),
+            (
+                Some("_(\"$\"* #,##0.00_);_(\"$\"* (#,##0.00);_(\"$\"* \"-\"??_);_(@_)"),
+                "C2",
+            ),
+            (Some("#,##0.00 \"€\""), ",2"),
+            (Some("0.0%"), "P1"),
         ] {
             assert_eq!(cell_format_info(format).code, code, "{format:?}");
         }
