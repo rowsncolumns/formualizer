@@ -185,6 +185,7 @@ mod scc_runtime_cycles;
 mod scc_runtime_property;
 mod scc_zero_policy;
 mod short_circuit_dispatch;
+mod stale_formula_cells;
 mod zz_sumproduct_abs_repro;
 mod zz_sumproduct_search_repro;
 mod zz_sumproduct_search_repro_perf;

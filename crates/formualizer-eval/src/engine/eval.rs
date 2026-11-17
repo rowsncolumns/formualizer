@@ -900,6 +900,20 @@ impl ComputedWriteChunkPlan {
     }
 }
 
+/// A formula cell waiting to be recalculated (see [`Engine::stale_formula_cells`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StaleFormulaCell {
+    /// The sheet's name.
+    pub sheet: String,
+    /// 1-based row.
+    pub row: u32,
+    /// 1-based column.
+    pub col: u32,
+    /// The formula is volatile itself (`NOW()`, `RAND()`, `OFFSET`, `INDIRECT`, …): every
+    /// evaluation re-runs it, so it is always listed.
+    pub volatile: bool,
+}
+
 pub struct Engine<R> {
     pub(crate) graph: DependencyGraph,
     resolver: R,
@@ -4400,6 +4414,36 @@ where
 
     pub fn evaluation_vertices(&self) -> Vec<VertexId> {
         self.graph.get_evaluation_vertices()
+    }
+
+    /// The formula cells whose value is out of date: what the next [`Engine::evaluate_all`] would
+    /// compute. A host that does not evaluate after every edit (Excel's Manual calculation) reads
+    /// this to show which cells are stale (Excel's "Format Stale Values"). Read-only: it changes no
+    /// dirty mark and evaluates nothing.
+    ///
+    /// Listed: every formula cell an edit, a newly entered formula or a forced recalculation
+    /// (`mark_all_formulas_dirty`, `mark_circular_groups_dirty`) marked dirty and that has not been
+    /// evaluated since, on every sheet; and the volatile formulas (`NOW()`, `RAND()`, …) with what
+    /// they feed, which every evaluation re-runs and therefore re-marks when it ends.
+    /// [`StaleFormulaCell::volatile`] says which cells are volatile themselves, so a host can leave
+    /// them out. Named formulas are not cells and are not listed. Dirty marks queued in an open
+    /// deferred-dirty scope (`begin_deferred_dirty`) reach the cells only when the scope ends;
+    /// formulas held by FormulaPlane spans (`FormulaPlaneMode::AuthoritativeExperimental`, off by
+    /// default) are not cell vertices and are not listed.
+    ///
+    /// Sorted by sheet (registration order), then row, then column; rows and columns are 1-based.
+    pub fn stale_formula_cells(&self) -> Vec<StaleFormulaCell> {
+        let mut cells = self.graph.stale_formula_cells();
+        cells.sort_unstable();
+        cells
+            .into_iter()
+            .map(|(sheet_id, row, col, volatile)| StaleFormulaCell {
+                sheet: self.graph.sheet_name(sheet_id).to_string(),
+                row,
+                col,
+                volatile,
+            })
+            .collect()
     }
 
     /// Return read-only baseline counters for FormulaPlane/dispatch benchmarking.

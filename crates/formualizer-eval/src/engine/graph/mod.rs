@@ -2939,6 +2939,30 @@ impl DependencyGraph {
         result
     }
 
+    /// The formula CELLS the next evaluation would compute (the formula vertices of
+    /// [`Self::get_evaluation_vertices`]; named formulas are not cells), as
+    /// `(sheet, 1-based row, 1-based col, volatile)` in vertex order. Read-only.
+    pub(crate) fn stale_formula_cells(&self) -> Vec<(SheetId, u32, u32, bool)> {
+        self.get_evaluation_vertices()
+            .into_iter()
+            .filter(|&id| {
+                matches!(
+                    self.store.kind(id),
+                    VertexKind::FormulaScalar | VertexKind::FormulaArray
+                )
+            })
+            .map(|id| {
+                let coord = self.store.coord(id);
+                (
+                    self.store.sheet_id(id),
+                    coord.row() + 1,
+                    coord.col() + 1,
+                    self.store.is_volatile(id),
+                )
+            })
+            .collect()
+    }
+
     /// Clear dirty flags after successful evaluation
     pub fn clear_dirty_flags(&mut self, vertices: &[VertexId]) {
         for &vertex_id in vertices {

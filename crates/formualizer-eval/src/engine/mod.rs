@@ -53,7 +53,7 @@ mod tests;
 pub use arena::AstNodeId;
 pub use eval::{
     CycleTelemetry, Engine, EngineAction, EngineBaselineStats, EvalResult, RecalcPlan,
-    SourceFormulaIngress, TableMetadata, VirtualDepTelemetry,
+    SourceFormulaIngress, StaleFormulaCell, TableMetadata, VirtualDepTelemetry,
 };
 pub use eval_delta::{
     DeltaMode, EvalDelta, EvalDeltaCompatibilityPolicy, EvalDeltaRecord, TARGET_EVAL_DELTA_VERSION,
