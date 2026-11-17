@@ -23187,6 +23187,10 @@ where
         self.config.workbook_identity.clone()
     }
 
+    fn cell_number_format(&self, sheet: &str, row: u32, col: u32) -> Option<String> {
+        self.resolver.cell_number_format(sheet, row, col)
+    }
+
     fn sheet_index_by_name(&self, sheet: &str) -> Option<usize> {
         self.graph.sheet_reg().active_position(sheet)
     }

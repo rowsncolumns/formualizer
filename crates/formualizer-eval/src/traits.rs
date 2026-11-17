@@ -1609,6 +1609,13 @@ pub trait EvaluationContext: Resolver + FunctionProvider + SourceResolver {
         None
     }
 
+    /// The number format code of a cell (`"0.00%"`, `"m/d/yyyy"`, `"$#,##0_);[Red]($#,##0)"`), as
+    /// Excel stores it; `row` / `col` are 1-based. `None` when the cell is General or the host
+    /// keeps no formats. `CELL("format" | "color" | "parentheses", ref)` read it.
+    fn cell_number_format(&self, _sheet: &str, _row: u32, _col: u32) -> Option<String> {
+        None
+    }
+
     /// Excel-style 1-based active-sheet index for a sheet name, if known.
     fn sheet_index_by_name(&self, _sheet: &str) -> Option<usize> {
         None
@@ -1860,6 +1867,12 @@ pub trait FunctionContext<'ctx> {
         self.sheet_index_by_name(self.current_sheet())
     }
 
+    /// The number format code of a cell (1-based; `None` sheet = the formula's own sheet). See
+    /// [`EvaluationContext::cell_number_format`].
+    fn cell_number_format(&self, _sheet: Option<&str>, _row: u32, _col: u32) -> Option<String> {
+        None
+    }
+
     fn inspect_reference(
         &self,
         _reference: &ReferenceType,
@@ -2002,6 +2015,11 @@ impl<'a> FunctionContext<'a> for DefaultFunctionContext<'a> {
 
     fn workbook_identity(&self) -> Option<crate::engine::WorkbookIdentity> {
         self.base.workbook_identity()
+    }
+
+    fn cell_number_format(&self, sheet: Option<&str>, row: u32, col: u32) -> Option<String> {
+        self.base
+            .cell_number_format(sheet.unwrap_or(self.current_sheet), row, col)
     }
 
     fn sheet_index_by_name(&self, sheet: &str) -> Option<usize> {

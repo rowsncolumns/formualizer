@@ -483,6 +483,9 @@ impl<'a, R: EvaluationContext> EvaluationContext for RecordingContext<'a, R> {
     fn formula_text_at_cell(&self, cell: CellRef) -> Result<Option<String>, ExcelError> {
         self.engine.formula_text_at_cell(cell)
     }
+    fn cell_number_format(&self, sheet: &str, row: u32, col: u32) -> Option<String> {
+        self.engine.cell_number_format(sheet, row, col)
+    }
     fn sheet_id_by_name(&self, sheet: &str) -> Option<SheetId> {
         self.engine.sheet_id_by_name(sheet)
     }
