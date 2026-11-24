@@ -3548,6 +3548,13 @@ impl DependencyGraph {
                 }
             }
         }
+        if self.is_range_name_vertex(vertex_id) {
+            // A range name is a reference, not a value: its readers resolve the definition
+            // against the live cells. Caching the cells would copy a whole column (1,048,576
+            // of them) into the append-only array arena on every evaluation of the name.
+            self.vertex_values.remove(&vertex_id);
+            return;
+        }
         let value_ref = self.data_store.store_value(normalize_stored_literal(value));
         self.vertex_values.insert(vertex_id, value_ref);
     }
@@ -4235,8 +4242,23 @@ impl DependencyGraph {
         self.data_store.retrieve_ast(ast_id, &self.sheet_reg)
     }
 
+    /// Whether the vertex is a name defined as a plain range. (A range name whose sheet was
+    /// removed keeps its `NamedArray` kind with a `#REF!` literal for a definition, and that one
+    /// does hold a value.)
+    fn is_range_name_vertex(&self, vertex_id: VertexId) -> bool {
+        matches!(self.store.kind(vertex_id), VertexKind::NamedArray)
+            && self
+                .named_range_by_vertex(vertex_id)
+                .is_some_and(|named| matches!(named.definition, NamedDefinition::Range(_)))
+    }
+
     /// Get the value stored for a vertex
     pub fn get_value(&self, vertex_id: VertexId) -> Option<LiteralValue> {
+        if self.is_range_name_vertex(vertex_id) {
+            // Never cached (see `update_vertex_value`); a value left from before the name
+            // became a range must not be served either.
+            return None;
+        }
         if !self.value_cache_enabled {
             // In canonical mode, cell/formula values must not be read from the graph.
             // Non-cell vertices (e.g. named ranges, external sources) may still use graph storage.
