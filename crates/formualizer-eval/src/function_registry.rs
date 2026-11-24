@@ -1241,6 +1241,38 @@ mod tests {
         }
     }
 
+    // rowsncolumns/spreadsheet#1714: planning one formula must not register the builtin library
+    // again. Bounded by the number of registration passes, not by time.
+    #[test]
+    fn planning_snapshot_capture_does_not_reload_the_builtin_library() {
+        use std::sync::atomic::Ordering;
+        crate::builtins::load_builtins();
+        assert_eq!(
+            crate::builtins::BUILTIN_LOAD_PASSES.load(Ordering::SeqCst),
+            1
+        );
+
+        let ns = "__PLANNING_NO_RELOAD__";
+        register_builtin(planning_fn(ns, "TARGET", &[], FnCaps::empty()));
+        for _ in 0..200 {
+            let snapshot = RegistryPlanningSnapshot::capture_for_requests(
+                &GlobalRegistryFunctionProvider,
+                [
+                    (ns.to_string(), "TARGET".to_string(), 1),
+                    (String::new(), "SUM".to_string(), 2),
+                ],
+            )
+            .unwrap();
+            assert!(snapshot.get_function(ns, "TARGET").is_some());
+            assert!(snapshot.get_function("", "SUM").is_some());
+        }
+        crate::builtins::load_builtins();
+        assert_eq!(
+            crate::builtins::BUILTIN_LOAD_PASSES.load(Ordering::SeqCst),
+            1
+        );
+    }
+
     #[test]
     fn guarded_request_change_check_does_not_relock_behind_queued_writer() {
         let ns = "__GUARDED_REQUEST_CHANGE__";

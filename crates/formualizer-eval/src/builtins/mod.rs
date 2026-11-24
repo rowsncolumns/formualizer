@@ -19,21 +19,36 @@ pub(crate) mod utils;
 #[cfg(test)]
 mod tests;
 
+/// How many times the whole builtin library has been registered in this process.
+#[cfg(test)]
+pub(crate) static BUILTIN_LOAD_PASSES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+static BUILTINS_LOADED: once_cell::sync::OnceCell<()> = once_cell::sync::OnceCell::new();
+
+/// Register the builtin library. Idempotent and thread-safe: the registration pass runs once
+/// per process, so callers on hot paths (one formula's planning, template canonicalization)
+/// pay one atomic load. Nothing is ever removed from the registry, and a trusted builtin only
+/// fills vacant slots, so a second pass could not change it.
 pub fn load_builtins() {
-    database::register_builtins();
-    datetime::register_builtins();
-    engineering::register_builtins();
-    external::register_builtins();
-    financial::register_builtins();
-    lambda::register_builtins();
-    logical::register_builtins();
-    logical_ext::register_builtins();
-    info::register_builtins();
-    math::register_builtins();
-    random::register_builtins();
-    reference_fns::register_builtins();
-    sheets_extras::register_builtins();
-    lookup::register_builtins();
-    text::register_builtins();
-    stats::register_builtins();
+    BUILTINS_LOADED.get_or_init(|| {
+        #[cfg(test)]
+        BUILTIN_LOAD_PASSES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        database::register_builtins();
+        datetime::register_builtins();
+        engineering::register_builtins();
+        external::register_builtins();
+        financial::register_builtins();
+        lambda::register_builtins();
+        logical::register_builtins();
+        logical_ext::register_builtins();
+        info::register_builtins();
+        math::register_builtins();
+        random::register_builtins();
+        reference_fns::register_builtins();
+        sheets_extras::register_builtins();
+        lookup::register_builtins();
+        text::register_builtins();
+        stats::register_builtins();
+    });
 }
