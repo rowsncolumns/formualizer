@@ -3657,8 +3657,10 @@ impl ArrowSheet {
             Err(0) => 0,
             Err(i) => i - 1,
         };
-        let start = self.chunk_starts[ch_idx];
-        Some((ch_idx, abs_row - start))
+        // A sheet with rows and no chunk map is one chunk starting at row 0 (the layout
+        // `ensure_row_capacity` gives it), so an empty map still has an answer.
+        let start = self.chunk_starts.get(ch_idx).copied().unwrap_or(0);
+        Some((ch_idx, abs_row.checked_sub(start)?))
     }
 
     fn recompute_chunk_starts(&mut self) {
@@ -3669,6 +3671,11 @@ impl ArrowSheet {
                 self.chunk_starts.push(cur);
                 cur += ch.type_tag.len();
             }
+        }
+        // No column to derive the map from (a sheet with rows and no columns): the rows are one
+        // chunk starting at row 0. An empty map with `nrows > 0` is never valid.
+        if self.chunk_starts.is_empty() && self.nrows > 0 {
+            self.chunk_starts.push(0);
         }
     }
 
