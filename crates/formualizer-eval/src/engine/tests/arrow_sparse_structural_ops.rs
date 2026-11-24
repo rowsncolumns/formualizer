@@ -118,3 +118,99 @@ fn sparse_overlay_survives_row_and_column_structural_ops_without_densifying_othe
         assert_eq!(av.get_cell(0, 0), LiteralValue::Number(1.0));
     }
 }
+
+fn assert_chunk_map_covers_rows(asheet: &crate::arrow_store::ArrowSheet) {
+    let nrows = asheet.nrows as usize;
+    if nrows == 0 {
+        return;
+    }
+    assert_eq!(
+        asheet.chunk_starts.first(),
+        Some(&0),
+        "chunk map must start at row 0"
+    );
+    assert!(asheet.chunk_starts.windows(2).all(|w| w[0] < w[1]));
+    assert!(*asheet.chunk_starts.last().unwrap() < nrows);
+    for row in 0..nrows {
+        let (ch_idx, off) = asheet
+            .chunk_of_row(row)
+            .expect("row below nrows has a chunk");
+        assert_eq!(asheet.chunk_starts[ch_idx] + off, row);
+    }
+}
+
+// rowsncolumns/spreadsheet#1285: a sheet whose Arrow store has no columns (a hydrated sheet)
+// lost its chunk map on the second row insert, and the next write indexed the empty map.
+#[test]
+fn two_row_inserts_on_a_columnless_sheet_keep_the_chunk_map() {
+    let mut engine = Engine::new(TestWorkbook::new(), arrow_eval_config());
+    let sheet = "Hydrated";
+    engine.add_sheet(sheet).unwrap();
+    {
+        let asheet = engine.sheet_store().sheet(sheet).unwrap();
+        assert!(asheet.columns.is_empty());
+        assert_eq!(asheet.nrows, 0);
+    }
+
+    engine.insert_rows(sheet, 3, 1).unwrap();
+    engine.insert_rows(sheet, 1, 1).unwrap();
+    assert_eq!(engine.sheet_store().sheet(sheet).unwrap().nrows, 2);
+
+    // The write that panicked: `mirror_value_to_overlay` -> `chunk_of_row`.
+    engine
+        .set_cell_value(sheet, 1, 4, LiteralValue::Int(546))
+        .unwrap();
+    engine
+        .set_cell_value(sheet, 2, 1, LiteralValue::Int(7))
+        .unwrap();
+
+    let asheet = engine.sheet_store().sheet(sheet).unwrap();
+    assert_chunk_map_covers_rows(asheet);
+    assert_eq!(
+        asheet.range_view(0, 3, 0, 3).get_cell(0, 0),
+        LiteralValue::Number(546.0)
+    );
+    assert_eq!(
+        asheet.range_view(1, 0, 1, 0).get_cell(0, 0),
+        LiteralValue::Number(7.0)
+    );
+}
+
+#[test]
+fn row_delete_on_a_columnless_sheet_keeps_the_chunk_map() {
+    let mut engine = Engine::new(TestWorkbook::new(), arrow_eval_config());
+    let sheet = "Hydrated";
+    engine.add_sheet(sheet).unwrap();
+
+    engine.insert_rows(sheet, 1, 5).unwrap();
+    engine.delete_rows(sheet, 2, 2).unwrap();
+    {
+        let asheet = engine.sheet_store().sheet(sheet).unwrap();
+        assert_eq!(asheet.nrows, 3);
+        assert_chunk_map_covers_rows(asheet);
+    }
+
+    engine
+        .set_cell_value(sheet, 3, 2, LiteralValue::Int(9))
+        .unwrap();
+    let asheet = engine.sheet_store().sheet(sheet).unwrap();
+    assert_chunk_map_covers_rows(asheet);
+    assert_eq!(
+        asheet.range_view(2, 1, 2, 1).get_cell(0, 0),
+        LiteralValue::Number(9.0)
+    );
+}
+
+#[test]
+fn chunk_of_row_answers_for_a_sheet_with_rows_and_no_chunk_map() {
+    let asheet = crate::arrow_store::ArrowSheet {
+        name: std::sync::Arc::<str>::from("S"),
+        columns: Vec::new(),
+        nrows: 3,
+        chunk_starts: Vec::new(),
+        chunk_rows: 32 * 1024,
+    };
+    assert_eq!(asheet.chunk_of_row(0), Some((0, 0)));
+    assert_eq!(asheet.chunk_of_row(2), Some((0, 2)));
+    assert_eq!(asheet.chunk_of_row(3), None);
+}
