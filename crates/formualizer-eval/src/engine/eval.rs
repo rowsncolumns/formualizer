@@ -22856,7 +22856,7 @@ where
 
     /// [`Self::resolve_range_view`] for a `Formula`-defined name (the caller holds the depth
     /// guard): the concrete range it denotes when reference-valued, else its value — the cached
-    /// vertex value when the name has been evaluated, a live evaluation otherwise.
+    /// vertex value when the name has been evaluated and is not dirty, a live evaluation otherwise.
     fn formula_name_view<'c>(
         &'c self,
         ast: &ASTNode,
@@ -22868,7 +22868,16 @@ where
         if let Some(concrete) = self.formula_name_reference(ast, scope, current_sheet) {
             return self.resolve_range_view(&concrete, current_sheet);
         }
-        let rows = match self.graph.get_value(vertex) {
+        // The cached value is the name's value as of the last recalculation that evaluated it.
+        // A dirty vertex has an edit under it since then, and nothing recalculates a name no
+        // cell reads (a session that only hears edits recalculates its stale formula cells), so
+        // a dirty name answers from its definition, as one never evaluated does.
+        let cached = if self.graph.is_dirty(vertex) {
+            None
+        } else {
+            self.graph.get_value(vertex)
+        };
+        let rows = match cached {
             Some(LiteralValue::Array(rows)) => rows,
             Some(value) => vec![vec![value]],
             None => {
