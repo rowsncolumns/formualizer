@@ -28,7 +28,16 @@ pub struct ArrayArena {
     elements: Vec<ValueRef>,
     /// Offset into elements for each array
     offsets: Vec<u32>,
+    /// Most elements the arena holds across all arrays: offsets are `u32`.
+    max_elements: usize,
 }
+
+/// Highest array index a `ValueRef` carries (its 28-bit payload).
+const MAX_ARRAY_INDEX: u32 = 0x0FFF_FFFF;
+
+/// The arena cannot hold another array (see [`ArrayArena::try_insert`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ArrayArenaFull;
 
 impl ArrayArena {
     pub fn new() -> Self {
@@ -36,6 +45,7 @@ impl ArrayArena {
             dimensions: Vec::new(),
             elements: Vec::new(),
             offsets: vec![0], // Start with offset 0
+            max_elements: u32::MAX as usize,
         }
     }
 
@@ -48,14 +58,34 @@ impl ArrayArena {
                 v.push(0);
                 v
             },
+            max_elements: u32::MAX as usize,
         }
     }
 
     /// Insert a 2D array, returning its reference
+    ///
+    /// Panics when the arena cannot hold the array; see [`Self::try_insert`].
     pub fn insert(&mut self, rows: u32, cols: u32, elements: Vec<ValueRef>) -> ArrayRef {
-        let expected_len = (rows * cols) as usize;
+        match self.try_insert(rows, cols, elements) {
+            Ok(array_ref) => array_ref,
+            Err(ArrayArenaFull) => panic!("Array arena overflow"),
+        }
+    }
+
+    /// Insert a 2D array, or report that the arena is full: the array count or the flat element
+    /// vector would pass what a `ValueRef` or a `u32` offset addresses, or the allocator cannot grow the vector
+    /// (on a 32-bit build no allocation exceeds `isize::MAX` bytes, under 2^29 element refs, and
+    /// a vector of 2^28 that doubles asks for exactly that much).
+    /// Nothing is stored on failure.
+    pub fn try_insert(
+        &mut self,
+        rows: u32,
+        cols: u32,
+        elements: Vec<ValueRef>,
+    ) -> Result<ArrayRef, ArrayArenaFull> {
+        let expected_len = u64::from(rows) * u64::from(cols);
         assert_eq!(
-            elements.len(),
+            elements.len() as u64,
             expected_len,
             "Array dimensions {}x{} don't match element count {}",
             rows,
@@ -63,10 +93,25 @@ impl ArrayArena {
             elements.len()
         );
 
-        let index = self.dimensions.len() as u32;
-        if index == u32::MAX {
-            panic!("Array arena overflow: too many arrays");
+        let index = u32::try_from(self.dimensions.len())
+            .ok()
+            .filter(|&index| index <= MAX_ARRAY_INDEX)
+            .ok_or(ArrayArenaFull)?;
+        let new_len = self
+            .elements
+            .len()
+            .checked_add(elements.len())
+            .filter(|&len| len <= self.max_elements)
+            .ok_or(ArrayArenaFull)?;
+        let new_offset = u32::try_from(new_len).map_err(|_| ArrayArenaFull)?;
+        // Amortized growth first; when doubling is what does not fit, the exact size may.
+        if self.elements.try_reserve(elements.len()).is_err() {
+            self.elements
+                .try_reserve_exact(elements.len())
+                .map_err(|_| ArrayArenaFull)?;
         }
+        self.dimensions.try_reserve(1).map_err(|_| ArrayArenaFull)?;
+        self.offsets.try_reserve(1).map_err(|_| ArrayArenaFull)?;
 
         // Store dimensions
         self.dimensions.push((rows, cols));
@@ -75,10 +120,16 @@ impl ArrayArena {
         self.elements.extend(elements);
 
         // Update offsets
-        let new_offset = self.elements.len() as u32;
         self.offsets.push(new_offset);
 
-        ArrayRef(index)
+        Ok(ArrayRef(index))
+    }
+
+    /// Cap the flat element vector below the `u32` offset range, to exercise the full arena
+    /// without allocating gigabytes.
+    #[cfg(test)]
+    pub(crate) fn set_max_elements(&mut self, max_elements: usize) {
+        self.max_elements = max_elements;
     }
 
     /// Insert a 2D array from nested vectors
@@ -216,6 +267,29 @@ mod tests {
         assert_eq!(arena.dimensions(array_ref), Some((2, 2)));
         assert_eq!(arena.len(), 1);
         assert_eq!(arena.total_elements(), 4);
+    }
+
+    #[test]
+    fn a_full_arena_refuses_the_array_and_keeps_what_it_holds() {
+        let mut arena = ArrayArena::new();
+        arena.set_max_elements(5);
+        let first = arena
+            .try_insert(2, 2, vec![ValueRef::from_raw(1); 4])
+            .expect("fits");
+
+        assert_eq!(
+            arena.try_insert(1, 2, vec![ValueRef::from_raw(2); 2]),
+            Err(ArrayArenaFull)
+        );
+        assert_eq!(arena.len(), 1);
+        assert_eq!(arena.total_elements(), 4);
+        assert_eq!(arena.elements(first).map(<[ValueRef]>::len), Some(4));
+
+        let second = arena
+            .try_insert(1, 1, vec![ValueRef::from_raw(3)])
+            .expect("fits");
+        assert_eq!(arena.get_element(second, 0, 0), Some(ValueRef::from_raw(3)));
+        assert_eq!(arena.total_elements(), 5);
     }
 
     #[test]

@@ -4038,7 +4038,7 @@ where
             .and_then(|sheet| self.graph.sheet_id(sheet))
             .unwrap_or_else(|| self.graph.default_sheet_id());
         let entry = self.graph.resolve_name_entry(name, current_sheet)?;
-        self.graph.get_value(entry.vertex)
+        self.non_cell_vertex_value(entry.vertex)
     }
 
     pub fn table_metadata(&self, name: &str) -> Option<TableMetadata> {
@@ -4401,7 +4401,7 @@ where
     }
 
     pub fn vertex_value(&self, vertex: VertexId) -> Option<LiteralValue> {
-        self.graph.get_value(vertex)
+        self.non_cell_vertex_value(vertex)
     }
 
     pub fn graph_cell_value(&self, sheet: &str, row: u32, col: u32) -> Option<LiteralValue> {
@@ -17805,6 +17805,66 @@ where
         }
     }
 
+    /// The cells a range name covers, as the array a direct request for the name answers with.
+    /// Built for the caller and never stored: a name over a whole column is 1,048,576 cells, and
+    /// keeping one such array per evaluation in the append-only array arena overflowed it
+    /// (rowsncolumns/spreadsheet#1948).
+    fn range_name_cells(&self, range_ref: &RangeRef) -> Result<LiteralValue, ExcelError> {
+        if range_ref.start.sheet_id != range_ref.end.sheet_id {
+            return Err(ExcelError::new(ExcelErrorKind::Ref)
+                .with_message("Named range cannot span sheets".to_string()));
+        }
+        let sheet_name = self.graph.sheet_name(range_ref.start.sheet_id);
+        let sr0 = range_ref.start.coord.row();
+        let sc0 = range_ref.start.coord.col();
+        let er0 = range_ref.end.coord.row();
+        let ec0 = range_ref.end.coord.col();
+        if sr0 > er0 || sc0 > ec0 {
+            return Err(ExcelError::new(ExcelErrorKind::Ref)
+                .with_message("Invalid named range bounds".to_string()));
+        }
+
+        let h = (er0 - sr0 + 1) as usize;
+        let w = (ec0 - sc0 + 1) as usize;
+        let cell_count = (h as u64).saturating_mul(w as u64);
+        if cell_count > self.config.spill.max_spill_cells {
+            return Err(ExcelError::new(ExcelErrorKind::NImpl)
+                .with_message("Named range too large to materialize as an array".to_string()));
+        }
+
+        let mut rows = Vec::with_capacity(h);
+        for r0 in sr0..=er0 {
+            let mut row = Vec::with_capacity(w);
+            for c0 in sc0..=ec0 {
+                let v = self
+                    .get_cell_value(sheet_name, r0 + 1, c0 + 1)
+                    .unwrap_or(LiteralValue::Empty);
+                row.push(v);
+            }
+            rows.push(row);
+        }
+        Ok(LiteralValue::Array(rows))
+    }
+
+    /// The value a name (or other non-cell) vertex answers a reader with: a range name's live
+    /// cells, else whatever its last evaluation cached.
+    fn non_cell_vertex_value(&self, vertex_id: VertexId) -> Option<LiteralValue> {
+        if self.graph.vertex_exists(vertex_id)
+            && matches!(
+                self.graph.get_vertex_kind(vertex_id),
+                VertexKind::NamedArray
+            )
+            && let Some(named_range) = self.graph.named_range_by_vertex(vertex_id)
+            && let NamedDefinition::Range(range_ref) = &named_range.definition
+        {
+            return Some(
+                self.range_name_cells(range_ref)
+                    .unwrap_or_else(LiteralValue::Error),
+            );
+        }
+        self.graph.get_value(vertex_id)
+    }
+
     fn evaluate_named_array(
         &mut self,
         vertex_id: VertexId,
@@ -17816,44 +17876,9 @@ where
         })?;
 
         let out = match &named_range.definition {
-            NamedDefinition::Range(range_ref) => {
-                if range_ref.start.sheet_id != range_ref.end.sheet_id {
-                    return Err(ExcelError::new(ExcelErrorKind::Ref)
-                        .with_message("Named range cannot span sheets".to_string()));
-                }
-
-                let sheet_name = self.graph.sheet_name(range_ref.start.sheet_id);
-                let sr0 = range_ref.start.coord.row();
-                let sc0 = range_ref.start.coord.col();
-                let er0 = range_ref.end.coord.row();
-                let ec0 = range_ref.end.coord.col();
-                if sr0 > er0 || sc0 > ec0 {
-                    return Err(ExcelError::new(ExcelErrorKind::Ref)
-                        .with_message("Invalid named range bounds".to_string()));
-                }
-
-                let h = (er0 - sr0 + 1) as usize;
-                let w = (ec0 - sc0 + 1) as usize;
-                let cell_count = (h as u64).saturating_mul(w as u64);
-                if cell_count > self.config.spill.max_spill_cells {
-                    return Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
-                        "Named range too large to materialize as an array".to_string(),
-                    ));
-                }
-
-                let mut rows = Vec::with_capacity(h);
-                for r0 in sr0..=er0 {
-                    let mut row = Vec::with_capacity(w);
-                    for c0 in sc0..=ec0 {
-                        let v = self
-                            .get_cell_value(sheet_name, r0 + 1, c0 + 1)
-                            .unwrap_or(LiteralValue::Empty);
-                        row.push(v);
-                    }
-                    rows.push(row);
-                }
-                LiteralValue::Array(rows)
-            }
+            // A range name is a reference: readers resolve its definition against the live
+            // cells, so the array a direct request answers with is never kept on the vertex.
+            NamedDefinition::Range(range_ref) => return self.range_name_cells(range_ref),
             NamedDefinition::Cell(cell_ref) => {
                 let sheet_name = self.graph.sheet_name(cell_ref.sheet_id);
                 let row = cell_ref.coord.row() + 1;
@@ -22148,43 +22173,11 @@ where
                 })?;
 
                 return match &named_range.definition {
-                    NamedDefinition::Range(range_ref) => {
-                        if range_ref.start.sheet_id != range_ref.end.sheet_id {
-                            return Err(ExcelError::new(ExcelErrorKind::Ref)
-                                .with_message("Named range cannot span sheets".to_string()));
-                        }
-                        let sheet_name = self.graph.sheet_name(range_ref.start.sheet_id);
-                        let sr0 = range_ref.start.coord.row();
-                        let sc0 = range_ref.start.coord.col();
-                        let er0 = range_ref.end.coord.row();
-                        let ec0 = range_ref.end.coord.col();
-                        if sr0 > er0 || sc0 > ec0 {
-                            return Err(ExcelError::new(ExcelErrorKind::Ref)
-                                .with_message("Invalid named range bounds".to_string()));
-                        }
-
-                        let h = (er0 - sr0 + 1) as usize;
-                        let w = (ec0 - sc0 + 1) as usize;
-                        let cell_count = (h as u64).saturating_mul(w as u64);
-                        if cell_count > self.config.spill.max_spill_cells {
-                            return Err(ExcelError::new(ExcelErrorKind::NImpl).with_message(
-                                "Named range too large to materialize as an array".to_string(),
-                            ));
-                        }
-
-                        let mut rows = Vec::with_capacity(h);
-                        for r0 in sr0..=er0 {
-                            let mut row = Vec::with_capacity(w);
-                            for c0 in sc0..=ec0 {
-                                let v = self
-                                    .get_cell_value(sheet_name, r0 + 1, c0 + 1)
-                                    .unwrap_or(LiteralValue::Empty);
-                                row.push(v);
-                            }
-                            rows.push(row);
-                        }
-                        Ok(LiteralValue::Array(rows))
-                    }
+                    // Scheduled evaluation of a range name only clears its dirty flag: the name
+                    // is a reference and holds no value (`DependencyGraph::update_vertex_value`
+                    // drops one), so its cells are not copied here. Whoever wants them as an
+                    // array asks `range_name_cells`.
+                    NamedDefinition::Range(_) => Ok(LiteralValue::Empty),
                     NamedDefinition::Cell(cell_ref) => {
                         let sheet_name = self.graph.sheet_name(cell_ref.sheet_id);
                         let row = cell_ref.coord.row() + 1;
@@ -22863,7 +22856,7 @@ where
 
     /// [`Self::resolve_range_view`] for a `Formula`-defined name (the caller holds the depth
     /// guard): the concrete range it denotes when reference-valued, else its value — the cached
-    /// vertex value when the name has been evaluated, a live evaluation otherwise.
+    /// vertex value when the name has been evaluated and is not dirty, a live evaluation otherwise.
     fn formula_name_view<'c>(
         &'c self,
         ast: &ASTNode,
@@ -22875,7 +22868,16 @@ where
         if let Some(concrete) = self.formula_name_reference(ast, scope, current_sheet) {
             return self.resolve_range_view(&concrete, current_sheet);
         }
-        let rows = match self.graph.get_value(vertex) {
+        // The cached value is the name's value as of the last recalculation that evaluated it.
+        // A dirty vertex has an edit under it since then, and nothing recalculates a name no
+        // cell reads (a session that only hears edits recalculates its stale formula cells), so
+        // a dirty name answers from its definition, as one never evaluated does.
+        let cached = if self.graph.is_dirty(vertex) {
+            None
+        } else {
+            self.graph.get_value(vertex)
+        };
+        let rows = match cached {
             Some(LiteralValue::Array(rows)) => rows,
             Some(value) => vec![vec![value]],
             None => {
@@ -24512,8 +24514,7 @@ where
                         .unwrap_or(LiteralValue::Empty)
                 }
                 None => self
-                    .graph
-                    .get_value(m.vertex)
+                    .non_cell_vertex_value(m.vertex)
                     .unwrap_or(LiteralValue::Empty),
             })
             .collect();
@@ -25023,7 +25024,7 @@ where
                                 range_ref.end.coord.col(),
                             );
                         }
-                        self.evaluate_vertex_immutable(vertex_id)
+                        self.range_name_cells(range_ref)
                     }
                     NamedDefinition::Literal(_) => self.evaluate_vertex_immutable(vertex_id),
                 }

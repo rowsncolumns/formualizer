@@ -115,8 +115,14 @@ impl DataStore {
                     .map(|v| self.store_value(v))
                     .collect();
 
-                let array_ref = self.arrays.insert(rows, cols, elements);
-                ValueRef::array(array_ref.as_u32())
+                match self.arrays.try_insert(rows, cols, elements) {
+                    Ok(array_ref) => ValueRef::array(array_ref.as_u32()),
+                    // A full arena is a value the engine cannot hold, not a reason to trap.
+                    Err(_) => self.store_error(
+                        &ExcelError::new(ExcelErrorKind::NImpl)
+                            .with_message("Array too large to store".to_string()),
+                    ),
+                }
             }
 
             LiteralValue::DateTime(dt) => {
@@ -995,6 +1001,26 @@ mod tests {
             LiteralValue::Error(e) => assert_eq!(e.kind, ExcelErrorKind::Div),
             _ => panic!("Expected error"),
         }
+    }
+
+    #[test]
+    fn an_array_the_arena_cannot_hold_is_stored_as_an_error() {
+        let mut store = DataStore::new();
+        store.arrays.set_max_elements(3);
+        let row = |n: f64| vec![LiteralValue::Number(n), LiteralValue::Number(n + 1.0)];
+
+        let kept = store.store_value(LiteralValue::Array(vec![row(1.0)]));
+        let refused = store.store_value(LiteralValue::Array(vec![row(3.0)]));
+
+        assert_eq!(
+            store.retrieve_value(kept),
+            LiteralValue::Array(vec![row(1.0)])
+        );
+        match store.retrieve_value(refused) {
+            LiteralValue::Error(e) => assert_eq!(e.kind, ExcelErrorKind::NImpl),
+            other => panic!("expected an error value, got {other:?}"),
+        }
+        assert_eq!(store.memory_usage().total_arrays, 1);
     }
 
     #[test]

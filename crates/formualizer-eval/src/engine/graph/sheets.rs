@@ -138,6 +138,35 @@ impl DependencyGraph {
             self.mark_vertex_dirty(vid);
         }
 
+        // A formula-defined name that reads the removed sheet keeps its definition, but the value
+        // its vertex cached is no longer what the definition evaluates to; neither is that of a
+        // name or a cell reading it. Nothing else dirties them: a name is not in
+        // `vertex_formulas`, and no cell may read it.
+        let formula_names_over_sheet: Vec<VertexId> = self
+            .named_ranges
+            .values()
+            .chain(self.sheet_named_ranges.values())
+            .filter(|nr| matches!(nr.definition, NamedDefinition::Formula { .. }))
+            .map(|nr| nr.vertex)
+            .filter(|&vertex| {
+                self.edges
+                    .out_edges(vertex)
+                    .iter()
+                    .any(|&dep_id| self.store.sheet_id(dep_id) == sheet_id)
+                    || self
+                        .formula_to_range_deps
+                        .get(&vertex)
+                        .is_some_and(|ranges| {
+                            ranges.iter().any(|r| match r.sheet {
+                                SharedSheetLocator::Id(id) => id == sheet_id,
+                                SharedSheetLocator::Name(ref n) => n.as_ref() == old_name,
+                                SharedSheetLocator::Current => false,
+                            })
+                        })
+            })
+            .collect();
+        self.mark_dirty_many(&formula_names_over_sheet);
+
         for vertex_id in vertices_to_delete {
             if let Some(cell_ref) = self.get_cell_ref_for_vertex(vertex_id) {
                 self.cell_to_vertex.remove(&cell_ref);

@@ -13,6 +13,7 @@ mod demand_driven;
 mod dependency;
 mod dependents_closure;
 mod deterministic_clock;
+mod dirty_formula_name_preview_1933;
 mod dirty_propagation;
 mod dirty_propagation_precision;
 mod evaluation;
@@ -153,6 +154,7 @@ mod sumifs_arrow_fastpath;
 mod sumifs_cached_mask_padding;
 mod sumifs_ne_blank_158;
 mod used_bounds_cache;
+mod whole_column_name_arena_1948;
 mod whole_column_sumifs;
 
 mod aggregate_visibility_options;
