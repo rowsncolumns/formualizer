@@ -222,7 +222,10 @@ impl<'a> RangeView<'a> {
         let nrows = rows.len();
         let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
 
-        let chunk_rows = 32 * 1024;
+        // The builders reserve one chunk of rows per column up front, so the chunk is no larger
+        // than the array: a fixed 32,768-row chunk costs about 1 MB a column, 5 GB for one row
+        // of 5,000 cells.
+        let chunk_rows = nrows.clamp(1, 32 * 1024);
         let mut ib = IngestBuilder::new("__tmp", ncols, chunk_rows, date_system);
 
         for mut r in rows {
