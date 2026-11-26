@@ -126,3 +126,28 @@ fn every_formula_dirty_computes_the_seeded_ones() {
     assert_eq!(value(&e, 7), Some(num(20.0)));
     assert_eq!(value(&e, 8), Some(num(21.0)));
 }
+
+/// Seeding a long column grows the sheet's value store once, not once a row: 60,000 formulas
+/// below a single value seed in well under the time a row-at-a-time growth takes (seconds).
+#[test]
+fn seeding_a_long_column_does_not_grow_the_value_store_a_row_at_a_time() {
+    const ROWS: u32 = 60_000;
+    let mut e = Engine::new(TestWorkbook::new(), EvalConfig::default());
+    e.set_cell_value("Sheet1", 1, 6, num(10.0)).unwrap();
+    e.bulk_set_formulas(
+        "Sheet1",
+        (1..=ROWS).map(|r| (r, 2, parse(&format!("=$F$1+{r}")).expect("parse"))),
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let seeded =
+        e.seed_formula_values("Sheet1", (1..=ROWS).map(|r| (r, 2, num(f64::from(10 + r)))));
+    let took = started.elapsed();
+    assert_eq!(seeded.len(), ROWS as usize);
+    assert_eq!(
+        e.get_cell_value("Sheet1", ROWS, 2),
+        Some(num(f64::from(10 + ROWS)))
+    );
+    assert!(stale(&e).is_empty());
+    assert!(took.as_secs() < 5, "seeding {ROWS} formulas took {took:?}");
+}

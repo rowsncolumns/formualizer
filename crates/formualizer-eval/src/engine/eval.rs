@@ -5418,6 +5418,13 @@ where
         let Some(sheet_id) = self.graph.sheet_id(sheet) else {
             return Vec::new();
         };
+        let items: Vec<(u32, u32, LiteralValue)> = items.into_iter().collect();
+        // One growth of the sheet's value store to the last seeded cell. Each seed mirrors its
+        // value there, and a write past the last row grows the store to that row: grown a row
+        // at a time, every materialized chunk is copied once per row.
+        let last_row = items.iter().map(|&(row, _, _)| row).max().unwrap_or(0);
+        let last_col = items.iter().map(|&(_, col, _)| col).max().unwrap_or(0);
+        self.reserve_computed_overlay_extent(sheet, last_row, last_col);
         let mut seeded: Vec<(u32, u32)> = Vec::new();
         let mut vertices: Vec<VertexId> = Vec::new();
         for (row, col, value) in items {
@@ -5445,6 +5452,31 @@ where
         }
         self.graph.clear_dirty_flags(&vertices);
         seeded
+    }
+
+    /// Grow `sheet`'s value store to hold `rows` rows and `cols` columns (counts, so 1-based
+    /// last indices), where computed values are mirrored into it
+    /// ([`Self::write_computed_overlay_value_0based`]). Nothing when they are not, or when the
+    /// store already reaches that far.
+    fn reserve_computed_overlay_extent(&mut self, sheet: &str, rows: u32, cols: u32) {
+        if rows == 0
+            || cols == 0
+            || self.computed_overlay_mirroring_disabled
+            || !(self.config.arrow_storage_enabled
+                && self.config.delta_overlay_enabled
+                && self.config.write_formula_overlay_enabled)
+        {
+            return;
+        }
+        self.ensure_arrow_sheet(sheet);
+        let Some(asheet) = self.arrow_sheets.sheet_mut(sheet) else {
+            return;
+        };
+        let cur_cols = asheet.columns.len();
+        if (cols as usize) > cur_cols {
+            asheet.insert_columns(cur_cols, cols as usize - cur_cols);
+        }
+        asheet.ensure_row_capacity(rows as usize);
     }
 
     /// Mark every formula that reads a formula cell waiting for an evaluation dirty too, directly
