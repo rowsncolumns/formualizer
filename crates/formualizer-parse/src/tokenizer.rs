@@ -647,14 +647,30 @@ fn is_external_sheet_qualified(value: &str) -> bool {
         .is_some_and(|rb| rb > 0 && rb + 1 < qualifier.len())
 }
 
-/// Whether the text at `offset` is a range's second corner and nothing more: `$B$3`, `B`, `12`,
-/// ended by the formula's end or by something that ends an operand. A call (`INDEX(`), a
-/// qualified reference, a structured reference or a name with other characters is not one.
+/// Whether the text at `offset` is a range's second corner and nothing more: `$B$3`, `B`, `12`
+/// (up to three column letters, then a row number, each with an optional `$`), ended by the
+/// formula's end or by something that ends an operand. A call (`INDEX(`), a qualified reference,
+/// a structured reference or a defined name (`Total`) is not one.
 fn next_is_plain_corner(formula: &str, offset: usize) -> bool {
     let bytes = formula.as_bytes();
-    let mut end = offset;
-    while end < bytes.len() && (bytes[end] == b'$' || bytes[end].is_ascii_alphanumeric()) {
-        end += 1;
+    let run = |mut at: usize, test: fn(&u8) -> bool| {
+        let start = at;
+        while bytes.get(at).is_some_and(test) {
+            at += 1;
+        }
+        (at, at - start)
+    };
+    let skip_dollar = |at: usize| at + usize::from(bytes.get(at) == Some(&b'$'));
+    let (after_letters, letters) = run(skip_dollar(offset), u8::is_ascii_alphabetic);
+    let before_digits = if letters == 0 { offset } else { after_letters };
+    let (after_digits, digits) = run(skip_dollar(before_digits), u8::is_ascii_digit);
+    let end = if digits == 0 {
+        after_letters
+    } else {
+        after_digits
+    };
+    if letters > 3 || (letters == 0 && digits == 0) {
+        return false;
     }
     end > offset
         && bytes.get(end).is_none_or(|next| {
