@@ -5399,6 +5399,78 @@ where
         self.mark_all_formula_vertices_dirty();
     }
 
+    /// Give formula cells of `sheet` the result a file or a document stores beside their formula
+    /// (`items`: 1-based row, column, value) and take them off the list the next evaluation
+    /// computes. A seeded formula reads as that value and is evaluated when something it reads
+    /// changes, like a formula this engine evaluated itself: Excel opening a file keeps each
+    /// cached result until an edit reaches it.
+    ///
+    /// Left as it is: a cell that holds no scalar formula, a formula that is not waiting for an
+    /// evaluation (this engine computed it, or it was seeded before), a volatile formula (every
+    /// evaluation computes those), one whose references are computed (`INDIRECT`, `OFFSET`), one
+    /// that holds a spill, and an empty or array value. Returns the cells seeded. The caller
+    /// owns what follows from a formula it did not seed: see
+    /// [`Self::spread_waiting_formulas`].
+    pub fn seed_formula_values<I>(&mut self, sheet: &str, items: I) -> Vec<(u32, u32)>
+    where
+        I: IntoIterator<Item = (u32, u32, LiteralValue)>,
+    {
+        let Some(sheet_id) = self.graph.sheet_id(sheet) else {
+            return Vec::new();
+        };
+        let mut seeded: Vec<(u32, u32)> = Vec::new();
+        let mut vertices: Vec<VertexId> = Vec::new();
+        for (row, col, value) in items {
+            if row == 0 || col == 0 || matches!(value, LiteralValue::Empty | LiteralValue::Array(_))
+            {
+                continue;
+            }
+            let cell = CellRef::new(sheet_id, Coord::from_excel(row, col, true, true));
+            let Some(vertex) = self.graph.get_vertex_for_cell(&cell) else {
+                continue;
+            };
+            if self.graph.get_vertex_kind(vertex) != VertexKind::FormulaScalar
+                || !self.graph.vertex_has_formula(vertex)
+                || !self.graph.is_dirty(vertex)
+                || self.graph.is_volatile(vertex)
+                || self.graph.is_dynamic(vertex)
+                || self.graph.spill_cells_for_anchor(vertex).is_some()
+            {
+                continue;
+            }
+            self.graph.update_vertex_value(vertex, value.clone());
+            self.mirror_vertex_value_to_overlay(vertex, &value);
+            vertices.push(vertex);
+            seeded.push((row, col));
+        }
+        self.graph.clear_dirty_flags(&vertices);
+        seeded
+    }
+
+    /// Mark every formula that reads a formula cell waiting for an evaluation dirty too, directly
+    /// or through others: the next evaluation computes them all. For a load that seeded some
+    /// formulas ([`Self::seed_formula_values`]) and left others waiting (no stored result, a
+    /// volatile formula): a seeded formula that reads a waiting one was computed from a value
+    /// the waiting one may not have after it is evaluated, so it waits with it. Loading in bulk
+    /// marks each formula dirty by itself, whatever order the formulas arrive in; this is the
+    /// one walk that follows.
+    pub fn spread_waiting_formulas(&mut self) {
+        let waiting: Vec<VertexId> = self
+            .graph
+            .get_evaluation_vertices()
+            .into_iter()
+            .filter(|&vertex| {
+                matches!(
+                    self.graph.get_vertex_kind(vertex),
+                    VertexKind::FormulaScalar | VertexKind::FormulaArray
+                )
+            })
+            .collect();
+        if !waiting.is_empty() {
+            self.graph.mark_dirty_many(&waiting);
+        }
+    }
+
     /// Mark the members of every circular group that iterated dirty, so the next evaluation
     /// iterates them again — what a forced recalculation (F9) does to a circular group when
     /// [`EvalConfig::iterate_circular_on_every_recalc`] is off.
