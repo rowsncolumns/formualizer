@@ -1617,6 +1617,10 @@ impl<'a, R> Drop for ActionDepthGuard<'a, R> {
 struct SourceCache {
     scalars: FxHashMap<(String, Option<u64>), LiteralValue>,
     tables: FxHashMap<(String, Option<u64>), Arc<dyn crate::traits::Table>>,
+    /// The cells of a range in another workbook (`[1]Sheet1!$A$1:$B$9`), built once per name
+    /// and version: every formula over the range reads the same view instead of copying the
+    /// range's cells for itself.
+    external_ranges: FxHashMap<(String, Option<u64>), RangeView<'static>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -23744,9 +23748,22 @@ where
                         let version = source
                             .version
                             .or_else(|| self.resolver.source_table_version(name));
+                        let key = (name.to_string(), version);
+                        let cached = self
+                            .source_cache
+                            .read()
+                            .ok()
+                            .and_then(|g| g.external_ranges.get(&key).cloned());
+                        if let Some(view) = cached {
+                            return Ok(view);
+                        }
                         let table = self.resolve_source_table_cached(name, version)?;
                         let spec = Some(formualizer_parse::parser::TableSpecifier::Data);
-                        self.source_table_to_range_view(table.as_ref(), &spec)
+                        let view = self.source_table_to_range_view(table.as_ref(), &spec)?;
+                        if let Ok(mut g) = self.source_cache.write() {
+                            g.external_ranges.insert(key, view.clone());
+                        }
+                        Ok(view)
                     }
                 }
             }

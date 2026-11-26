@@ -321,8 +321,11 @@ impl Function for IndexFn {
         // are clamped to the used region instead of erroring.
         let (sheet, sr, sc, er, ec) = match resolve_reference_bounds(ctx, &base) {
             Ok(bounds) => bounds,
-            // A table without a grid address indexes by value in eval().
-            Err(_) if matches!(base, ReferenceType::Table(_)) => return None,
+            // A table without a grid address indexes by value in eval(), and so does a range in
+            // another workbook: its cells are the host's cached values, not cells of a sheet.
+            Err(_) if matches!(base, ReferenceType::Table(_) | ReferenceType::External(_)) => {
+                return None;
+            }
             Err(e) => return Some(Err(e)),
         };
 
@@ -450,7 +453,9 @@ impl Function for IndexFn {
                 LiteralValue::Array(rows) => rows,
                 other => vec![vec![other]],
             };
+            // A skipped slot is 0, the whole column or row, as on the reference path.
             let index = match args[1].value()?.into_literal() {
+                _ if is_skipped_arg(&args[1]) => 0,
                 LiteralValue::Number(n) => n as i64,
                 LiteralValue::Int(i) => i,
                 _ => {
@@ -463,6 +468,7 @@ impl Function for IndexFn {
             // Optional explicit column_num (third argument).
             let explicit_col = if args.len() >= 3 {
                 Some(match args[2].value()?.into_literal() {
+                    _ if is_skipped_arg(&args[2]) => 0,
                     LiteralValue::Number(n) => n as i64,
                     LiteralValue::Int(i) => i,
                     _ => {
