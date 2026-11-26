@@ -4366,3 +4366,151 @@ mod row_range_intersection {
         assert!(parse("=A1 2").is_err());
     }
 }
+
+/// A range in a sheet of another workbook is one operand, as a range in a sheet of this one is
+/// (rowsncolumns/spreadsheet#1789, #1799): `[1]Sheet1!$A$1:$B$3` used to split into the external
+/// cell `[1]Sheet1!$A$1`, the `:` operator and the LOCAL cell `$B$3`.
+#[cfg(test)]
+mod external_range_operand {
+    use crate::parser::{ASTNode, ASTNodeType, BatchParser, ExternalRefKind, ReferenceType, parse};
+    use crate::tokenizer::Tokenizer;
+
+    fn classic(formula: &str) -> ASTNode {
+        crate::parser::Parser::new(formula)
+            .expect("tokenizes")
+            .parse()
+            .expect("parser")
+    }
+
+    fn external_kinds(node: &ASTNode, out: &mut Vec<(String, ExternalRefKind)>) {
+        match &node.node_type {
+            ASTNodeType::Reference {
+                reference: ReferenceType::External(ext),
+                ..
+            } => out.push((ext.raw.clone(), ext.kind.clone())),
+            ASTNodeType::Reference { .. } | ASTNodeType::Literal(_) => {}
+            ASTNodeType::UnaryOp { expr, .. } => external_kinds(expr, out),
+            ASTNodeType::BinaryOp { left, right, .. } => {
+                external_kinds(left, out);
+                external_kinds(right, out);
+            }
+            ASTNodeType::Function { args, .. } => args.iter().for_each(|a| external_kinds(a, out)),
+            ASTNodeType::Call { callee, args } => {
+                external_kinds(callee, out);
+                args.iter().for_each(|a| external_kinds(a, out));
+            }
+            ASTNodeType::Array(rows) => rows.iter().flatten().for_each(|a| external_kinds(a, out)),
+        }
+    }
+
+    fn one_external_range(formula: &str, raw: &str) {
+        let mut batch = BatchParser::builder().build();
+        for (which, ast) in [
+            ("span", parse(formula).expect("span parser")),
+            ("classic", classic(formula)),
+            ("batch", batch.parse(formula).expect("batch parser")),
+        ] {
+            let mut found = Vec::new();
+            external_kinds(&ast, &mut found);
+            assert_eq!(found.len(), 1, "{which}: {formula}: {found:?}");
+            assert_eq!(found[0].0, raw, "{which}: {formula}");
+            assert!(
+                matches!(found[0].1, ExternalRefKind::Range { .. }),
+                "{which}: {formula}: {:?}",
+                found[0].1
+            );
+        }
+        let tokens = Tokenizer::new(formula).expect("tokenizes").items;
+        assert!(
+            tokens.iter().any(|t| t.value == raw),
+            "tokenizer: {formula}: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn an_external_range_is_one_operand() {
+        for (formula, raw) in [
+            ("=[1]Sheet1!$A$1:$B$3", "[1]Sheet1!$A$1:$B$3"),
+            ("=SUM([1]Sheet1!A1:B3)", "[1]Sheet1!A1:B3"),
+            ("=[1]Sheet1!$A$1:$A$2*2", "[1]Sheet1!$A$1:$A$2"),
+            (
+                "=INDEX('[1]My Sheet'!$A$1:$B$3,2,1)+A1",
+                "'[1]My Sheet'!$A$1:$B$3",
+            ),
+            (
+                "=VLOOKUP(A1,[Book2.xlsx]Sheet1!$A:$B,2,FALSE)",
+                "[Book2.xlsx]Sheet1!$A:$B",
+            ),
+            (
+                "=SUM('C:\\Data\\[Book2.xlsx]Sheet1'!1:2)",
+                "'C:\\Data\\[Book2.xlsx]Sheet1'!1:2",
+            ),
+        ] {
+            one_external_range(formula, raw);
+        }
+    }
+
+    /// The range's corners: whole columns and whole rows keep their open axis.
+    #[test]
+    fn an_external_range_keeps_its_corners() {
+        let mut found = Vec::new();
+        external_kinds(
+            &parse("=SUM([1]Sheet1!$A$2:B3)").expect("parses"),
+            &mut found,
+        );
+        let (_, kind) = found.pop().expect("an external reference");
+        assert_eq!(
+            kind,
+            ExternalRefKind::range_with_abs(
+                Some(2),
+                Some(1),
+                Some(3),
+                Some(2),
+                true,
+                true,
+                false,
+                false
+            )
+        );
+    }
+
+    /// What is not one external range reads as before: a second corner with its own qualifier is
+    /// the `:` operator over two references, a structured reference's `:` stays an operator, and
+    /// a single external cell is a cell.
+    #[test]
+    fn other_colons_read_as_before() {
+        for formula in [
+            "=SUM([1]Sheet1!A1:[1]Sheet1!B3)",
+            "=SUM([1]Sheet1!A1:INDEX(A:A,2))",
+            "=SUM([1]Sheet1!A1:Sheet2!B3)",
+            "=SUM(T[a]:T[b])",
+            "=SUM(T[[a]:[b]])",
+            "=[1]Sheet1!$A$1+SUM(A1:B3)",
+            "=SUM(Sheet1!A1:B3,[1]Sheet1!$A$1)",
+        ] {
+            let mut found = Vec::new();
+            external_kinds(&parse(formula).expect("parses"), &mut found);
+            assert!(
+                found
+                    .iter()
+                    .all(|(_, kind)| matches!(kind, ExternalRefKind::Cell { .. })),
+                "{formula}: {found:?}"
+            );
+            let mut classic_found = Vec::new();
+            external_kinds(&classic(formula), &mut classic_found);
+            assert_eq!(found, classic_found, "{formula}");
+        }
+    }
+
+    /// The operand's text is unchanged, so a formula with one prints as it was written.
+    #[test]
+    fn an_external_range_round_trips() {
+        for formula in [
+            "=SUM([1]Sheet1!$A$1:$B$3)",
+            "=SUM('[1]My Sheet'!A1:B3, [1]Sheet1!$A$1)",
+        ] {
+            let ast = parse(formula).expect("parses");
+            assert_eq!(crate::pretty::canonical_formula(&ast), formula);
+        }
+    }
+}

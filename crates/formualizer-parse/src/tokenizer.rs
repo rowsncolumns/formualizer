@@ -625,6 +625,62 @@ fn reference_value_contains_range_colon(value: &str) -> bool {
     value_part.contains(':')
 }
 
+/// Whether `value` is the first corner of a reference into a sheet of another workbook
+/// (`[1]Sheet1!$A$1`, `'[Book2.xlsx]My Sheet'!A`, `'C:\\x\\[Book2.xlsx]Sheet1'!1`): a book token
+/// in brackets, a sheet name, `!`, then a corner with no bracket of its own. The `:` after it joins
+/// the second corner into the same operand, as it does after `Sheet1!A1`; the `[` of a structured
+/// reference (`T[a]:T[b]`) still makes the `:` an operator.
+fn is_external_sheet_qualified(value: &str) -> bool {
+    let Some((qualifier, corner)) = value.rsplit_once('!') else {
+        return false;
+    };
+    if corner.is_empty() || corner.contains(['[', ']', '\'']) {
+        return false;
+    }
+    let qualifier = qualifier
+        .strip_prefix('\'')
+        .and_then(|q| q.strip_suffix('\''))
+        .unwrap_or(qualifier);
+    qualifier
+        .rfind('[')
+        .and_then(|lb| qualifier[lb..].find(']').map(|rb| lb + rb))
+        .is_some_and(|rb| rb > 0 && rb + 1 < qualifier.len())
+}
+
+/// Whether the text at `offset` is a range's second corner and nothing more: `$B$3`, `B`, `12`,
+/// ended by the formula's end or by something that ends an operand. A call (`INDEX(`), a
+/// qualified reference, a structured reference or a name with other characters is not one.
+fn next_is_plain_corner(formula: &str, offset: usize) -> bool {
+    let bytes = formula.as_bytes();
+    let mut end = offset;
+    while end < bytes.len() && (bytes[end] == b'$' || bytes[end].is_ascii_alphanumeric()) {
+        end += 1;
+    }
+    end > offset
+        && bytes.get(end).is_none_or(|next| {
+            matches!(
+                next,
+                b' ' | b'\n'
+                    | b','
+                    | b';'
+                    | b')'
+                    | b'}'
+                    | b'+'
+                    | b'-'
+                    | b'*'
+                    | b'/'
+                    | b'^'
+                    | b'&'
+                    | b'='
+                    | b'>'
+                    | b'<'
+                    | b'%'
+                    | b'#'
+                    | b':'
+            )
+        })
+}
+
 /// A `Range`-subtype operand is anything that can denote a reference: a cell or range (`A1`,
 /// `$A$1:C3`, `B:B`), a sheet-qualified reference, a structured reference, or a defined NAME
 /// (`Rng`, `My_Data`). Names must count — Excel intersects `Rng B:B` just like `B:B Rng` — so the
@@ -1265,7 +1321,9 @@ impl<'a> SpanTokenizer<'a> {
                 return false;
             }
             return reference_value_contains_range_colon(value)
-                || value.contains('[')
+                || (value.contains('[')
+                    && !(is_external_sheet_qualified(value)
+                        && next_is_plain_corner(self.formula.as_ref(), self.offset + 1)))
                 || (value.contains('!')
                     && next_reference_has_sheet_qualifier(self.formula, self.offset + 1));
         }
@@ -2036,7 +2094,9 @@ impl Tokenizer {
                 return false;
             }
             return reference_value_contains_range_colon(value)
-                || value.contains('[')
+                || (value.contains('[')
+                    && !(is_external_sheet_qualified(value)
+                        && next_is_plain_corner(self.formula.as_ref(), self.offset + 1)))
                 || (value.contains('!')
                     && next_reference_has_sheet_qualifier(&self.formula, self.offset + 1));
         }
