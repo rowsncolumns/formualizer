@@ -625,6 +625,78 @@ fn reference_value_contains_range_colon(value: &str) -> bool {
     value_part.contains(':')
 }
 
+/// Whether `value` is the first corner of a reference into a sheet of another workbook
+/// (`[1]Sheet1!$A$1`, `'[Book2.xlsx]My Sheet'!A`, `'C:\\x\\[Book2.xlsx]Sheet1'!1`): a book token
+/// in brackets, a sheet name, `!`, then a corner with no bracket of its own. The `:` after it joins
+/// the second corner into the same operand, as it does after `Sheet1!A1`; the `[` of a structured
+/// reference (`T[a]:T[b]`) still makes the `:` an operator.
+fn is_external_sheet_qualified(value: &str) -> bool {
+    let Some((qualifier, corner)) = value.rsplit_once('!') else {
+        return false;
+    };
+    if corner.is_empty() || corner.contains(['[', ']', '\'']) {
+        return false;
+    }
+    let qualifier = qualifier
+        .strip_prefix('\'')
+        .and_then(|q| q.strip_suffix('\''))
+        .unwrap_or(qualifier);
+    qualifier
+        .rfind('[')
+        .and_then(|lb| qualifier[lb..].find(']').map(|rb| lb + rb))
+        .is_some_and(|rb| rb > 0 && rb + 1 < qualifier.len())
+}
+
+/// Whether the text at `offset` is a range's second corner and nothing more: `$B$3`, `B`, `12`
+/// (up to three column letters, then a row number, each with an optional `$`), ended by the
+/// formula's end or by something that ends an operand. A call (`INDEX(`), a qualified reference,
+/// a structured reference or a defined name (`Total`) is not one.
+fn next_is_plain_corner(formula: &str, offset: usize) -> bool {
+    let bytes = formula.as_bytes();
+    let run = |mut at: usize, test: fn(&u8) -> bool| {
+        let start = at;
+        while bytes.get(at).is_some_and(test) {
+            at += 1;
+        }
+        (at, at - start)
+    };
+    let skip_dollar = |at: usize| at + usize::from(bytes.get(at) == Some(&b'$'));
+    let (after_letters, letters) = run(skip_dollar(offset), u8::is_ascii_alphabetic);
+    let before_digits = if letters == 0 { offset } else { after_letters };
+    let (after_digits, digits) = run(skip_dollar(before_digits), u8::is_ascii_digit);
+    let end = if digits == 0 {
+        after_letters
+    } else {
+        after_digits
+    };
+    if letters > 3 || (letters == 0 && digits == 0) {
+        return false;
+    }
+    end > offset
+        && bytes.get(end).is_none_or(|next| {
+            matches!(
+                next,
+                b' ' | b'\n'
+                    | b','
+                    | b';'
+                    | b')'
+                    | b'}'
+                    | b'+'
+                    | b'-'
+                    | b'*'
+                    | b'/'
+                    | b'^'
+                    | b'&'
+                    | b'='
+                    | b'>'
+                    | b'<'
+                    | b'%'
+                    | b'#'
+                    | b':'
+            )
+        })
+}
+
 /// A `Range`-subtype operand is anything that can denote a reference: a cell or range (`A1`,
 /// `$A$1:C3`, `B:B`), a sheet-qualified reference, a structured reference, or a defined NAME
 /// (`Rng`, `My_Data`). Names must count — Excel intersects `Rng B:B` just like `B:B Rng` — so the
@@ -1265,7 +1337,9 @@ impl<'a> SpanTokenizer<'a> {
                 return false;
             }
             return reference_value_contains_range_colon(value)
-                || value.contains('[')
+                || (value.contains('[')
+                    && !(is_external_sheet_qualified(value)
+                        && next_is_plain_corner(self.formula.as_ref(), self.offset + 1)))
                 || (value.contains('!')
                     && next_reference_has_sheet_qualifier(self.formula, self.offset + 1));
         }
@@ -2036,7 +2110,9 @@ impl Tokenizer {
                 return false;
             }
             return reference_value_contains_range_colon(value)
-                || value.contains('[')
+                || (value.contains('[')
+                    && !(is_external_sheet_qualified(value)
+                        && next_is_plain_corner(self.formula.as_ref(), self.offset + 1)))
                 || (value.contains('!')
                     && next_reference_has_sheet_qualifier(&self.formula, self.offset + 1));
         }

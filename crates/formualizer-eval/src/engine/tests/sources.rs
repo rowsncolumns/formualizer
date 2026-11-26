@@ -804,3 +804,97 @@ fn invalidate_unknown_source_errors() {
         .expect_err("unknown source should error");
     assert_eq!(err.kind, ExcelErrorKind::Name);
 }
+
+/// A range in another workbook (`[1]Sheet1!$A$1:$B$3`) is one operand, bound to a source table:
+/// the host answers the range's cached cells as the table's data
+/// (rowsncolumns/spreadsheet#1789, #1799). It is read by value everywhere, INDEX included, which
+/// has no cells of a sheet to return a reference to.
+#[test]
+fn external_range_source_is_read_by_value() {
+    let ctx = SourceCtx::default();
+    let raw = "[1]Sheet1!$A$1:$B$3";
+    let cached = |a: [f64; 3]| MemTable {
+        headers: vec!["A".into(), "B".into()],
+        data: vec![
+            vec![LiteralValue::Number(a[0]), LiteralValue::Text("x".into())],
+            vec![LiteralValue::Number(a[1]), LiteralValue::Text("y".into())],
+            vec![LiteralValue::Number(a[2]), LiteralValue::Text("z".into())],
+        ],
+    };
+    ctx.set_table(raw, Arc::new(cached([42.0, 5.0, 7.0])));
+    let mut engine: Engine<_> = Engine::new(ctx.clone(), EvalConfig::default());
+    engine.add_sheet("Sheet1").unwrap();
+    engine.define_source_table(raw, Some(1)).unwrap();
+    engine
+        .define_name(
+            "Rates",
+            NamedDefinition::Formula {
+                ast: formualizer_parse::parser::parse("=[1]Sheet1!$A$1:$B$3").unwrap(),
+                dependencies: Vec::new(),
+                range_deps: Vec::new(),
+            },
+            NameScope::Workbook,
+        )
+        .unwrap();
+    let number = LiteralValue::Number;
+    let text = |s: &str| LiteralValue::Text(s.to_string());
+    let formulas = [
+        ("=SUM([1]Sheet1!$A$1:$B$3)", number(54.0)),
+        ("=INDEX([1]Sheet1!$A$1:$B$3,2,1)", number(5.0)),
+        ("=INDEX([1]Sheet1!$A$1:$B$3,2,2)", text("y")),
+        ("=VLOOKUP(5,[1]Sheet1!$A$1:$B$3,2,FALSE)", text("y")),
+        ("=MATCH(7,INDEX([1]Sheet1!$A$1:$B$3,0,1),0)", number(3.0)),
+        ("=XMATCH(7,INDEX([1]Sheet1!$A$1:$B$3,,1))", number(3.0)),
+        ("=SUM(INDEX([1]Sheet1!$A$1:$B$3,2,))", number(5.0)),
+        ("=ROWS([1]Sheet1!$A$1:$B$3)", number(3.0)),
+        ("=COUNTIF([1]Sheet1!$A$1:$B$3,\">6\")", number(2.0)),
+        ("=SUM(Rates)", number(54.0)),
+        ("=INDEX(Rates,3,2)", text("z")),
+        ("=SUMPRODUCT((Rates=\"y\")*1)", number(1.0)),
+    ];
+    for (i, (formula, _)) in formulas.iter().enumerate() {
+        engine
+            .set_cell_formula(
+                "Sheet1",
+                i as u32 + 1,
+                1,
+                formualizer_parse::parser::parse(formula).unwrap(),
+            )
+            .unwrap();
+    }
+    // An array over the range fills its cells, and a formula reads any of them.
+    engine
+        .set_cell_formula(
+            "Sheet1",
+            1,
+            3,
+            formualizer_parse::parser::parse("=INDEX([1]Sheet1!$A$1:$B$3,0,1)*2").unwrap(),
+        )
+        .unwrap();
+    engine
+        .set_cell_formula(
+            "Sheet1",
+            1,
+            5,
+            formualizer_parse::parser::parse("=C2+SUM(C1:C3)").unwrap(),
+        )
+        .unwrap();
+    engine.evaluate_all().unwrap();
+    for (i, (formula, want)) in formulas.iter().enumerate() {
+        assert_eq!(
+            engine.get_cell_value("Sheet1", i as u32 + 1, 1).as_ref(),
+            Some(want),
+            "{formula}"
+        );
+    }
+    assert_eq!(engine.get_cell_value("Sheet1", 2, 3), Some(number(10.0)));
+    assert_eq!(engine.get_cell_value("Sheet1", 1, 5), Some(number(118.0)));
+
+    // New cached values reach every reader, through the name and the array too.
+    ctx.set_table(raw, Arc::new(cached([1.0, 2.0, 3.0])));
+    engine.invalidate_source(raw).unwrap();
+    engine.evaluate_all().unwrap();
+    assert_eq!(engine.get_cell_value("Sheet1", 1, 1), Some(number(6.0)));
+    assert_eq!(engine.get_cell_value("Sheet1", 10, 1), Some(number(6.0)));
+    assert_eq!(engine.get_cell_value("Sheet1", 1, 5), Some(number(16.0)));
+}
